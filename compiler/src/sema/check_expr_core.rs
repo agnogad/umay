@@ -111,8 +111,15 @@ impl FnChecker<'_, '_> {
             ast::ExprKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms, span),
             ast::ExprKind::While { cond, body } => self.check_while(cond, body, span),
             ast::ExprKind::Loop { body } => {
+                // `loop { break value }` has the value's type. Reporting `()` made
+                // `let z = loop { break 5i64 }` a unit where an `i64` was written,
+                // and the only way to write the same thing was a `while` with a
+                // flag -- a shape nobody wants to write.
                 let body = self.check_block(body);
-                let ty = self.cx.cx.unit();
+                let ty = match loop_break_ty(&body) {
+                    Some(ty) => ty,
+                    None => self.cx.cx.unit(),
+                };
                 HirExpr { kind: HirExprKind::Loop { body }, ty, span }
             }
             ast::ExprKind::For { pattern, iter, body } => self.check_for(pattern, iter, body, span),
@@ -470,4 +477,30 @@ pub fn parse_interpolation(src: &str, span: crate::source::Span) -> Option<ast::
         },
         _ => None,
     }
+}
+
+/// The type of the first `break value` inside a `loop` body.
+///
+/// A nested loop's breaks belong to it, so the walk stops at one instead of taking
+/// its `break` for this loop's.
+fn loop_break_ty(block: &crate::hir::HirBlock) -> Option<TyId> {
+    fn find(e: &crate::hir::HirExpr) -> Option<TyId> {
+        use crate::hir::HirExprKind;
+        if let HirExprKind::Break(Some(v)) = &e.kind {
+            return Some(v.ty);
+        }
+        if matches!(
+            e.kind,
+            HirExprKind::Loop { .. } | HirExprKind::While { .. } | HirExprKind::For { .. }
+        ) {
+            return None;
+        }
+        crate::hir::child_exprs(e).into_iter().find_map(find)
+    }
+    let body_expr = crate::hir::HirExpr {
+        kind: crate::hir::HirExprKind::Block(block.clone()),
+        ty: TyId(u32::MAX),
+        span: block.span,
+    };
+    crate::hir::child_exprs(&body_expr).into_iter().find_map(find)
 }

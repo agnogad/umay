@@ -1915,9 +1915,13 @@ fn net_binds_a_port_and_accepts() {
     // connection. This checks the address by binding, connecting and reading back.
     let source = r##"
 extern fn "connect" sys_connect(fd: i32, addr: *const u8, len: i32) -> i32
+extern fn "getpid" umay_c_getpid() -> i32
 fn main() -> i32 {
+    // The port comes from the process id, so a port left in `TIME_WAIT` by an
+    // earlier run cannot make this test fail.
+    let port = 20000u16 + (umay_c_getpid() % 20000i32) as u16
     let server = tcp_socket()
-    let addr = address(8422u16)
+    let addr = address(port)
     if !socket_bind(&server, &addr) {
         println_i64(-1)
         return 1
@@ -1941,4 +1945,38 @@ fn main() -> i32 {
 }
 "##;
     expect_stdout("net_bind_accept", source, "0\n1\n2\n");
+}
+
+#[test]
+fn a_loop_yields_the_value_it_breaks_with() {
+    // `loop { break v }` had type `()` and its head block was left empty and
+    // unreachable, so the value never arrived. Both are fixed: the loop's type is
+    // the break value's, and the head block is the body.
+    let source = r##"
+fn first_over(items: &Vec<i64>, limit: i64) -> i64 {
+    let mut i: usize = 0
+    let found = loop {
+        if i >= items.len {
+            break -1i64
+        }
+        if items.get(i) > limit {
+            break items.get(i)
+        }
+        i = i + 1usize
+    }
+    return found
+}
+fn main() -> i32 {
+    let mut v: Vec<i64> = Vec::new()
+    v = v.push(2i64)
+    v = v.push(9i64)
+    v = v.push(15i64)
+    println_i64(first_over(&v, 8i64))
+    println_i64(first_over(&v, 100i64))
+    let z = loop { break 5i64 }
+    println_i64(z)
+    return 0
+}
+"##;
+    expect_stdout("loop_break_value", source, "9\n-1\n5\n");
 }

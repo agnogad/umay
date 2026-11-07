@@ -502,8 +502,12 @@ impl Lowering<'_> {
     }
 
     pub(crate) fn lower_loop(&mut self, body: &HirBlock, e: &HirExpr) -> Operand {
+        // A `loop` has no condition, so its head is its body: one block holds the
+        // statements and a `break` jumps to the exit. A separate head block would
+        // end up empty and unreachable, which is how `loop { break 5i64 }` produced
+        // an unreachable value.
         let head = self.new_block();
-        let body_bb = self.new_block();
+        let body_bb = head;
         let exit = self.new_block();
         let value: Option<Place> = if !matches!(self.types.kind_owned(e.ty), TyKind::Unit | TyKind::Never) {
             Some(self.temp_place(e.ty))
@@ -514,8 +518,6 @@ impl Lowering<'_> {
         self.goto(head);
         self.current = head;
         self.loop_stack.push(LoopTargets { exit, head, value: value.as_ref().map(|p| (p.local, e.ty)) });
-        self.current = body_bb;
-        self.goto(body_bb);
         self.current = body_bb;
         self.lower_block(body);
         self.loop_stack.pop();

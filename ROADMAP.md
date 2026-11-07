@@ -272,11 +272,11 @@ resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
   string rather than null, so a caller need not check before printing it.
   `file_size` now seeks to the end instead of reading the file, and `is_dir`
   tells a directory from a file.
-- [ ] `net`: TCP basics in the standard library. **Not needed for a server
-  today** — `socket`/`bind`/`listen`/`accept`/`read`/`write` work through
-  `extern fn`, and `examples/http-server.um` plus a `HashMap`-routed probe both
-  answer real `curl` requests. What a library would add is the boilerplate in
-  `request_path`-style helpers, not capability.
+- [x] `net` in `stdlib/net.um` — `Socket`, `Address`, `tcp_socket`,
+  `socket_bind`, `socket_listen`, `socket_accept`, `socket_read`,
+  `socket_write_all`, `socket_close`. The address layout lives here because a
+  port written whole binds a different port and still succeeds.
+  `examples/http-router.um` is built on it.
 
 ### What a web backend needs that is still missing
 

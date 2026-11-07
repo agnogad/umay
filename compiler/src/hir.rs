@@ -720,3 +720,123 @@ fn rewrite_expr(e: &mut HirExpr, map: &std::collections::HashMap<TyId, TyId>) {
         HirExprKind::Defer(b) | HirExprKind::Unsafe(b) => rewrite_block(b, map),
     }
 }
+
+/// Every expression directly inside `e`, in source order.
+///
+/// A pass that needs to look through an expression without re-implementing the
+/// shape of all of them walks this. Blocks are descended into, because a `break`
+/// or a call is usually a statement or a tail rather than a bare operand.
+pub fn child_exprs(e: &HirExpr) -> Vec<&HirExpr> {
+    let mut out: Vec<&HirExpr> = Vec::new();
+    fn push_block<'a>(b: &'a HirBlock, out: &mut Vec<&'a HirExpr>) {
+        for st in &b.stmts {
+            match &st.kind {
+                HirStmtKind::Let { init, .. } => {
+                    if let Some(i) = init {
+                        out.push(i);
+                    }
+                }
+                HirStmtKind::Expr(x) => out.push(x),
+            }
+        }
+        if let Some(t) = &b.tail {
+            out.push(t);
+        }
+    }
+    match &e.kind {
+        HirExprKind::Field { base, .. }
+        | HirExprKind::TupleIndex { base, .. }
+        | HirExprKind::Deref(base)
+        | HirExprKind::Move(base)
+        | HirExprKind::Cast { expr: base, .. }
+        | HirExprKind::Try(base) => out.push(base),
+        HirExprKind::Unary { operand, .. } => out.push(operand),
+        HirExprKind::Assign { place, value } => {
+            out.push(place);
+            out.push(value);
+        }
+        HirExprKind::AssignOp { place, value, .. } => {
+            out.push(place);
+            out.push(value);
+        }
+        HirExprKind::Ref { place, .. } => out.push(place),
+        HirExprKind::Index { base, index } => {
+            out.push(base);
+            out.push(index);
+        }
+        HirExprKind::Binary { lhs, rhs, .. } => {
+            out.push(lhs);
+            out.push(rhs);
+        }
+        HirExprKind::MethodCall { receiver, args, .. }
+        | HirExprKind::BuiltinMethod { receiver, args, .. }
+        | HirExprKind::TraitMethodCall { receiver, args, .. } => {
+            out.push(receiver);
+            out.extend(args.iter());
+        }
+        HirExprKind::Call { callee, args } => {
+            out.push(callee);
+            out.extend(args.iter());
+        }
+        HirExprKind::StructLit { fields, base, .. } => {
+            for f in fields {
+                out.push(&f.value);
+            }
+            if let Some(b) = base {
+                out.push(b);
+            }
+        }
+        HirExprKind::StructVariant { fields, .. } => {
+            for f in fields {
+                out.push(&f.value);
+            }
+        }
+        HirExprKind::TupleVariant { args, .. }
+        | HirExprKind::ArrayLit { elems: args }
+        | HirExprKind::Tuple { elems: args } => out.extend(args.iter()),
+        HirExprKind::ArrayRepeat { value, .. } => out.push(value),
+        HirExprKind::RangeExpr { start, end, .. } => {
+            out.push(start);
+            out.push(end);
+        }
+        HirExprKind::IterSource { source, .. } => out.push(source),
+        HirExprKind::PtrOffset { ptr, count } => {
+            out.push(ptr);
+            out.push(count);
+        }
+        HirExprKind::If { cond, then_block, else_branch } => {
+            out.push(cond);
+            push_block(then_block, &mut out);
+            if let Some(b) = else_branch {
+                out.push(b);
+            }
+        }
+        HirExprKind::Match { scrutinee, arms } => {
+            out.push(scrutinee);
+            for arm in arms {
+                out.push(&arm.body);
+            }
+        }
+        HirExprKind::While { cond, body } => {
+            out.push(cond);
+            push_block(body, &mut out);
+        }
+        HirExprKind::Loop { body } | HirExprKind::Block(body) | HirExprKind::Defer(body) | HirExprKind::Unsafe(body) => {
+            push_block(body, &mut out);
+        }
+        HirExprKind::For { iter, body, .. } => {
+            out.push(iter);
+            push_block(body, &mut out);
+        }
+        HirExprKind::Return(Some(v)) | HirExprKind::Break(Some(v)) => out.push(v),
+        HirExprKind::StrInterp { parts } => {
+            for p in parts {
+                if let HirStrPart::Value(v) = p {
+                    out.push(v);
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
