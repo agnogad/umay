@@ -316,11 +316,24 @@ impl<'a, 't> Isel<'a, 't> {
                         other => return Err(format!("index of non-array {other:?}")),
                     };
                     let size = self.layouts.layout(elem_ty).map_err(|e| format!("{e:?}"))?.size;
-                    let index_reg = self.operand_to_reg(by)?;
+                    // The base comes first and is pinned. Taking the index first
+                    // could hand back the register the base is already in, and
+                    // `(%rax,%rax,1)` addresses `base + base` rather than
+                    // `base + i` -- a local array read would then fault.
                     let base_reg = self.mem_to_reg(&mem, RegWidth::W64)?;
-                    let scaled = Mem::base(base_reg).indexed(index_reg, scale_for(size));
-                    mem = Mem::base(scaled.base.unwrap()).with_offset(0);
-                    mem.index = scaled.index;
+                    let index_reg = self.operand_to_reg(by)?;
+                    // The element address is computed once, into a register of its
+                    // own, so that base and index never have to survive in two
+                    // registers at the same time. Leaving both in a `Mem` operand
+                    // let the allocator put them in one register, and
+                    // `(%rax,%rax,1)` addresses `base + base` -- a local array read
+                    // then faults.
+                    let addr = self.vreg();
+                    self.emit(Inst::Lea {
+                        src: Mem::base(base_reg).indexed(index_reg, scale_for(size)),
+                        dst: MOperand::Reg(addr),
+                    });
+                    mem = Mem::base(addr).with_offset(0);
                     current_ty = elem_ty;
                 }
             }

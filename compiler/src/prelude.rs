@@ -45,6 +45,8 @@ pub const PRELUDE_SOURCE: &str = concat!(
     include_str!("../../stdlib/http.um"),
     "\n",
     include_str!("../../stdlib/iter.um"),
+    "\n",
+    include_str!("../../stdlib/json.um"),
 );
 
 /// The name the prelude's file is registered under in the source map.

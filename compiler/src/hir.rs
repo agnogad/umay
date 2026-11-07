@@ -212,9 +212,14 @@ pub enum HirStmtKind {
     /// One or more bindings introduced by `let`. A destructuring `let` binds
     /// several locals at once.
     ///
-    /// `init` is the evaluated initializer. It is `None` only when a
-    /// destructuring `let` already consumed it into the pattern bindings.
-    Let { bindings: Vec<LocalId>, init: Option<Box<HirExpr>> },
+    /// `init` is the evaluated initializer. `pattern` is what the bindings came
+    /// from, so lowering can give each one its own projection instead of handing
+    /// the whole value to the first.
+    Let {
+        bindings: Vec<LocalId>,
+        init: Option<Box<HirExpr>>,
+        pattern: HirPattern,
+    },
     Expr(HirExpr),
 }
 
@@ -511,6 +516,43 @@ pub fn rewrite_types(block: &mut HirBlock, map: &std::collections::HashMap<TyId,
     rewrite_block(block, map);
 }
 
+/// Rewrites the types a pattern mentions, so a binding stays in step with the
+/// value it came from after a substitution.
+fn map_pattern_tys(pattern: &mut HirPattern, map: &std::collections::HashMap<TyId, TyId>) {
+    map_ty(&mut pattern.ty, map);
+    match &mut pattern.kind {
+        HirPatternKind::Tuple(items) | HirPatternKind::Or(items) => {
+            for p in items {
+                map_pattern_tys(p, map);
+            }
+        }
+        HirPatternKind::Struct { fields, .. } => {
+            for f in fields {
+                map_pattern_tys(&mut f.pattern, map);
+            }
+        }
+        HirPatternKind::Variant { fields, .. } => match fields {
+            VariantPatternFields::Tuple(items) => {
+                for p in items {
+                    map_pattern_tys(p, map);
+                }
+            }
+            VariantPatternFields::Struct { fields, .. } => {
+                for f in fields {
+                    map_pattern_tys(&mut f.pattern, map);
+                }
+            }
+            VariantPatternFields::Unit => {}
+        },
+        HirPatternKind::Slice { elems, .. } => {
+            for p in elems {
+                map_pattern_tys(p, map);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn map_ty(ty: &mut TyId, map: &std::collections::HashMap<TyId, TyId>) {
     if let Some(t) = map.get(ty) {
         *ty = *t;
@@ -520,10 +562,11 @@ fn map_ty(ty: &mut TyId, map: &std::collections::HashMap<TyId, TyId>) {
 fn rewrite_block(block: &mut HirBlock, map: &std::collections::HashMap<TyId, TyId>) {
     for stmt in &mut block.stmts {
         match &mut stmt.kind {
-            HirStmtKind::Let { init, .. } => {
+            HirStmtKind::Let { init, pattern, .. } => {
                 if let Some(i) = init {
                     rewrite_expr(i, map);
                 }
+                map_pattern_tys(pattern, map);
             }
             HirStmtKind::Expr(e) => rewrite_expr(e, map),
         }

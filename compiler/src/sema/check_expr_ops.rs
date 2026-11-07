@@ -316,7 +316,19 @@ impl FnChecker<'_, '_> {
         loop {
             match &cur.kind {
                 HirExprKind::Local(id) => {
-                    let mutable = self.locals.get(id.0 as usize).map(|l| l.mutable).unwrap_or(true);
+                    // A `&mut T` binding is a place that may be written through
+                    // even when it was bound with a plain `let`: the mutability is
+                    // in the type, and the borrow checker already proved the
+                    // reference exclusive. `fn go(c: &mut C) { c.bump() }` is the
+                    // ordinary case of this, and the method's `&mut self` reaches
+                    // it as a write through `c`.
+                    let by_mut_ref = self
+                        .locals
+                        .get(id.0 as usize)
+                        .map(|l| matches!(self.cx.cx.kind(l.ty), crate::types::TyKind::RefMut(_)))
+                        .unwrap_or(false);
+                    let mutable = by_mut_ref
+                        || self.locals.get(id.0 as usize).map(|l| l.mutable).unwrap_or(true);
                     if !mutable {
                         let name = self.locals.get(id.0 as usize).map(|l| l.name.clone()).unwrap_or_default();
                         self.push(

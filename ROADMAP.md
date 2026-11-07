@@ -255,7 +255,10 @@ resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
   `unwrap_or` on `Option<T>`; `is_ok`, `is_err`, `unwrap_or`, `ok` on
   `Result<T, E>`. An `Option` with no way to name `T` is a compile error rather
   than a guess, and a `Result` may name only one of its two parameters.
-- [ ] `Iterator` basics.
+- [x] `Iterator` basics in `stdlib/iter.um` — `Iterator<T>` as a trait, with
+  trait bounds on generic parameters. A method call on a bounded parameter is
+  resolved during monomorphisation to that type's `impl`, so dispatch is static
+  and there is no vtable. A bound with no `impl` is `E3001`, never dropped.
 - [x] `HashMap` in `stdlib/hashmap.um`, in the prelude — open addressing with
   linear probing and an FNV-1a hash: `new`, `len`, `is_empty`, `insert`,
   `get_or`, `has_key`, `value_at`, `release`. A missing key yields the caller's
@@ -290,11 +293,17 @@ Measured against a working router probe, in the order the gaps bite:
 - [x] `==` and `!=` on `str` compare bytes, not addresses. `str` is a pointer,
   so the pointer comparison called two equal strings different, which is what
   made every routed request answer 404.
-- [ ] A byte-slice type that carries its length, so a request body is one value
-  instead of a pointer plus a manual length.
-- [ ] Header parsing and a request/response type — library work, not language
-  work.
-- [ ] `Iterator`, so a caller can loop over a collection without an index.
+- [x] A byte-slice type that carries its length (`stdlib/bytes.um`). `Bytes` is
+  an address plus a count and stands in for a body. It is a library type, not a
+  language slice: `&[u8]` in the type system is still missing.
+- [x] JSON, read and written over counted bytes (ADR 0012). `json_parse`,
+  `json_field`, `json_get`, `json_at`, `json_count`, `json_text`, `json_i64`,
+  `json_bool`, and the writers `json_quote`/`json_write_i64`. A value borrows from
+  the document and a number keeps its decimal text, so `0.1` survives a round
+  trip.
+- [x] Header parsing and a request/response type in `stdlib/http.um` —
+  `Request`, `Response`, `parse_request`, `content_length`, `status_text`.
+- [x] `Iterator`, so a caller can loop over a collection without an index.
 - [x] Concurrency, process-based (ADR 0011). `spawn`, `is_child` and `wait` in
   `stdlib/process.um`. `examples/http-router.um` accepts in one process and
   hands each connection to a child, so connections are served at once. A pipe

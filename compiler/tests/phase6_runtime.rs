@@ -1719,3 +1719,150 @@ fn an_annotation_outranks_a_defaulted_literal_in_a_variant() {
         "1\n9\n",
     );
 }
+
+#[test]
+fn a_local_array_is_addressed_correctly() {
+    // A local array's base and index must not land in one register: `(%rax,%rax,1)`
+    // addresses `base + base`, which faulted on every local array read.
+    expect_stdout(
+        "local_array_index",
+        "fn main() -> i32 {\n\
+             let d = [1u8, 2u8, 3u8, 4u8]\n\
+             println_i64(d[0] as i64)\n\
+             println_i64(d[2] as i64)\n\
+             let mut m = [0u8; 4]\n\
+             m[0] = 65u8\n\
+             m[3] = 66u8\n\
+             println_i64(m[0] as i64)\n\
+             println_i64(m[3] as i64)\n\
+             return 0\n\
+         }",
+        "1\n3\n65\n66\n",
+    );
+}
+
+#[test]
+fn a_let_destructures_a_tuple() {
+    // Every binding of a destructuring `let` must receive its own part of the
+    // value. Only the first used to be assigned, so reading the second was
+    // reported as reading an uninitialised local.
+    expect_stdout(
+        "let_tuple_destructure",
+        "fn pair(n: i64) -> (i64, i64) { return (n, n * 2i64) }\n\
+         fn main() -> i32 {\n\
+             let (a, b) = pair(5i64)\n\
+             println_i64(a)\n\
+             println_i64(b)\n\
+             let (c, d) = (7i64, 8i64)\n\
+             println_i64(c + d)\n\
+             return 0\n\
+         }",
+        "5\n10\n15\n",
+    );
+}
+
+#[test]
+fn a_mutable_reference_parameter_can_call_a_mutable_method() {
+    // The mutability of a `&mut T` binding lives in its type, not in how it was
+    // declared, so `c.bump()` must not be refused as a write to an immutable
+    // binding. The reference must be reborrowed for the call, not moved, so it can
+    // be used again afterwards.
+    expect_stdout(
+        "mut_ref_parameter",
+        "struct C { n: i64 }\n\
+         impl C {\n\
+             fn bump(&mut self) { self.n = self.n + 1 }\n\
+         }\n\
+         fn step(c: &mut C) { c.bump() }\n\
+         fn twice(c: &mut C) { step(c)\n step(c) }\n\
+         fn main() -> i32 {\n\
+             let mut c = C { n: 0i64 }\n\
+             step(&mut c)\n\
+             twice(&mut c)\n\
+             println_i64(c.n)\n\
+             return 0\n\
+         }",
+        "3\n",
+    );
+}
+
+#[test]
+fn a_match_arm_block_may_be_followed_by_another_arm() {
+    // A block-bodied arm does not need a comma, so `_ => ..` after
+    // `Variant(x) => { .. }` is legal.
+    expect_stdout(
+        "match_block_arm_then_wildcard",
+        "fn main() -> i32 {\n\
+             let v: Option<i64> = Option::Some(3)\n\
+             match v {\n\
+                 Option::Some(x) => {\n\
+                     println_i64(x)\n\
+                 }\n\
+                 _ => println_i64(-1),\n\
+             }\n\
+             return 0\n\
+         }",
+        "3\n",
+    );
+}
+
+#[test]
+fn json_fields_are_read_by_name() {
+    // The document is a normal UMAY string literal, so the escapes in it are
+    // UMAY's: `\{` keeps a brace from starting an interpolation and `\"` embeds a
+    // quote.
+    let source = r##"
+fn main() -> i32 {
+    let doc = Bytes::from_str("\{\"name\":\"umay\",\"version\":3,\"ok\":true,\"tags\":[10,20]}")
+    let nv = json_field(&doc, "name")
+    let name = json_text(nv)
+    let want = Bytes::from_str("umay")
+    println_i64(if name.equals(&want) { 1 } else { 0 })
+    let version = json_field(&doc, "version")
+    println_i64(json_i64(version))
+    let ok = json_field(&doc, "ok")
+    println_i64(if json_bool(ok) { 1 } else { 0 })
+    let tags = json_field(&doc, "tags")
+    match tags {
+        Json::Array(body) => {
+            println_i64(json_count(&body) as i64)
+            println_i64(json_i64(json_at(&body, 1)))
+        }
+        _ => println_i64(-1),
+    }
+    return 0
+}
+"##;
+    expect_stdout("json_read", source, "1\n3\n1\n2\n20\n");
+}
+
+#[test]
+fn json_numbers_round_trip_their_text() {
+    // A number is kept as its decimal text: `0.1` has no exact binary float, so
+    // converting on the way in would change the value a server echoes back.
+    let source = r##"
+fn main() -> i32 {
+    let buf = alloc(64)
+    let n = json_write_i64(buf, 64usize, -7i64)
+    println_i64(n)
+    unsafe {
+        write_byte((buf as usize + n as usize) as *mut u8, 0u8)
+        println(buf as *const u8 as &str)
+    }
+    let text = Bytes::from_str("a\"b")
+    let q = json_quote(buf, 64usize, text)
+    unsafe {
+        write_byte((buf as usize + q as usize) as *mut u8, 0u8)
+        println(buf as *const u8 as &str)
+    }
+    let doc = Bytes::from_str("\{\"n\":0.1\}")
+    let nv = json_field(&doc, "n")
+    match nv {
+        Json::Number(text) => println_i64(text.len as i64),
+        _ => println_i64(-1),
+    }
+    return 0
+}
+"##;
+    expect_stdout("json_write", source, "2\n-7\n\"a\\\"b\"\n3\n");
+}

@@ -663,6 +663,30 @@ impl Parser {
         Expr { kind: ExprKind::If { cond: Box::new(cond), then_block, else_branch }, span: start.to(end) }
     }
 
+    /// True when the current token can begin a pattern, so another arm follows.
+    ///
+    /// A pattern starts with an identifier, `_`, a literal, `(`, `[`, `&` or a
+    /// unary minus. Any other token means the arms are over, and the caller's
+    /// `}` check reports what is missing.
+    fn starts_match_arm(&self) -> bool {
+        matches!(
+            self.kind(),
+            TokenKind::Ident(_)
+                | TokenKind::Underscore
+                | TokenKind::Int { .. }
+                | TokenKind::Float { .. }
+                | TokenKind::Str(_)
+                | TokenKind::StrInterp(_)
+                | TokenKind::Char(_)
+                | TokenKind::Keyword(crate::token::Keyword::True)
+                | TokenKind::Keyword(crate::token::Keyword::False)
+                | TokenKind::LParen
+                | TokenKind::LBracket
+                | TokenKind::Amp
+                | TokenKind::Minus
+        )
+    }
+
     fn parse_match(&mut self) -> Expr {
         let start = self.span();
         self.advance(); // match
@@ -687,8 +711,10 @@ impl Parser {
             let end = body.span;
             arms.push(MatchArm { pattern, guard, body, span: arm_start.to(end) });
             if !self.eat(&TokenKind::Comma) {
-                // Arms may omit the comma before `}`.
-                if !self.at(&TokenKind::RBrace) {
+                // Arms may omit the comma when the previous one ended in a block:
+                // `Json::Array(b) => { .. }` followed by `_ => ..`. Only a `}` or
+                // the start of another arm is a legal place to stop.
+                if !self.at(&TokenKind::RBrace) && !self.starts_match_arm() {
                     break;
                 }
             }

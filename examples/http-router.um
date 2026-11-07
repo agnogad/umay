@@ -82,6 +82,14 @@ fn write_decimal(fd: i32, value: usize) {
     dealloc(digits)
 }
 
+// Appends one byte at `at`, returning the new end.
+fn put_byte(dst: *mut u8, at: usize, byte: u8) -> usize {
+    unsafe {
+        write_byte((dst as usize + at) as *mut u8, byte)
+    }
+    return at + 1
+}
+
 // Answers one connection. Run in a child, so it owns what it allocates.
 fn serve_one(conn: i32, table: *const Route, count: usize) {
     let buf = alloc(2048)
@@ -89,6 +97,25 @@ fn serve_one(conn: i32, table: *const Route, count: usize) {
     let request = parse_request(Bytes::view(buf as *const u8, got as usize))
     if request.target().is_empty() {
         send(conn, Response::new(400))
+    } else if {
+        let json_path = Bytes::from_str("/api/json")
+        request.target().equals(&json_path)
+    } {
+        // The reply is written with the JSON writer rather than assembled by hand,
+        // so the quoting and the number formatting are the library's business.
+        let text = alloc(256)
+        let key = Bytes::from_str("umay")
+        let mut used: usize = 0
+        used = json_quote(text, 256usize, key) as usize
+        used = put_byte(text, used, 58u8)
+        unsafe {
+            used = used + json_write_i64((text as usize + used) as *mut u8, 128usize, 1i64) as usize
+        }
+        unsafe {
+            write_byte((text as usize + used) as *mut u8, 0u8)
+        }
+        send(conn, Response::new(200).with_body(Bytes::view(text as *const u8, used)))
+        dealloc(text)
     } else {
         let body = route_body(table, count, request.target())
         if unsafe { body as usize } == 0 {

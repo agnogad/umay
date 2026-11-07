@@ -183,8 +183,8 @@ impl<'c, 's> FnChecker<'c, 's> {
     fn check_stmt(&mut self, stmt: &ast::Stmt, out: &mut Vec<HirStmt>) {
         match &stmt.kind {
             ast::StmtKind::Let(l) => {
-                let (bindings, init) = self.check_let(l);
-                out.push(HirStmt { kind: HirStmtKind::Let { bindings, init }, span: stmt.span });
+                let (bindings, init, pattern) = self.check_let(l);
+                out.push(HirStmt { kind: HirStmtKind::Let { bindings, init, pattern }, span: stmt.span });
             }
             ast::StmtKind::Expr(e) => {
                 let checked = self.check_expr(e);
@@ -208,7 +208,7 @@ impl<'c, 's> FnChecker<'c, 's> {
     }
 
     /// Checks a `let`, introducing locals for every binding in its pattern.
-    fn check_let(&mut self, l: &ast::LetStmt) -> (Vec<LocalId>, Option<Box<HirExpr>>) {
+    fn check_let(&mut self, l: &ast::LetStmt) -> (Vec<LocalId>, Option<Box<HirExpr>>, crate::hir::HirPattern) {
         // `let PATTERN = EXPR else { ... }` parses, but nothing downstream reads
         // the `else` block, so its body would never run and a refutable pattern
         // would bind whatever the payload happened to be. Refusing is the only
@@ -289,9 +289,11 @@ impl<'c, 's> FnChecker<'c, 's> {
         let pattern = self.bind_pattern(&l.pattern, binding_ty, l.mutable);
         let mut ids = Vec::new();
         collect_hir_binding_locals(&pattern, &mut ids);
-        // The initializer is kept so that MIR can evaluate it. Destructuring is
-        // handled during lowering, which reads the parts out of the temporary.
-        (ids, init)
+        // The initializer is kept so that MIR can evaluate it, and the pattern is
+        // kept so lowering knows which part of it each binding came from: a
+        // destructuring `let` gives every binding its own projection, not just the
+        // first one the whole value.
+        (ids, init, pattern)
     }
 
     /// Verifies that a literal initialiser fits the annotated type.
