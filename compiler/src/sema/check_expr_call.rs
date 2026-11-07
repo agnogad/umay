@@ -602,15 +602,33 @@ impl FnChecker<'_, '_> {
             } else {
                 provided.push(f.name.clone());
             }
+            let field_index = info
+                .fields
+                .iter()
+                .position(|sf| sf.name == f.name)
+                .unwrap_or(0) as u32;
             if self.cx.cx.is_error(field.ty) || self.cx.cx.is_error(value.ty) {
-                inits.push(HirFieldInit { name: f.name.clone(), span: f.name_span, index: 0, value });
+                inits.push(HirFieldInit {
+                    name: f.name.clone(),
+                    span: f.name_span,
+                    index: field_index,
+                    value,
+                });
                 continue;
             }
             if (self.cx.cx.is_integer_var(value.ty) && self.cx.cx.is_integer(field.ty))
                 || (self.cx.cx.is_float_var(value.ty) && self.cx.cx.is_float(field.ty))
                 || self.cx.types_compatible(field.ty, value.ty)
             {
-                inits.push(HirFieldInit { name: f.name.clone(), span: f.name_span, index: 0, value });
+                // A literal takes the declared field type, so that no inference
+                // variable survives into MIR.
+                let value = self.coerce_literal(value, field.ty);
+                inits.push(HirFieldInit {
+                    name: f.name.clone(),
+                    span: f.name_span,
+                    index: field_index,
+                    value,
+                });
             } else {
                 let want = self.cx.ty_name(field.ty);
                 let got = self.cx.ty_name(value.ty);
@@ -622,7 +640,12 @@ impl FnChecker<'_, '_> {
                     .at(value.span)
                     .with_cause("struct field initialisers must match the declared field type"),
                 );
-                inits.push(HirFieldInit { name: f.name.clone(), span: f.name_span, index: 0, value });
+                inits.push(HirFieldInit {
+                    name: f.name.clone(),
+                    span: f.name_span,
+                    index: field_index,
+                    value,
+                });
             }
         }
 

@@ -654,6 +654,9 @@ impl<'a> Checker<'a> {
         if !fcx.cx.cx.is_error(declared_ret) && !fcx.cx.cx.is_error(block_ty) {
             let compatible = match (fcx.cx.cx.kind(declared_ret).clone(), fcx.cx.cx.kind(block_ty).clone()) {
                 (TyKind::Unit, _) if block_reaches_end_without_value(&block) => true,
+                // A body that diverges (`{ return 1 }`, `{ panic!() }`) never
+                // produces a value, so it satisfies any return type.
+                (_, TyKind::Never) => true,
                 _ => fcx.cx.types_compatible(declared_ret, block_ty),
             };
             if !compatible {
@@ -675,8 +678,17 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let locals = fcx.finish_locals();
-        let body_hir = block;
+        let defaults = fcx.literal_defaults();
+        let mut locals = fcx.finish_locals();
+        let mut body_hir = block;
+        // Rewrite unresolved literal types in the body so that lowering sees
+        // concrete types everywhere.
+        crate::hir::rewrite_types(&mut body_hir, &defaults);
+        for l in &mut locals {
+            if let Some(t) = defaults.get(&l.ty) {
+                l.ty = *t;
+            }
+        }
         if let Some(info) = self.hir.fns.iter_mut().find(|x| x.id == id) {
             info.body = Some(body_hir);
             info.locals = locals;

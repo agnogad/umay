@@ -18,9 +18,17 @@
 pub mod ast;
 pub mod cache;
 pub mod diagnostics;
+pub mod drop_elab;
 pub mod explain;
 pub mod hir;
 pub mod lexer;
+pub mod lower;
+pub mod lower_expr;
+pub mod lower_flow;
+pub mod lower_match;
+pub mod mir;
+pub mod mir_parse;
+pub mod mir_print;
 pub mod parser;
 pub mod sema;
 pub mod source;
@@ -88,6 +96,7 @@ pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
     let mut diagnostics = out.diagnostics;
     if !diagnostics.has_errors() {
         let sema = sema::analyze(&out.program, &map);
+        let sema_ok = !sema.diagnostics.has_errors();
         for d in sema.diagnostics.items() {
             let mut d = d.clone();
             if let Some(entry) = explain::lookup(d.code) {
@@ -101,8 +110,43 @@ pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
             diagnostics.push(d);
         }
         diagnostics.sort();
+        let _ = sema_ok;
     }
     (diagnostics, map)
+}
+
+/// Runs the pipeline as far as MIR and returns the printed MIR.
+///
+/// This is the `umay mir` entry point and the basis of the Phase 3 tests: every
+/// program that type-checked must produce MIR.
+pub fn lower_to_mir(name: &str, text: &str) -> Result<String, (Diagnostics, SourceMap)> {
+    let mut map = SourceMap::new();
+    let id = map.add(name, text);
+    let out = parse_file(&map, id);
+    let mut diagnostics = out.diagnostics;
+    if diagnostics.has_errors() {
+        return Err((diagnostics, map));
+    }
+    let mut sema = sema::analyze(&out.program, &map);
+    for d in sema.diagnostics.items() {
+        let mut d = d.clone();
+        if let Some(entry) = explain::lookup(d.code) {
+            if d.cause.is_none() {
+                d.cause = Some(entry.summary.to_string());
+            }
+            if d.explanation.is_none() {
+                d.explanation = Some(entry.explanation.to_string());
+            }
+        }
+        diagnostics.push(d);
+    }
+    diagnostics.sort();
+    if diagnostics.has_errors() {
+        return Err((diagnostics, map));
+    }
+    let mut lowered = lower::lower(&sema.hir, &mut sema.types);
+    drop_elab::elaborate(&mut lowered.program, &sema.types);
+    Ok(mir_print::print_program(&lowered.program, &mut sema.types))
 }
 
 /// Renders all diagnostics of a compilation for humans.

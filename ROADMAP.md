@@ -92,7 +92,7 @@ the suite is accepted; every accepted program produces an HIR.
 
 ---
 
-## Phase 3 — HIR and MIR · planned
+## Phase 3 — HIR and MIR · done
 
 - HIR: names resolved, sugar lowered (`for`, `?`, method calls, interpolation).
 - MIR: basic blocks, places, assignments, moves, borrows, drops, calls.
@@ -100,6 +100,24 @@ the suite is accepted; every accepted program produces an HIR.
 
 Exit criteria: every valid program lowers to MIR; MIR is printable and
 round-trippable for tests.
+
+Delivered:
+
+- `compiler/src/mir.rs` — `Body`, `BasicBlock`, `Place` with projections,
+  `Operand`, `Rvalue`, `Statement`, `Terminator`, `MirProgram`.
+- `compiler/src/lower*.rs` — the lowering, split by concern: expressions and
+  places, operators and control flow, `match` and interpolation. Every
+  sub-expression becomes a temporary, every branch an explicit block.
+- `compiler/src/drop_elab.rs` — a reachability-aware live-drop analysis that
+  inserts `Drop` terminators on each exit path and honours moves.
+- `compiler/src/mir_print.rs` and `mir_parse.rs` — text format and its parser;
+  `umay mir <file>` prints it.
+- 30 tests in `compiler/tests/phase3_mir.rs`, including totality over every
+  construct, drop placement, round trip, and no-panic over all input prefixes.
+
+Deferred to later phases: optimisation passes (Phase 5), real `Drop` impls and
+field-wise drop analysis, `String` as a distinct owning type, and borrow
+checking of the MIR (Phase 4).
 
 ---
 
@@ -109,7 +127,8 @@ round-trippable for tests.
 - Move analysis; partial moves.
 - Borrow analysis with both conflicting origins reported.
 - Lifetime inference and elision rules from `docs/memory-model.md`.
-- Drop elaboration with drop flags on conditional paths.
+- Drop elaboration refined to field-wise precision (Phase 3 handles whole
+  locals).
 - `unsafe` tracking and raw-pointer restrictions.
 - Diagnostics: `E0201`–`E0213`.
 - Adversarial test suite: use-after-move, double mutable borrow,

@@ -24,7 +24,15 @@ impl FnChecker<'_, '_> {
         let ty = match &else_hir {
             None => {
                 // Without `else`, the branch's value is discarded.
-                if !self.cx.cx.is_error(then_ty) && !is_unit(&self.cx.cx, then_ty) && then_block.tail.is_some() {
+                // A diverging branch (`{ break }`, `{ return }`, `{ panic!() }`)
+                // produces no value to discard, so there is nothing to warn
+                // about: the branch leaves the `if` altogether.
+                let diverges = matches!(self.cx.cx.kind(then_ty), TyKind::Never);
+                if !self.cx.cx.is_error(then_ty)
+                    && !is_unit(&self.cx.cx, then_ty)
+                    && !diverges
+                    && then_block.tail.is_some()
+                {
                     let name = self.cx.ty_name(then_ty);
                     self.push(
                         Diagnostic::warning(

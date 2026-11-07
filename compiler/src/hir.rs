@@ -202,7 +202,10 @@ pub struct HirStmt {
 pub enum HirStmtKind {
     /// One or more bindings introduced by `let`. A destructuring `let` binds
     /// several locals at once.
-    Let { bindings: Vec<LocalId> },
+    ///
+    /// `init` is the evaluated initializer. It is `None` only when a
+    /// destructuring `let` already consumed it into the pattern bindings.
+    Let { bindings: Vec<LocalId>, init: Option<Box<HirExpr>> },
     Expr(HirExpr),
 }
 
@@ -460,5 +463,170 @@ impl Hir {
             return e.name.clone();
         }
         "<unknown>".to_string()
+    }
+}
+
+/// Rewrites every `TyId` in the tree according to `map`.
+///
+/// Used by the checker to replace literal inference variables (`{integer}`,
+/// `{float}`) with their defaults once checking is done. Lowering never has to
+/// know that inference happened.
+/// Rewrites literal defaults into every place a type is stored in the HIR,
+/// including struct-literal field types and local declarations.
+pub fn rewrite_types(block: &mut HirBlock, map: &std::collections::HashMap<TyId, TyId>) {
+    if map.is_empty() {
+        return;
+    }
+    rewrite_block(block, map);
+}
+
+fn map_ty(ty: &mut TyId, map: &std::collections::HashMap<TyId, TyId>) {
+    if let Some(t) = map.get(ty) {
+        *ty = *t;
+    }
+}
+
+fn rewrite_block(block: &mut HirBlock, map: &std::collections::HashMap<TyId, TyId>) {
+    for stmt in &mut block.stmts {
+        match &mut stmt.kind {
+            HirStmtKind::Let { init, .. } => {
+                if let Some(i) = init {
+                    rewrite_expr(i, map);
+                }
+            }
+            HirStmtKind::Expr(e) => rewrite_expr(e, map),
+        }
+    }
+    if let Some(t) = &mut block.tail {
+        rewrite_expr(t, map);
+    }
+}
+
+fn rewrite_expr(e: &mut HirExpr, map: &std::collections::HashMap<TyId, TyId>) {
+    map_ty(&mut e.ty, map);
+    match &mut e.kind {
+        HirExprKind::IntLit { .. }
+        | HirExprKind::FloatLit { .. }
+        | HirExprKind::StrLit(_)
+        | HirExprKind::CharLit(_)
+        | HirExprKind::BoolLit(_)
+        | HirExprKind::Local(_)
+        | HirExprKind::FnRef(_)
+        | HirExprKind::ConstRef(_)
+        | HirExprKind::UnitVariant { .. }
+        | HirExprKind::Continue
+        | HirExprKind::Error => {}
+        HirExprKind::StrInterp { parts } => {
+            for p in parts {
+                if let HirStrPart::Value(v) = p {
+                    rewrite_expr(v, map);
+                }
+            }
+        }
+        HirExprKind::Unary { operand, .. }
+        | HirExprKind::Deref(operand)
+        | HirExprKind::Move(operand)
+        | HirExprKind::Try(operand) => rewrite_expr(operand, map),
+        HirExprKind::Binary { lhs, rhs, .. }
+        | HirExprKind::Assign { place: lhs, value: rhs }
+        | HirExprKind::AssignOp { place: lhs, value: rhs, .. } => {
+            rewrite_expr(lhs, map);
+            rewrite_expr(rhs, map);
+        }
+        HirExprKind::Ref { place, .. } => rewrite_expr(place, map),
+        HirExprKind::Cast { expr, to } => {
+            rewrite_expr(expr, map);
+            map_ty(to, map);
+        }
+        HirExprKind::Call { callee, args } => {
+            rewrite_expr(callee, map);
+            for a in args {
+                rewrite_expr(a, map);
+            }
+        }
+        HirExprKind::StructLit { fields, base, .. } => {
+            for f in fields {
+                rewrite_expr(&mut f.value, map);
+            }
+            if let Some(b) = base {
+                rewrite_expr(b, map);
+            }
+        }
+        HirExprKind::TupleVariant { args, .. } => {
+            for a in args {
+                rewrite_expr(a, map);
+            }
+        }
+        HirExprKind::StructVariant { fields, .. } => {
+            for f in fields {
+                rewrite_expr(&mut f.value, map);
+            }
+        }
+        HirExprKind::ArrayLit { elems } => {
+            for x in elems {
+                rewrite_expr(x, map);
+            }
+        }
+        HirExprKind::ArrayRepeat { value, .. } => rewrite_expr(value, map),
+        HirExprKind::Tuple { elems } => {
+            for x in elems {
+                rewrite_expr(x, map);
+            }
+        }
+        HirExprKind::RangeExpr { start, end, elem, .. } => {
+            rewrite_expr(start, map);
+            rewrite_expr(end, map);
+            map_ty(elem, map);
+        }
+        HirExprKind::IterSource { source, elem } => {
+            rewrite_expr(source, map);
+            map_ty(elem, map);
+        }
+        HirExprKind::Field { base, .. } | HirExprKind::TupleIndex { base, .. } => {
+            rewrite_expr(base, map)
+        }
+        HirExprKind::Index { base, index } => {
+            rewrite_expr(base, map);
+            rewrite_expr(index, map);
+        }
+        HirExprKind::MethodCall { receiver, args, .. }
+        | HirExprKind::BuiltinMethod { receiver, args, .. } => {
+            rewrite_expr(receiver, map);
+            for a in args {
+                rewrite_expr(a, map);
+            }
+        }
+        HirExprKind::If { cond, then_block, else_branch } => {
+            rewrite_expr(cond, map);
+            rewrite_block(then_block, map);
+            if let Some(e) = else_branch {
+                rewrite_expr(e, map);
+            }
+        }
+        HirExprKind::Match { scrutinee, arms } => {
+            rewrite_expr(scrutinee, map);
+            for arm in arms {
+                rewrite_expr(&mut arm.body, map);
+                if let Some(g) = &mut arm.guard {
+                    rewrite_expr(g, map);
+                }
+            }
+        }
+        HirExprKind::While { cond, body } => {
+            rewrite_expr(cond, map);
+            rewrite_block(body, map);
+        }
+        HirExprKind::Loop { body } => rewrite_block(body, map),
+        HirExprKind::For { iter, body, .. } => {
+            rewrite_expr(iter, map);
+            rewrite_block(body, map);
+        }
+        HirExprKind::Block(b) => rewrite_block(b, map),
+        HirExprKind::Return(v) | HirExprKind::Break(v) => {
+            if let Some(x) = v {
+                rewrite_expr(x, map);
+            }
+        }
+        HirExprKind::Defer(b) | HirExprKind::Unsafe(b) => rewrite_block(b, map),
     }
 }

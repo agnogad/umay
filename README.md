@@ -25,17 +25,18 @@ fn main() {
 ## Status
 
 UMAY is under active development. This repository currently contains **Phases 0
-through 2** of the roadmap: a complete lexer, parser and semantic analyser with
-the AI-first diagnostics infrastructure. There is no code generator yet, so
+through 3** of the roadmap: a complete lexer, parser and semantic analyser with
+the AI-first diagnostics infrastructure, plus a full HIR → MIR lowering with
+explicit control flow and drop elaboration. There is no code generator yet, so
 `umay build` and `umay run` exist as commands but report that they are not
-implemented.
+implemented. The MIR can be inspected with `umay mir <file>`.
 
 | Phase | Area | Status |
 |-------|------|--------|
 | 0 | Architecture and specification | **complete** |
 | 1 | Lexer and parser | **complete** |
 | 2 | Semantic analysis and type checking | **complete** |
-| 3 | HIR and MIR | not started |
+| 3 | HIR and MIR | **complete** |
 | 4 | Ownership and borrow checking | not started |
 | 5 | Custom x86_64 backend | not started |
 | 6 | Runtime and standard library | not started |

@@ -205,3 +205,9 @@ types, wrong arity, missing fields, non-exhaustive matches — before any of tha
 runs.
 
 Visibility is parsed but not enforced: `pub` currently has no effect.
+
+Literal types are resolved before lowering: an integer or float literal that no
+context constrained becomes `i32` or `f64`, and the HIR is rewritten so that no
+inference variable survives into MIR. This matters beyond tidiness — an
+unresolved literal type is not known to be `Copy`, which would make drop
+elaboration insert a drop for a plain integer.

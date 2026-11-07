@@ -126,6 +126,17 @@ impl TyCtxt {
         id
     }
 
+    /// Cloned kind, for callers that cannot hold a borrow of `self` across a
+    /// mutable operation.
+    pub fn kind_owned(&self, ty: TyId) -> TyKind {
+        self.kind(ty).clone()
+    }
+
+    /// True when `ty` is an id this context knows about.
+    pub fn contains(&self, ty: TyId) -> bool {
+        (ty.0 as usize) < self.kinds.len()
+    }
+
     pub fn kind(&self, ty: TyId) -> &TyKind {
         &self.kinds[ty.0 as usize]
     }

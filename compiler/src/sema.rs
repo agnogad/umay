@@ -37,6 +37,7 @@ pub use scope::{ItemKind, ItemScope, ValueScopes};
 /// Result of running semantic analysis.
 pub struct SemaOutput {
     pub hir: Hir,
+    pub types: TyCtxt,
     pub diagnostics: Diagnostics,
 }
 
@@ -109,7 +110,7 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn finish(mut self) -> SemaOutput {
         self.diags.sort();
-        SemaOutput { hir: self.hir, diagnostics: self.diags }
+        SemaOutput { hir: self.hir, types: self.cx, diagnostics: self.diags }
     }
 
     fn run(&mut self, program: &ast::Program) {

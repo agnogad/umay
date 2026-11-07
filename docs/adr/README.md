@@ -11,6 +11,7 @@ consequences, alternatives.
 | [0004](0004-optional-semicolons.md) | Optional semicolons with newline-aware termination | accepted |
 | [0005](0005-blocking-on-init.md) | `let` always initializes; deferred init rejected | accepted |
 | [0006](0006-semantic-analysis.md) | Three passes over items, body-local inference, conservative exhaustiveness | accepted |
+| [0007](0007-mir.md) | CFG-based MIR, sugar removed during lowering, drop elaboration as a pass | accepted |
 
 ## Template
 

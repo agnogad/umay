@@ -23,6 +23,12 @@ HIR        ── names resolved, desugared, types attached        [Phase 2/3]
 Type check ── inference, trait resolution, exhaustiveness      [Phase 2]
     │
     ▼
+MIR lowering ── expressions become temporaries, control flow      [Phase 3]
+    │          becomes explicit branches
+    ▼
+Drop elaboration ── every exit path drops what it still owns      [Phase 3]
+    │
+    ▼
 MIR        ── typed CFG: moves, borrows, drops, blocks         [Phase 3]
     │
     ▼
@@ -62,6 +68,9 @@ reads source text except the lexer. No stage after HIR depends on syntax shape.
 | `hir` (Phase 2) | Named, desugared trees | know about machine types |
 | `types` (Phase 2) | Type representations, inference | generate code |
 | `mir` (Phase 3) | CFG, places, moves, drops | know about syntax |
+| `lower` (Phase 3) | HIR → MIR, one block per linear region | know about ownership |
+| `drop_elab` (Phase 3) | Where values are dropped | decide ownership |
+| `mir_print` / `mir_parse` (Phase 3) | Text ⇄ MIR for tests and `umay mir` | be used by codegen |
 | `ownership` (Phase 4) | Move/init/drop dataflow | rewrite MIR semantics |
 | `borrowck` (Phase 4) | Borrow/lifetime analysis | rely on source text |
 | `optimizer` | MIR → MIR transformations | change observable behaviour |

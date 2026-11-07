@@ -34,6 +34,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         "check" => cmd_check(&rest),
         "explain" => cmd_explain(&rest),
         "ast" => cmd_ast(&rest),
+        "mir" => cmd_mir(&rest),
         "doctor" => cmd_doctor(&rest),
         "new" => cmd_new(&rest),
         "clean" => cmd_clean(&rest),
@@ -76,6 +77,7 @@ USAGE:
 COMMANDS:
     check <files...>   Parse and validate UMAY source
     ast <file>         Print the parsed syntax tree
+    mir <file>         Print the lowered MIR (basic blocks)
     explain <CODE>     Explain a diagnostic code (e.g. umay explain E0101)
     doctor             Report toolchain and environment information
     new <name>         Create a new UMAY project
@@ -206,6 +208,44 @@ fn cmd_check(args: &[String]) -> u8 {
         exit::COMPILE_ERROR
     } else {
         exit::OK
+    }
+}
+
+/// `umay mir <file>` prints the MIR of a program.
+///
+/// This is a developer tool: it exists so the lowering can be inspected and so
+/// that tests can assert on its shape.
+fn cmd_mir(args: &[String]) -> u8 {
+    let opts = match parse_options(args) {
+        Ok(o) => o,
+        Err((code, msg)) => {
+            eprintln!("umay: {msg}");
+            return code;
+        }
+    };
+    if opts.files.len() != 1 {
+        eprintln!("umay: `mir` takes exactly one source file");
+        return exit::USAGE;
+    }
+    let file = &opts.files[0];
+    let path = Path::new(file);
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("umay: cannot read `{file}`: {e}");
+            return exit::IO_ERROR;
+        }
+    };
+    match umayc::lower_to_mir(path.to_string_lossy().as_ref(), &text) {
+        Ok(mir) => {
+            print!("{mir}");
+            exit::OK
+        }
+        Err((diags, map)) => {
+            let rendered = umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
+            eprint!("{rendered}");
+            exit::COMPILE_ERROR
+        }
     }
 }
 

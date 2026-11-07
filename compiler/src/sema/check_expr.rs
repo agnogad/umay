@@ -69,6 +69,28 @@ impl<'c, 's> FnChecker<'c, 's> {
         id
     }
 
+    /// Maps still-unresolved literal types to their defaults.
+    ///
+    /// Every `TyId` that was an integer or float literal variable maps to
+    /// `i32`/`f64`. Applying the same map to locals and to expression types
+    /// keeps them consistent, which matters downstream: a temporary typed
+    /// `{integer}` would not be recognised as `Copy`.
+    pub fn literal_defaults(&mut self) -> std::collections::HashMap<TyId, TyId> {
+        let mut map = std::collections::HashMap::new();
+        for (ty, _) in &self.pending_defaults {
+            if self.cx.cx.is_integer_var(*ty) {
+                if let Some(t) = self.cx.cx.primitive("i32") {
+                    map.insert(*ty, t);
+                }
+            } else if self.cx.cx.is_float_var(*ty) {
+                if let Some(t) = self.cx.cx.primitive("f64") {
+                    map.insert(*ty, t);
+                }
+            }
+        }
+        map
+    }
+
     pub fn finish_locals(mut self) -> Vec<LocalInfo> {
         // Apply literal defaults to locals that never got a concrete type.
         for (ty, _span) in std::mem::take(&mut self.pending_defaults) {
@@ -92,11 +114,21 @@ impl<'c, 's> FnChecker<'c, 's> {
     }
 
     /// The type of a block: its tail expression's type, or `()`.
+    ///
+    /// A block whose last statement diverges also has type `!`, because control
+    /// never reaches the end of the block.
     pub fn block_ty(&mut self, block: &HirBlock) -> TyId {
-        match &block.tail {
-            Some(e) => e.ty,
-            None => self.cx.cx.unit(),
+        if let Some(e) = &block.tail {
+            return e.ty;
         }
+        if let Some(last) = block.stmts.last() {
+            if let HirStmtKind::Expr(e) = &last.kind {
+                if matches!(self.cx.cx.kind(e.ty), TyKind::Never) {
+                    return e.ty;
+                }
+            }
+        }
+        self.cx.cx.unit()
     }
 
     // ---- diagnostics helpers ---------------------------------------------
@@ -142,8 +174,8 @@ impl<'c, 's> FnChecker<'c, 's> {
     fn check_stmt(&mut self, stmt: &ast::Stmt, out: &mut Vec<HirStmt>) {
         match &stmt.kind {
             ast::StmtKind::Let(l) => {
-                let bindings = self.check_let(l);
-                out.push(HirStmt { kind: HirStmtKind::Let { bindings }, span: stmt.span });
+                let (bindings, init) = self.check_let(l);
+                out.push(HirStmt { kind: HirStmtKind::Let { bindings, init }, span: stmt.span });
             }
             ast::StmtKind::Expr(e) => {
                 let checked = self.check_expr(e);
@@ -167,7 +199,7 @@ impl<'c, 's> FnChecker<'c, 's> {
     }
 
     /// Checks a `let`, introducing locals for every binding in its pattern.
-    fn check_let(&mut self, l: &ast::LetStmt) -> Vec<LocalId> {
+    fn check_let(&mut self, l: &ast::LetStmt) -> (Vec<LocalId>, Option<Box<HirExpr>>) {
         let annotation = l.ty.as_ref().map(|t| {
             let generics = self.generics.clone();
             self.cx.resolve_type(t, &generics)
@@ -215,7 +247,9 @@ impl<'c, 's> FnChecker<'c, 's> {
         let pattern = self.bind_pattern(&l.pattern, binding_ty, l.mutable);
         let mut ids = Vec::new();
         collect_hir_binding_locals(&pattern, &mut ids);
-        ids
+        // The initializer is kept so that MIR can evaluate it. Destructuring is
+        // handled during lowering, which reads the parts out of the temporary.
+        (ids, init.map(Box::new))
     }
 
     /// Verifies that a literal initialiser fits the annotated type.
@@ -223,6 +257,20 @@ impl<'c, 's> FnChecker<'c, 's> {
     /// Without this, `let x: u8 = 300` would pass the compatibility check
     /// (an integer literal is compatible with any integer type) and then be
     /// truncated by the backend.
+    /// Gives a bare literal the type it is being used at.
+    ///
+    /// Only inference variables are replaced; a concrete type is left alone.
+    /// The literal's value is unchanged, which is correct because the caller has
+    /// already checked that it fits.
+    pub fn coerce_literal(&mut self, mut e: HirExpr, want: crate::types::TyId) -> HirExpr {
+        if self.cx.cx.is_integer_var(e.ty) && self.cx.cx.is_integer(want) {
+            e.ty = want;
+        } else if self.cx.cx.is_float_var(e.ty) && self.cx.cx.is_float(want) {
+            e.ty = want;
+        }
+        e
+    }
+
     fn check_literal_fits(&mut self, init: &HirExpr, annotated: crate::types::TyId) {
         if self.cx.cx.is_error(annotated) || self.cx.cx.is_error(init.ty) {
             return;
