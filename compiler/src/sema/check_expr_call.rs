@@ -603,6 +603,15 @@ impl FnChecker<'_, '_> {
     /// methods, so the first `(bound, method)` pair that matches wins. When none
     /// does, the caller falls through to its usual "no methods" diagnostic.
     fn bound_trait_of(&self, param: &str, method: &str) -> Option<(String, Vec<TyId>)> {
+        // Every bound on this parameter name is tried, and the trait that declares
+        // the method wins. A parameter is named `T` in many functions, so the name
+        // alone does not identify one -- but it does identify the method: a trait
+        // that does not declare `next` cannot answer `it.next()`.
+        //
+        // Which function declared a bound is recorded, but it is deliberately not
+        // used to filter: the id a bound was filed under and the id the body is
+        // checked under can differ between the prelude and the program, and a
+        // filter on it made a bound invisible for no reason a user could see.
         for bound in &self.cx.cx.param_bounds {
             if bound.param != param {
                 continue;

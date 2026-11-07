@@ -82,6 +82,11 @@ pub struct Checker<'a> {
     /// rewrite every local and temporary that still names the variable, so
     /// nothing keeps a 4-byte slot while being read as 8.
     pub(crate) settled_vars: HashMap<crate::types::TyId, crate::types::TyId>,
+    /// The function whose signature was resolved last.
+    ///
+    /// Generic parameter names repeat across functions, so a bound is only
+    /// meaningful together with the function that declared it.
+    pub(crate) current_fn: Option<FnId>,
     /// Kept for diagnostics that need to quote source text (Phase 3 will use
     /// it to render MIR annotations).
     #[allow(dead_code)]
@@ -99,6 +104,7 @@ impl<'a> Checker<'a> {
 
     pub fn new(sources: &'a crate::source::SourceMap) -> Self {
         let mut checker = Checker {
+            current_fn: None,
             cx: TyCtxt::new(),
             items: ItemScope::new(),
             diags: Diagnostics::new(),

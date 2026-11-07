@@ -105,6 +105,14 @@ pub struct ParamBound {
     /// `next()` would return `Option<T>` where `Option<i64>` was meant.
     pub args: Vec<TyId>,
     pub trait_name: String,
+    /// The function whose generic parameter carries this bound.
+    ///
+    /// A parameter is named `T` in every function that has one, so a bound keyed
+    /// by the name alone leaks: once `iterate_sum<T: Iterator<i64>>` and
+    /// `needs_send<T: Send>` were in one program, the first one's bound made the
+    /// second one's `T` look like an `Iterator`, and `T + T` was then rejected
+    /// inside the first function. The owner disambiguates them.
+    pub owner: Option<crate::hir::FnId>,
 }
 
 pub struct TyCtxt {

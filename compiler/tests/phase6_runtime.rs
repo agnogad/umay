@@ -1980,3 +1980,41 @@ fn main() -> i32 {
 "##;
     expect_stdout("loop_break_value", source, "9\n-1\n5\n");
 }
+
+#[test]
+fn two_generic_parameters_named_t_do_not_share_a_bound() {
+    // A parameter is named `T` in every function that has one. Filing a bound by
+    // the name alone made one function's `Send` bound answer for another's
+    // `Iterator` bound, and `sum + v` inside the iterator helper was then rejected
+    // with "`+` is not defined for `T`".
+    let source = r##"
+trait Send {}
+trait Sync {}
+impl Send for i64 {}
+trait Agent { fn step(&mut self) -> i64 }
+struct Worker { at: i64 }
+impl Agent for Worker {
+    fn step(&mut self) -> i64 {
+        self.at = self.at + 1i64
+        return self.at
+    }
+}
+fn drive<T: Agent>(it: &mut T, times: usize) -> i64 {
+    let mut sum: i64 = 0
+    let mut i: usize = 0
+    while i < times {
+        sum = sum + it.step()
+        i = i + 1
+    }
+    return sum
+}
+fn needs_send<T: Send>(x: &T) -> bool { return true }
+fn main() -> i32 {
+    let mut w = Worker { at: 0i64 }
+    println_i64(drive(&mut w, 3usize))
+    println_i64(if needs_send(&w) { 1 } else { 0 })
+    return 0
+}
+"##;
+    expect_stdout("bounds_do_not_leak", source, "6\n1\n");
+}

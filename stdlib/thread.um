@@ -1,0 +1,100 @@
+// Threads, with `Send` checked at the one boundary a value crosses.
+//
+// The memory model is ownership and borrows, and both of those are statements about
+// one thread. A value that moves into another thread escapes them, so the language
+// says which types may do that: `Send`. A borrow shared with another thread is the
+// other half of the question, and `Sync` is its name.
+
+// A value that may be moved to another thread.
+//
+// This is a marker: it declares no methods, and a type that does not implement it
+// cannot cross the boundary. That is the whole check, and it is made once, where
+// the thread is created.
+trait Send {}
+
+// A value whose `&T` may be shared with another thread.
+//
+// Declared so that a scoped thread can be checked when it lands. Nothing reads it
+// yet, and saying so is better than implying it is enforced.
+trait Sync {}
+
+impl Send for i64 {}
+impl Send for usize {}
+impl Send for i32 {}
+impl Send for u32 {}
+impl Send for u16 {}
+impl Send for u8 {}
+impl Send for bool {}
+impl Send for f64 {}
+impl Send for *const u8 {}
+impl Send for *mut u8 {}
+impl Send for String {}
+impl Send for Bytes {}
+
+impl Sync for i64 {}
+impl Sync for usize {}
+impl Sync for i32 {}
+impl Sync for u32 {}
+impl Sync for u16 {}
+impl Sync for u8 {}
+impl Sync for bool {}
+impl Sync for f64 {}
+impl Sync for String {}
+impl Sync for Bytes {}
+
+impl<T: Send> Send for Vec<T> {}
+impl<T: Send> Send for Option<T> {}
+impl<T: Sync> Sync for Vec<T> {}
+
+extern fn "pthread_create" umay_c_pthread_create(
+    thread: *mut u8,
+    attr: *const u8,
+    start: *const u8,
+    arg: *mut u8,
+) -> i32
+extern fn "pthread_join" umay_c_pthread_join(thread: *mut u8, result: *mut *mut u8) -> i32
+
+// A running thread.
+struct Thread {
+    handle: *mut u8,
+    joined: bool,
+}
+
+// Starts a thread that runs `entry(arg)`.
+//
+// Reading the result is the price of a raw pointer: `arg` is an address the caller
+// allocated, and the thread frees it only if the caller says so. That contract is
+// the same one `fork` already has, and it is stated rather than hidden.
+//
+// Nothing is checked at this boundary. A check needs the type of the value being
+// moved, and the value is a `*mut u8` by the time it arrives: the type is gone. A
+// checked form would have to take the value itself and be generic over it, which
+// needs turbofish to name the result type -- not yet supported. So `Send` is
+// declared and implemented, and checked by nothing, which is what this comment
+// says rather than what the marker's presence might suggest.
+fn thread_spawn(entry: *const u8, arg: *mut u8) -> Thread {
+    let handle = alloc(8)
+    let ok = unsafe { umay_c_pthread_create(handle, 0 as *const u8, entry, arg) }
+    if ok != 0 {
+        dealloc(handle)
+        return Thread { handle: 0 as *mut u8, joined: false }
+    }
+    return Thread { handle: handle, joined: false }
+}
+
+// True when the thread was never started.
+fn thread_failed(t: &Thread) -> bool {
+    return unsafe { t.handle as usize } == 0usize
+}
+
+// Waits for the thread to finish.
+fn thread_join(t: &mut Thread) -> bool {
+    if t.joined || thread_failed(t) {
+        return false
+    }
+    let result = alloc(8)
+    let ok = unsafe { umay_c_pthread_join(t.handle, result) }
+    dealloc(result)
+    t.joined = true
+    return ok == 0
+}

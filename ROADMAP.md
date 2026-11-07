@@ -308,8 +308,12 @@ Measured against a working router probe, in the order the gaps bite:
   `stdlib/process.um`. `examples/http-router.um` accepts in one process and
   hands each connection to a child, so connections are served at once. A pipe
   carries a result back.
-- [ ] `Send`/`Sync` markers, so a thread can be a language feature rather than
-  an `extern fn` with an unchecked hand-off.
+- [x] `Send`/`Sync` markers declared (ADR 0013), with `impl`s for the
+  primitives, `String`, `Bytes`, `Vec<T: Send>`, `Option<T: Send>`. **Nothing
+  checks them yet**: the check needs a generic spawn whose type arguments are
+  nameable, and that needs turbofish, which the parser does not accept.
+- [ ] Turbofish (`thread_spawn::<Job, i64>(..)`), a function pointer that can be
+  cast to `*const u8`, and then the `Send` check itself.
 
 Wiring up `fs` and `process` exposed four defects that had nothing to do with
 either:

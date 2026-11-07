@@ -261,8 +261,15 @@ impl<'a> Checker<'a> {
     }
 
     fn resolve_traits(&mut self) {
-        let trait_names: Vec<String> = self.traits.keys().cloned().collect();
-        let mut index = 0usize;
+        // The methods are filed under the trait that declares them, by name.
+        //
+        // Walking `self.traits` (a map) and writing to `hir.traits` by position
+        // meant the two orders had to agree, and a map has no order: adding one
+        // empty trait was enough to shift every method onto its neighbour, so
+        // `T: Agent` then answered "no method `step`". The name says which trait
+        // the methods belong to, and it costs nothing to use it.
+        let mut trait_names: Vec<String> = self.traits.keys().cloned().collect();
+        trait_names.sort();
         for name in trait_names {
             let Some(decl) = self.traits.get(&name).cloned() else { continue };
             let mut methods = Vec::new();
@@ -275,10 +282,9 @@ impl<'a> Checker<'a> {
                 };
                 methods.push(TraitMethodInfo { name: m.name.clone(), span: m.name_span, params, ret });
             }
-            if let Some(info) = self.hir.traits.get_mut(index) {
+            if let Some(info) = self.hir.traits.iter_mut().find(|t| t.name == name) {
                 info.methods = methods;
             }
-            index += 1;
         }
     }
 
@@ -366,6 +372,15 @@ impl<'a> Checker<'a> {
         receiver: Option<&str>,
         outer_generics: &[String],
     ) {
+        // The slot this declaration owns, looked up once so that the bounds it
+        // records and the body that is later checked agree on it. Asking for it
+        // again by name is what went wrong before: the map held a different id for
+        // the same declaration, so `iterate_sum`'s bound was filed under one id
+        // while its body was checked under another, and the bound was invisible.
+        let slot = match receiver {
+            Some(ty) => self.methods.get(&(ty.to_string(), f.name.clone())).copied(),
+            None => self.fn_by_name.get(&f.name).copied(),
+        };
         let mut generics: Vec<String> = outer_generics.to_vec();
         generics.extend(f.generics.iter().map(|g| g.name.clone()));
         // A bound is what lets a method be called on a parameter at all, so it
@@ -377,8 +392,23 @@ impl<'a> Checker<'a> {
                     let name = seg.name.clone();
                     let args: Vec<TyId> =
                         seg.args.iter().map(|a| self.resolve_type(a, &bound_scope)).collect();
-                    let entry = crate::types::ParamBound { param: g.name.clone(), args, trait_name: name };
-                    if !self.cx.param_bounds.iter().any(|b| b.param == entry.param && b.trait_name == entry.trait_name) {
+                    // The bound belongs to this function, not to the name `T` in
+                    // general: two functions may each have a `T` with a different
+                    // bound, and a lookup by name alone would mix them.
+                    let owner = slot;
+                    self.current_fn = owner;
+                    let entry = crate::types::ParamBound {
+                        param: g.name.clone(),
+                        args,
+                        trait_name: name,
+                        owner,
+                    };
+                    if !self
+                        .cx
+                        .param_bounds
+                        .iter()
+                        .any(|b| b.param == entry.param && b.trait_name == entry.trait_name && b.owner == entry.owner)
+                    {
                         self.cx.param_bounds.push(entry);
                     }
                 }
@@ -423,12 +453,8 @@ impl<'a> Checker<'a> {
             Some(t) => self.resolve_type(t, &generics),
             None => self.cx.unit(),
         };
-        // Find the HirFn slot: free function by name, method by (type, name).
-        let slot = match receiver {
-            Some(ty) => self.methods.get(&(ty.to_string(), f.name.clone())).copied(),
-            None => self.fn_by_name.get(&f.name).copied(),
-        };
         if let Some(id) = slot {
+            self.current_fn = Some(id);
             if let Some(info) = self.hir.fns.iter_mut().find(|x| x.id == id) {
                 info.generics = generics;
                 info.params = params;
