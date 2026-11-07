@@ -38,16 +38,25 @@ Ownership checking ── definite init and moves, per place       [Phase 4]
 Borrow checking ── conflicts, escapes, both origins named       [Phase 4]
     │
     ▼
-MIR optimisation (folding, DCE, inlining, copy prop)            [Phase 5+]
+MIR optimisation (folding, DCE, copy prop, unreachable)         [Phase 5]
     │
     ▼
-Codegen: x86_64 instruction selection, register allocation      [Phase 5]
+Layout ── sizes, alignments, SysV eightbyte classes             [Phase 5]
     │
     ▼
-ELF object + relocations                                       [Phase 5]
+Frames ── one stack slot per MIR local                          [Phase 5]
     │
     ▼
-Linker (system linker initially)                               [Phase 5]
+Instruction selection ── machine IR, virtual registers          [Phase 5]
+    │
+    ▼
+Register allocation ── linear scan with spilling                [Phase 5]
+    │
+    ▼
+Assembly text (AT&T) ── one shared epilogue per function         [Phase 5]
+    │
+    ▼
+`as` then `cc -no-pie` ── the system tools, not UMAY's own       [Phase 5]
     │
     ▼
 Native executable in dist/
@@ -76,9 +85,15 @@ reads source text except the lexer. No stage after HIR depends on syntax shape.
 | `mir_print` / `mir_parse` (Phase 3) | Text ⇄ MIR for tests and `umay mir` | be used by codegen |
 | `ownership` (Phase 4) | Move/init dataflow over the CFG | rewrite MIR semantics |
 | `borrowck` (Phase 4) | Borrow conflicts and escaped references | depend on source text |
-| `optimizer` | MIR → MIR transformations | change observable behaviour |
-| `codegen` | MIR → machine instructions | be LLVM or Cranelift |
-| `linker` | Objects → executable | implement a linker front-end |
+| `opt` (Phase 5) | MIR → MIR transformations at `-O0`..`-O3` | change observable behaviour |
+| `layout` (Phase 5) | Sizes, alignments, SysV eightbyte classes | know about instructions |
+| `frame` (Phase 5) | One stack slot per MIR local | allocate registers |
+| `machine` (Phase 5) | The machine instruction model | be a model of all of x86_64 |
+| `isel` (Phase 5) | MIR → machine IR into virtual registers | know about physical registers |
+| `regalloc` (Phase 5) | Intervals → registers and spills | know about MIR |
+| `asm` (Phase 5) | Machine IR → AT&T text | resolve relocations |
+| `codegen` (Phase 5) | Driving the backend, one function at a time | be LLVM or Cranelift |
+| `linker` | Assembly → executable via `as` and `cc` | implement a linker front-end |
 | `build` | Incremental driver, cache keys | create project-local targets |
 
 Dependency direction is strictly downward in this table. `diagnostics` is a leaf

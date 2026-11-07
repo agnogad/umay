@@ -158,8 +158,9 @@ non-determinism, that is documented rather than hidden.
 |---------|-----------|
 | `umay new <name>` | create project layout (manifest, `src/main.um`, `dist/`) |
 | `umay check [files]` | parse and analyse; `--format json`, `--explain`, `--color` |
-| `umay build` | compile to `dist/` (Phase 5) |
-| `umay run` | build then execute (Phase 5) |
+| `umay build` | compile to an executable in `dist/`; `-O0`..`-O3` |
+| `umay run` | build then execute, passing the program's exit status through |
+| `umay asm` | print the generated assembly without building |
 | `umay clean` | remove `dist/` contents and the cache |
 | `umay fmt` | format source (Phase 7) |
 | `umay lint` | run lints (Phase 7) |
@@ -168,7 +169,8 @@ non-determinism, that is documented rather than hidden.
 | `umay ast <file>` | dump the syntax tree as JSON |
 | `umay doctor` | toolchain, cache path, phase status |
 
-Exit codes: `0` ok, `1` compile error, `2` usage, `3` I/O, `4` not implemented.
+Exit codes: `0` ok, `1` compile error, `2` usage, `3` I/O, `4` not implemented,
+`5` code generation failed.
 
 ## 9. Package manager (`upm`)
 
