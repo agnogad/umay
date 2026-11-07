@@ -361,7 +361,13 @@ impl<'a> Checker<'a> {
             self_by_ref = sp.by_ref.is_some();
             let ty = match receiver.and_then(|r| self.def_by_name.get(r).copied()) {
                 Some(def) => {
-                    let base = self.cx.adt(def, Vec::new());
+                    // The receiver carries the impl block's parameters, so a
+                    // method of `impl<T> Box<T>` has `&Box<T>` as its `self`.
+                    // Leaving the arguments off would make the body's `T`
+                    // invisible to every later check.
+                    let args: Vec<TyId> =
+                        outer_generics.iter().map(|g| self.cx.param(g.clone())).collect();
+                    let base = self.cx.adt(def, args);
                     if self_by_ref {
                         if self_mutable {
                             self.cx.ref_mut_to(base)
@@ -575,6 +581,18 @@ impl<'a> Checker<'a> {
         if self.cx.is_integer_var(a) && self.cx.is_integer_var(b) {
             return true;
         }
+        if self.cx.is_float_var(a) && self.cx.is_float_var(b) {
+            return true;
+        }
+        // A declaration's `T` is not a type a value can have; it stands for
+        // whatever the use site chose. Comparing it with the chosen type is
+        // therefore always acceptable, and the instantiation is what makes the
+        // two sides agree.
+        if matches!(self.cx.kind(a), TyKind::Param { .. })
+            || matches!(self.cx.kind(b), TyKind::Param { .. })
+        {
+            return true;
+        }
         match (self.cx.kind(a).clone(), self.cx.kind(b).clone()) {
             (TyKind::Tuple(x), TyKind::Tuple(y)) => {
                 x.len() == y.len() && x.iter().zip(&y).all(|(&p, &q)| self.types_compatible(p, q))
@@ -599,10 +617,15 @@ impl<'a> Checker<'a> {
                 matches!(self.cx.kind(e), TyKind::Str)
             }
             (TyKind::RefMut(e1), TyKind::RefMut(e2)) => self.types_compatible(e1, e2),
+            // A declaration without arguments is a nominal skeleton: `impl<T> Box<T>`
+            // writes its receiver as a bare `Box`, and any instantiation of the
+            // same struct is the type it means.
             (TyKind::Adt { def: d1, args: a1 }, TyKind::Adt { def: d2, args: a2 }) => {
                 d1 == d2
-                    && a1.len() == a2.len()
-                    && a1.iter().zip(&a2).all(|(&p, &q)| self.types_compatible(p, q))
+                    && (a1.is_empty()
+                        || a2.is_empty()
+                        || (a1.len() == a2.len()
+                            && a1.iter().zip(&a2).all(|(&p, &q)| self.types_compatible(p, q))))
             }
             (TyKind::FnPtr { params: p1, ret: r1 }, TyKind::FnPtr { params: p2, ret: r2 }) => {
                 p1.len() == p2.len()
@@ -737,6 +760,30 @@ impl<'a> Checker<'a> {
 
         let defaults = fcx.literal_defaults();
         let mut locals = fcx.finish_locals();
+        // A body still mentioning a generic parameter cannot be lowered: the
+        // parameter has no size, and no monomorphisation pass exists to give it
+        // one. Reporting that here, in the checker, is honest in a way that
+        // letting it reach the backend is not — `umay check` and `umay build`
+        // then say the same thing, and the program is never half-compiled.
+        let unsubstituted = locals.iter().find_map(|l| self.cx.first_param(l.ty));
+        if let Some(param) = unsubstituted {
+            self.push(
+                Diagnostic::error(
+                    "E3001",
+                    format!("`{}` uses the generic parameter `{param}` in its body", f.name),
+                )
+                .at(f.name_span)
+                .with_cause(
+                    "monomorphisation is not implemented, so a generic body cannot be compiled",
+                )
+                .with_explanation(
+                    "A generic declaration is type-checked as written, but the code generator \
+                     needs a concrete type for every local. Until monomorphisation lands, a \
+                     method or function whose body names a generic parameter has no machine code \
+                     to generate. Writing the same code for one concrete type works.",
+                ),
+            );
+        }
         let mut body_hir = block;
         // Rewrite unresolved literal types in the body so that lowering sees
         // concrete types everywhere.

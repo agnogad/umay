@@ -79,7 +79,9 @@ fn comparison_of_constants_folds_to_a_bool() {
 
 #[test]
 fn a_constant_condition_becomes_a_jump() {
-    let out = mir("fn f() -> i32 { if true { 1 } else { 2 } }", OptLevel::O2);
+    // Scoped to `f`: the printed MIR also contains the prelude, whose own
+    // branches are not what this test is about.
+    let out = body_of(&mir("fn f() -> i32 { if true { 1 } else { 2 } }", OptLevel::O2), "f");
     assert!(!out.contains("switchInt"), "a constant branch must become a goto:\n{out}");
 }
 
@@ -145,7 +147,7 @@ fn main() {
 
 #[test]
 fn a_copy_chain_is_shortened() {
-    let out = mir("fn f(a: i32) -> i32 { let b = a\n let c = b\n c }", OptLevel::O3);
+    let out = body_of(&mir("fn f(a: i32) -> i32 { let b = a\n let c = b\n c }", OptLevel::O3), "f");
     // Every intermediate is a pure copy of `a`, so the backend should see at
     // most one of them.
     let copies = out.matches("copy _").count();
@@ -165,7 +167,7 @@ fn f() -> i32 {
 "#;
     // `c` captured the value `b` held at the time, which is 1. Propagating the
     // later `b = 2` into `c` would be the bug this test exists to catch.
-    let out = mir(src, OptLevel::O3);
+    let out = body_of(&mir(src, OptLevel::O3), "f");
     assert!(
         out.contains("const 1"),
         "`c` must keep the value it captured, not the later assignment:\n{out}"
@@ -198,8 +200,10 @@ fn f() -> i32 {
     b
 }
 "#;
-    let o1 = mir(src, OptLevel::O1).len();
-    let o3 = mir(src, OptLevel::O3).len();
+    // Only `f` is compared: the prelude is identical in both and would swamp
+    // the difference the test is looking for.
+    let o1 = body_of(&mir(src, OptLevel::O1), "f").len();
+    let o3 = body_of(&mir(src, OptLevel::O3), "f").len();
     assert!(
         o3 <= o1,
         "O3 should not produce more MIR than O1 ({o3} vs {o1})"

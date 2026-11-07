@@ -288,7 +288,10 @@ impl FnChecker<'_, '_> {
         let expected_self = params.first().copied().unwrap_or_else(|| self.cx.cx.error());
         if !self.cx.cx.is_error(expected_self) && !self.cx.cx.is_error(recv.ty) {
             let want_base = self.strip_refs(expected_self);
-            let base_ok = want_base == recv_base;
+            // A generic method's `self` names parameters the receiver has already
+            // chosen, so the two are compared structurally rather than by
+            // interned identity.
+            let base_ok = self.cx.types_compatible(want_base, recv_base);
             let compatible = match self.cx.cx.kind(expected_self).clone() {
                 TyKind::Ref(_) => true,
                 TyKind::RefMut(_) => !matches!(self.cx.cx.kind(recv.ty), TyKind::Ref(_)),
@@ -312,8 +315,15 @@ impl FnChecker<'_, '_> {
             }
         }
 
+        // A method of a generic type may name the type's parameters in its own
+        // signature, so the receiver's choice decides them: `Box<i64>::get -> T`
+        // is `-> i64` once the receiver is a `Box<i64>`.
+        let subst = self.instance_of(recv_base);
         let rest = &params[1..];
-        self.check_call_args(rest, &arg_hirs, span, "method");
+        let rest: Vec<crate::types::TyId> =
+            rest.iter().map(|t| self.cx.cx.substitute(*t, &subst)).collect();
+        self.check_call_args(&rest, &arg_hirs, span, "method");
+        let ret = self.cx.cx.substitute(ret, &subst);
         HirExpr {
             kind: HirExprKind::MethodCall {
                 receiver: Box::new(recv),
@@ -323,6 +333,27 @@ impl FnChecker<'_, '_> {
             ty: ret,
             span,
         }
+    }
+
+    /// The type arguments an instantiated type carries, keyed by parameter name.
+    ///
+    /// `Box<i64>` gives `{T: i64}`; a type with no arguments gives an empty map,
+    /// which is what makes substitution a no-op for non-generic code.
+    pub(crate) fn instance_of(
+        &mut self,
+        ty: crate::types::TyId,
+    ) -> std::collections::HashMap<String, crate::types::TyId> {
+        let mut subst = std::collections::HashMap::new();
+        let base = self.strip_refs(ty);
+        if let crate::types::TyKind::Adt { def, args } = self.cx.cx.kind(base).clone() {
+            if let Some(info) = self.cx.hir.structs.iter().find(|s| s.def_id == def) {
+                let generics = info.generics.clone();
+                for (name, arg) in generics.iter().zip(args.iter()) {
+                    subst.insert(name.clone(), *arg);
+                }
+            }
+        }
+        subst
     }
 
     pub(crate) fn strip_refs(&self, mut ty: TyId) -> TyId {
@@ -591,6 +622,35 @@ impl FnChecker<'_, '_> {
             }
         }
 
+        // A generic struct's literals infer their type arguments from the field
+        // values: `Box { value: 7 }` means `Box<i32>`. The arguments are collected
+        // first so that every field is checked against the *same* instantiation,
+        // which is what makes `Pair { a: 1, b: 2 }` one type and not two.
+        let mut inferred: std::collections::HashMap<String, crate::types::TyId> =
+            std::collections::HashMap::new();
+        if !info.generics.is_empty() {
+            for f in fields {
+                let Some(value_ast) = &f.value else { continue };
+                let Some(field) = info.fields.iter().find(|sf| sf.name == f.name) else { continue };
+                // Only a field whose type is exactly one parameter tells us
+                // anything; `*mut T` or `T` nested in another type is left to a
+                // later pass rather than guessed at.
+                if let crate::types::TyKind::Param { name } = self.cx.cx.kind(field.ty).clone() {
+                    let probed = self.check_expr(value_ast);
+                    if self.cx.cx.is_error(probed.ty) {
+                        continue;
+                    }
+                    // A bare literal is evidence too: `Box { value: 7 }` sets the
+                    // parameter to the literal's type, which is settled to its
+                    // default width in the same pass that settles every other
+                    // unresolved literal.
+                    if let std::collections::hash_map::Entry::Vacant(slot) = inferred.entry(name) {
+                        slot.insert(probed.ty);
+                    }
+                }
+            }
+        }
+
         let mut inits = Vec::new();
         let mut provided: Vec<String> = Vec::new();
         for f in fields {
@@ -640,13 +700,14 @@ impl FnChecker<'_, '_> {
                 });
                 continue;
             }
-            if (self.cx.cx.is_integer_var(value.ty) && self.cx.cx.is_integer(field.ty))
-                || (self.cx.cx.is_float_var(value.ty) && self.cx.cx.is_float(field.ty))
-                || self.cx.types_compatible(field.ty, value.ty)
+            let field_ty = self.cx.cx.substitute(field.ty, &inferred);
+            if (self.cx.cx.is_integer_var(value.ty) && self.cx.cx.is_integer(field_ty))
+                || (self.cx.cx.is_float_var(value.ty) && self.cx.cx.is_float(field_ty))
+                || self.cx.types_compatible(field_ty, value.ty)
             {
                 // A literal takes the declared field type, so that no inference
                 // variable survives into MIR.
-                let value = self.coerce_literal(value, field.ty);
+                let value = self.coerce_literal(value, field_ty);
                 inits.push(HirFieldInit {
                     name: f.name.clone(),
                     span: f.name_span,
@@ -654,7 +715,7 @@ impl FnChecker<'_, '_> {
                     value,
                 });
             } else {
-                let want = self.cx.ty_name(field.ty);
+                let want = self.cx.ty_name(field_ty);
                 let got = self.cx.ty_name(value.ty);
                 self.push(
                     Diagnostic::error(
@@ -699,7 +760,31 @@ impl FnChecker<'_, '_> {
             }
         }
 
-        let ty = self.cx.cx.adt(def, Vec::new());
+        // The value's type carries the instantiation, so every later phase sees
+        // `Vec<i64>` rather than a bare `Vec`, and layout can size the fields.
+        let mut args: Vec<crate::types::TyId> = Vec::with_capacity(info.generics.len());
+        for g in &info.generics {
+            match inferred.get(g).copied() {
+                Some(t) => args.push(t),
+                None => {
+                    self.push(
+                        Diagnostic::error(
+                            "E1001",
+                            format!("cannot infer the type parameter `{g}` of `{name}`"),
+                        )
+                        .at(span)
+                        .with_cause("no field initialiser has a type that names this parameter")
+                        .with_explanation(
+                            "A struct literal infers its type arguments from the values it is \
+                             given. A parameter that no supplied field mentions cannot be \
+                             inferred, and guessing a default would silently pick the wrong type.",
+                        ),
+                    );
+                    args.push(self.cx.cx.error());
+                }
+            }
+        }
+        let ty = self.cx.cx.adt(def, args);
         HirExpr {
             kind: HirExprKind::StructLit { def, fields: inits, base: base_hir.map(Box::new) },
             ty,

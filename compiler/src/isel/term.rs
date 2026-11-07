@@ -368,10 +368,10 @@ impl<'a, 't> Isel<'a, 't> {
                             dst,
                         });
                     }
-                    StackSource::Reg(reg) => {
+                    StackSource::Imm(value) => {
                         out.push(Inst::Store {
                             kind: MoveKind::Move(width),
-                            src: MOperand::Reg(*reg),
+                            src: value.clone(),
                             dst,
                         });
                     }
@@ -433,7 +433,11 @@ pub(crate) struct StackPiece {
 #[derive(Clone)]
 pub(crate) enum StackSource {
     Mem(Mem),
-    Reg(Reg),
+    /// A value with no storage of its own. A literal is written straight from its
+    /// bytes rather than parked in a register first: parking would claim a
+    /// register before the argument shuffle runs, and the shuffle is free to
+    /// overwrite it with another argument.
+    Imm(crate::machine::Operand),
 }
 
 impl<'a, 't> Isel<'a, 't> {
@@ -475,8 +479,8 @@ impl<'a, 't> Isel<'a, 't> {
                 if !spilled && size <= 16 && registers_used + needed <= ARG_REGS.len() {
                     let mem = match &mem {
                         StackSource::Mem(m) => m.clone(),
-                        StackSource::Reg(_) => {
-                            return Err("aggregate in a register is not supported".into())
+                        StackSource::Imm(_) => {
+                            return Err("aggregate literal argument is not supported".into())
                         }
                     };
                     // Two eightbytes at most: one register each. An aggregate of
@@ -515,13 +519,17 @@ impl<'a, 't> Isel<'a, 't> {
                 // Past the register file every scalar is delivered on the stack.
                 let mem = match arg {
                     Operand::Copy(p) | Operand::Move(p) => StackSource::Mem(self.place_addr(p)?),
-                    // A literal has no storage to copy from, so it is materialised
-                    // in a register and written from there.
-                    Operand::Constant(_) => StackSource::Reg(self.operand_to_reg(arg)?),
+                    // A literal is written from its own bytes.
+                    Operand::Constant(_) => StackSource::Imm(self.operand(arg)?),
                 };
+                // The slot is eight bytes wide, but only the value's own width is
+                // written: the callee copies the declared type's size, and writing
+                // eight bytes from a four-byte value would place bytes the callee
+                // never reads at an offset it does not expect.
+                let size = self.layouts.layout(ty).map_err(|e| format!("{e:?}"))?.size;
                 stack_bytes = stack_bytes.div_ceil(8) * 8;
-                stack_pieces.push(StackPiece { source: mem, size: 8, offset: stack_bytes });
-                stack_bytes += 8;
+                stack_pieces.push(StackPiece { source: mem, size, offset: stack_bytes });
+                stack_bytes += size.max(1).div_ceil(8) * 8;
                 spilled = true;
             }
         }

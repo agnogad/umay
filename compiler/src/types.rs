@@ -276,6 +276,92 @@ impl TyCtxt {
         self.intern(TyKind::Adt { def, args })
     }
 
+    /// Replaces generic parameters with the types they stand for.
+    ///
+    /// `TyKind::Param` is what a declaration writes; an actual value has no
+    /// parameters at all. Instantiating a struct or a call means rewriting every
+    /// parameter it mentions with the concrete type chosen at the use site, which
+    /// is why `Vec<T>`'s `ptr: *mut T` field is a `*mut i64` before layout runs.
+    /// The first generic parameter mentioned anywhere inside `ty`, if any.
+    ///
+    /// A parameter is rarely bare: a body's locals are `&Box<T>` and `*mut T` as
+    /// often as `T`, so the reachability question has to walk the structure.
+    pub fn first_param(&self, ty: TyId) -> Option<String> {
+        self.first_param_in(ty, 0)
+    }
+
+    fn first_param_in(&self, ty: TyId, depth: u32) -> Option<String> {
+        // A self-referential definition would otherwise recurse forever.
+        if depth > 32 {
+            return None;
+        }
+        match self.kind(ty).clone() {
+            TyKind::Param { name } => Some(name),
+            TyKind::Ref(inner)
+            | TyKind::RefMut(inner)
+            | TyKind::RawPtr(inner)
+            | TyKind::RawPtrMut(inner)
+            | TyKind::Slice(inner) => self.first_param_in(inner, depth + 1),
+            TyKind::Array { elem, .. } => self.first_param_in(elem, depth + 1),
+            TyKind::Tuple(items) => items.iter().find_map(|t| self.first_param_in(*t, depth + 1)),
+            TyKind::Adt { args, .. } => args.iter().find_map(|t| self.first_param_in(*t, depth + 1)),
+            TyKind::FnPtr { params, ret } => params
+                .iter()
+                .chain(std::iter::once(&ret))
+                .find_map(|t| self.first_param_in(*t, depth + 1)),
+            _ => None,
+        }
+    }
+
+    pub fn substitute(&mut self, ty: TyId, subst: &HashMap<String, TyId>) -> TyId {
+        if subst.is_empty() {
+            return ty;
+        }
+        let kind = self.kind(ty).clone();
+        match kind {
+            TyKind::Param { ref name } => subst.get(name).copied().unwrap_or(ty),
+            TyKind::Ref(inner) => {
+                let inner = self.substitute(inner, subst);
+                self.ref_to(inner)
+            }
+            TyKind::RefMut(inner) => {
+                let inner = self.substitute(inner, subst);
+                self.ref_mut_to(inner)
+            }
+            TyKind::RawPtr(inner) => {
+                let inner = self.substitute(inner, subst);
+                self.raw_ptr(inner)
+            }
+            TyKind::RawPtrMut(inner) => {
+                let inner = self.substitute(inner, subst);
+                self.raw_ptr_mut(inner)
+            }
+            TyKind::Slice(inner) => {
+                let inner = self.substitute(inner, subst);
+                self.slice(inner)
+            }
+            TyKind::Array { elem, len } => {
+                let elem = self.substitute(elem, subst);
+                self.array(elem, len)
+            }
+            TyKind::Tuple(items) => {
+                let items: Vec<TyId> = items.iter().map(|t| self.substitute(*t, subst)).collect();
+                self.tuple(items)
+            }
+            TyKind::Adt { def, args } => {
+                let args: Vec<TyId> = args.iter().map(|t| self.substitute(*t, subst)).collect();
+                self.adt(def, args)
+            }
+            TyKind::FnPtr { params, ret } => {
+                let params: Vec<TyId> =
+                    params.iter().map(|t| self.substitute(*t, subst)).collect();
+                let ret = self.substitute(ret, subst);
+                self.fn_ptr(params, ret)
+            }
+            _ => ty,
+        }
+    }
+
     pub fn fn_ptr(&mut self, params: Vec<TyId>, ret: TyId) -> TyId {
         self.intern(TyKind::FnPtr { params, ret })
     }

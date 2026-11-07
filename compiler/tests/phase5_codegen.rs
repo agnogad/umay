@@ -390,3 +390,18 @@ fn an_aggregate_argument_is_not_shared_with_the_caller() {
         104,
     );
 }
+
+#[test]
+fn a_literal_stack_argument_keeps_its_value() {
+    // A literal passed on the stack has no storage of its own. Parking it in a
+    // register before the argument shuffle would let the shuffle overwrite it
+    // with a neighbour's value, so it is written straight from its bytes.
+    let src = "fn sum7(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32) -> i32 {\n    return a + b + c + d + e + f + g\n}\nfn main() -> i32 {\n    return sum7(1, 2, 3, 4, 5, 6, 7)\n}";
+    expect_exit("literal_stack_arg", src, 28);
+}
+
+#[test]
+fn two_literal_stack_arguments_keep_their_values() {
+    let src = "fn sum9(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32, i: i32) -> i32 {\n    return a + b + c + d + e + f + g + h + i\n}\nfn main() -> i32 {\n    return sum9(1, 2, 3, 4, 5, 6, 7, 8, 9)\n}";
+    expect_exit("two_literal_stack_args", src, 45);
+}

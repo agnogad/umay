@@ -362,9 +362,34 @@ Methods that change a string take `self` by value and return the new value, so
 Growth doubles, and a terminator is kept one past the last byte so the buffer can
 be handed to the printers directly. Lengths count bytes, never characters.
 
-`Vec<T>` is not available yet: generic instantiation is not implemented, so a
-generic struct cannot yet infer its arguments at a literal or return its
-parameter type from a method.
+### Generic declarations
+
+A generic parameter is written after the struct or function name and is in scope
+in that declaration:
+
+```umay
+struct Box<T> { value: T }
+
+impl<T> Box<T> {
+    fn get(&self) -> T { return self.value }
+}
+```
+
+**Instantiation at the type level works.** A struct literal infers its type
+arguments from the values it is given — `Box { value: 7 }` is `Box<i32>`,
+`Box { value: "hi" }` is `Box<&str>` — and the resulting value carries the
+instance. Field reads check against the substituted field type, and a method's
+signature is substituted from its receiver, so `Box<i64>::get` returns `i64`.
+Two instantiations of one declaration are different types.
+
+**Monomorphisation does not exist yet.** A generic *body* still names its
+parameter, and nothing gives it a concrete size. Such a body is rejected with
+`E3001` — the same code the backend would otherwise raise, reported early so
+`umay check` and `umay build` agree and nothing is half-compiled. A generic
+declaration without a generic body is accepted.
+
+Consequently `Vec<T>`, `Option<T>`, `Result<T, E>` and `Iterator` are not
+available. If you need a container today, write it for one concrete element type.
 
 ---
 

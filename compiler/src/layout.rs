@@ -115,6 +115,12 @@ impl<'a> Layouts<'a> {
         if let Some(&l) = self.cache.get(&ty) {
             return Ok(l);
         }
+        // A generic parameter has no size on its own; only an instantiation does.
+        // Saying so here, before the recursion guard, keeps the diagnostic about
+        // the real problem instead of reporting a self-referential type.
+        if let crate::types::TyKind::Param { name } = self.types.kind(ty) {
+            return Err(LayoutError::Unsized(format!("unsubstituted parameter `{name}`")));
+        }
         // A type cannot contain itself: the recursion guard turns a malformed
         // definition into a diagnostic instead of a hang.
         if self.recursion.contains(&ty) {

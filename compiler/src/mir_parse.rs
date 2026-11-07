@@ -326,7 +326,18 @@ fn parse_statement(line: &str, n: usize) -> Result<(Statement, Vec<String>), Par
 
 fn parse_rvalue(s: &str, strings: &mut Vec<String>, n: usize) -> Result<Rvalue, ParseError> {
     let s = s.trim();
-    // Binary operators are checked first: `copy _0 > const 1` starts like a
+    // A cast is checked before anything else: its right-hand side is a type, not
+    // an operand, so a binary operator inside the type annotation must never be
+    // mistaken for arithmetic.
+    if let Some((lhs, rhs)) = split_cast(s) {
+        let operand = parse_operand(lhs.trim(), strings, n)?;
+        let to = parse_ty_annotation(rhs.trim()).ok_or_else(|| ParseError {
+            line: n,
+            message: format!("bad cast target `{}`", rhs.trim()),
+        })?;
+        return Ok(Rvalue::Cast { operand, to: crate::types::TyId(to) });
+    }
+    // Binary operators are checked next: `copy _0 > const 1` starts like a
     // plain operand, so the operator must win.
     if let Some((op, pos)) = find_binop(s) {
         let lhs = parse_operand(s[..pos].trim(), strings, n)?;
@@ -342,6 +353,18 @@ fn parse_rvalue(s: &str, strings: &mut Vec<String>, n: usize) -> Result<Rvalue, 
     }
     if let Some(rest) = s.strip_prefix("const ") {
         return Ok(Rvalue::Use(parse_operand(&format!("const {rest}"), strings, n)?));
+    }
+    if let Some(rest) = s.strip_prefix("offset(") {
+        // `offset(copy _1, copy _6)`
+        let inner = rest.strip_suffix(')').unwrap_or(rest);
+        let parts = parse_operand_list(inner, strings, n)?;
+        if parts.len() != 2 {
+            return Err(ParseError {
+                line: n,
+                message: format!("`offset` takes a pointer and a count, found {}", parts.len()),
+            });
+        }
+        return Ok(Rvalue::PtrOffset { ptr: parts[0].clone(), count: parts[1].clone() });
     }
     if let Some(rest) = s.strip_prefix("discriminant(") {
         let place = parse_place(rest.trim_end_matches(')'), strings, n)?;
@@ -428,6 +451,21 @@ const BINOPS: &[(&str, BinOp)] = &[
 ];
 
 /// Finds the binary operator in an rvalue, preferring the longest match so that
+/// Finds `<operand> as <type>@<id>` and splits it at the `as`.
+///
+/// A boolean operator is checked first so that a comparison is never mistaken for
+/// a cast, and the split takes the *last* ` as ` so an operand that cannot
+/// contain one is unambiguous either way.
+fn split_cast(s: &str) -> Option<(&str, &str)> {
+    let pos = s.rfind(" as ")?;
+    let lhs = &s[..pos];
+    let rhs = &s[pos + 4..];
+    if lhs.trim().is_empty() || !rhs.contains('@') {
+        return None;
+    }
+    Some((lhs, rhs))
+}
+
 /// `<=` is not read as `<`.
 fn find_binop(s: &str) -> Option<(BinOp, usize)> {
     let mut best: Option<(BinOp, usize)> = None;

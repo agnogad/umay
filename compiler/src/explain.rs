@@ -464,8 +464,12 @@ pub static EXPLAIN: &[ExplainEntry] = &[
         "The program type-checked and passed ownership checking, but the code generator \
          does not know how to emit machine code for some construct in it. This is a gap in \
          the backend, not an error in the program, and it is reported instead of generating \
-         wrong code or crashing. The affected function is named in the message.",
-        Some("// e.g. returning a large aggregate by value, which needs a hidden pointer\nfn f() -> Big { big }"),
+         wrong code or crashing. The affected function is named in the message.\n\n\
+         A generic body reaches this code too: a parameter has no size of its own, and no \
+         monomorphisation pass exists yet to give it one, so a method or function whose body \
+         names a generic parameter has no machine code to generate. The same code is reported by \
+         `umay check`, so checking and building always agree.",
+        Some("// a generic body cannot be compiled until monomorphisation exists\nfn get(&self) -> T { return self.value }   // E3001"),
     ),
     // ---- warnings ---------------------------------------------------------
     e(

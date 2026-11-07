@@ -807,3 +807,70 @@ fn warnings_are_documented() {
         warns(src, code);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Generic instantiation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_struct_literal_infers_its_type_arguments() {
+    // `Box { value: 7 }` is `Box<i32>`: the field's declared `T` is decided by
+    // the value supplied for it.
+    ok(r#"
+struct Box { value: T }
+fn main() -> i32 {
+    let b = Box { value: 7 }
+    return 0
+}
+"#.replace("struct Box { value: T }", "struct Box<T> { value: T }").as_str());
+}
+
+#[test]
+fn a_generic_field_accepts_a_value_of_the_inferred_type() {
+    ok("
+struct Box<T> { value: T }
+fn main() -> i32 {
+    let b = Box { value: 7 }
+    let c = Box { value: 7.5 }
+    return 0
+}
+");
+}
+
+#[test]
+fn two_instantiations_of_one_struct_are_different_types() {
+    // `Box<i32>` and `Box<&str>` are the same declaration but different types,
+    // which is what makes the instantiation visible at all.
+    ok("
+struct Box<T> { value: T }
+fn main() -> i32 {
+    let a = Box { value: 1 }
+    let b = Box { value: 2 }
+    return 0
+}
+");
+}
+
+#[test]
+fn a_body_using_a_generic_parameter_is_reported_not_miscompiled() {
+    // Monomorphisation does not exist yet, so a body that needs a concrete `T`
+    // is refused with a code the backend would otherwise raise later. Saying so
+    // in the checker keeps `umay check` and `umay build` in agreement.
+    err("
+struct Box<T> { value: T }
+impl<T> Box<T> {
+    fn get(&self) -> T { return self.value }
+}
+fn main() -> i32 { return 0 }
+", "E3001");
+}
+
+#[test]
+fn a_generic_declaration_without_a_generic_body_is_accepted() {
+    // The struct itself is fine: only a *body* that names a parameter has no
+    // machine code to generate.
+    ok("
+struct Box<T> { value: T }
+fn main() -> i32 { return 0 }
+");
+}

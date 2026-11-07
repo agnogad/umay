@@ -224,10 +224,17 @@ resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
   runtime's printers, and byte lengths that never split a multi-byte sequence.
 - [x] A method from a real `impl` block now wins over a built-in of the same name,
   which is what lets the standard library define `String::len` in ordinary source.
-- [ ] `Vec<T>` — **blocked**: generic instantiation is not implemented. A struct
-  literal does not infer its arguments (`Box2 { value: 7 }` reports that the field
-  expects `T`), and a method cannot return a parameter type. This is a front-end
-  feature, not a library one; `Vec<T>` arrives with it.
+- [x] Generic **instantiation at the type level**: a struct literal infers its
+  type arguments from the values it is given (`Box { value: 7 }` is `Box<i32>`),
+  the instance is carried on the value's type, a method's signature is
+  substituted from the receiver's arguments (`Box<i64>::get -> T` is `-> i64`),
+  and field access checks against the instantiated field type.
+- [ ] **Monomorphisation** — the remaining blocker for `Vec<T>`. A generic *body*
+  still names its parameter, and no pass gives it a concrete type. This is now a
+  clean diagnostic (`E3001`) rather than a backend crash: `umay check` and
+  `umay build` agree, and nothing is half-compiled.
+- [ ] `Vec<T>` — arrives with monomorphisation.
+
 - [ ] `Option`, `Result`, `Iterator` basics.
 - [ ] `fs`: read, write, open, metadata.
 - [ ] `process`: exit codes, arguments.
@@ -259,9 +266,20 @@ Known gaps this step depends on, none of which are covered yet:
 - An assignment through a computed pointer, `*(p.offset(n)) = v`, is rejected;
   only a write through a named pointer works, which is why `write_byte` exists.
 - `&mut T` does not coerce to `&T` (`E1001`).
-- A literal used with a wider type than its default (`let mut i = 0` used as a
-  `usize`) is accepted but keeps the narrower type, so a 64-bit read of the local
-  sees its neighbours. Annotate, or wait for literal inference to be widened.
+- A literal local used at a wider type (`let mut i = 0` used as a `usize`) is
+  now settled to that type and stored at its width.
+
+Fixing the aggregate-ABI work also turned up two printed-MIR round-trip holes and
+a stack-argument bug, all now fixed and tested:
+
+- The printer wrote `X as isize@27`, but the parser had no cast branch, so no
+  printed MIR containing a cast could be read back.
+- `offset(...)` was printed but not parsed.
+- A literal passed on the stack was parked in a register before the argument
+  shuffle, which was free to overwrite it with a neighbour's value: `sum7(1..7)`
+  returned 26 instead of 28. A literal is now written straight from its bytes,
+  and only the value's own width is written so the callee's slot offsets still
+  line up.
 
 ---
 
