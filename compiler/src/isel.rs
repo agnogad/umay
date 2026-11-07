@@ -136,7 +136,14 @@ pub fn select<'t>(
     }
 
     Ok(MachineFunction {
-        name: body.name.clone(),
+        // The body's name is unqualified; the symbol is what reaches the linker,
+        // and a method's carries its type's name so it cannot take over a C
+        // function of the same name.
+        name: body
+            .fn_id
+            .and_then(|id| fn_symbols.get(&id))
+            .cloned()
+            .unwrap_or_else(|| body.name.clone()),
         blocks: isel.blocks,
         virtual_regs: Vec::new(),
         stack_size: isel.frame.local_bytes,
@@ -171,7 +178,7 @@ impl<'a, 't> Isel<'a, 't> {
     }
 
     pub(crate) fn emit(&mut self, inst: Inst) {
-        if let Inst::Call { target: MOperand::Label(l) } = &inst {
+        if let Inst::Call { target: MOperand::Label(l), .. } = &inst {
             self.note_call_target(*l);
         }
         if let Some(block) = self.blocks.last_mut() {

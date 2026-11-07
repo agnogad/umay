@@ -368,7 +368,11 @@ pub enum Inst {
     /// Conditional jump.
     Jcc { cond: Cond, target: Label },
     /// `call`. The target is a symbol or a register.
-    Call { target: Operand },
+    /// `call`. The target is a symbol or a register. `variadic` records that the
+    /// callee is a C variadic function, which SysV says must see `%al` holding the
+    /// number of vector registers used; a call to `open` would otherwise pass
+    /// whatever `%al` held and the callee could read a garbage argument list.
+    Call { target: Operand, variadic: bool },
     /// `ret`
     Ret,
     /// Push onto the stack.
@@ -427,7 +431,7 @@ impl Inst {
                 from_operand(rhs, &mut out);
             }
             Inst::SetCc { dst, .. } => from_operand(dst, &mut out),
-            Inst::Call { target } => from_operand(target, &mut out),
+            Inst::Call { target, .. } => from_operand(target, &mut out),
             Inst::Push(op) | Inst::Pop(op) => from_operand(op, &mut out),
             Inst::Lea { src, dst } => {
                 from_mem(src, &mut out);

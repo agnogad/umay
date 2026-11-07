@@ -296,9 +296,6 @@ impl<'a> Layouts<'a> {
         if self.hir.enums.iter().any(|e| e.def_id == def) {
             return self.enum_layout(def, args);
         }
-        if std::env::var("UMAY_TRACE_MONO").is_ok() {
-            eprintln!("unknown adt {:?}; enums {:?} structs {:?}", def, self.hir.enums.iter().map(|e| (e.def_id, e.name.clone())).collect::<Vec<_>>(), self.hir.structs.iter().map(|s| (s.def_id, s.name.clone())).collect::<Vec<_>>());
-        }
         Err(LayoutError::UnknownType(def))
     }
 

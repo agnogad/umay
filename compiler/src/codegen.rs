@@ -42,7 +42,14 @@ impl std::fmt::Display for CodegenError {
 fn function_symbols(hir: &crate::hir::Hir, program: &MirProgram) -> HashMap<FnId, String> {
     let mut map = HashMap::new();
     for f in &hir.fns {
-        map.insert(f.id, f.name.clone());
+        // A method's symbol carries its type's name: `read` on `File` is
+        // `File__read`, so it cannot take over the C function of the same name at
+        // link time, and two types may each have their own.
+        let name = match &f.owner {
+            Some(owner) => format!("{owner}__{}", f.name),
+            None => f.name.clone(),
+        };
+        map.insert(f.id, name);
     }
     for body in &program.bodies {
         if let Some(id) = body.fn_id {

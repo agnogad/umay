@@ -29,12 +29,25 @@ impl<'a> Checker<'a> {
         self.collect_items_in(&program.items);
     }
 
+    /// The next unused type definition id.
+    ///
+    /// Structs and enums must not collide: a size or a layout is looked up by
+    /// this id alone, so two type definitions must never share one. Counting
+    /// both lists together keeps the ids unique across the two.
+    fn next_def_id(&self) -> u32 {
+        (self.hir.structs.len() + self.hir.enums.len()) as u32
+    }
+
     fn collect_items_in(&mut self, items: &[ast::Item]) {
         // ---- types ----
         for item in items {
             match item {
                 ast::Item::Struct(s) => {
-                    let def = DefId(self.hir.structs.len() as u32);
+                    // Structs and enums share one `DefId` space: a size or a layout
+                    // is looked up by that id alone, so two definitions must never
+                    // carry the same one. The definition list holds both, which
+                    // makes its length the shared counter.
+                    let def = DefId(self.next_def_id());
                     self.register_type_name(&s.name, s.name_span, def, ItemKind::Struct, DefKind::Struct);
                     self.hir.structs.push(StructInfo {
                         name: s.name.clone(),
@@ -54,7 +67,7 @@ impl<'a> Checker<'a> {
                     self.def_by_name.insert(s.name.clone(), def);
                 }
                 ast::Item::Enum(e) => {
-                    let def = DefId(self.hir.enums.len() as u32);
+                    let def = DefId(self.next_def_id());
                     self.register_type_name(&e.name, e.name_span, def, ItemKind::Enum, DefKind::Enum);
                     self.hir.enums.push(EnumInfo {
                         name: e.name.clone(),
@@ -80,7 +93,7 @@ impl<'a> Checker<'a> {
         // registered, so that a variant cannot silently shadow a struct.
         for item in items {
             if let ast::Item::Trait(t) = item {
-                let def = DefId(self.hir.structs.len() as u32 + self.hir.enums.len() as u32);
+                let def = DefId(self.next_def_id());
                 // Traits get their own def space entry for diagnostics only.
                 let entry = ItemEntry {
                     res: crate::hir::Res::Type(DefId(u32::MAX)),
@@ -195,6 +208,7 @@ impl<'a> Checker<'a> {
             locals: Vec::new(),
             body: None,
             is_pub: true,
+            owner: None,
         });
         id
     }
@@ -229,6 +243,7 @@ impl<'a> Checker<'a> {
                 locals: Vec::new(),
                 body: None,
                 is_pub: true,
+                owner: Some(self_ty_name.clone()),
             });
             }
     }

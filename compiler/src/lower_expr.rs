@@ -372,19 +372,73 @@ impl Lowering<'_> {
                 }
                 total
             }
-            crate::types::TyKind::Adt { def, .. } => {
-                // A struct is the sum of its fields. This ignores padding, which
-                // makes it an under-estimate for an aggregate with a mixed layout;
-                // it is exact for the element types a container uses today.
-                let fields = self.hir.structs.iter().find(|s| s.def_id == def)?.fields.clone();
-                let mut total = 0;
-                for f in fields {
-                    total += self.size_of(f.ty)?;
+            crate::types::TyKind::Adt { def, args } => {
+                if let Some(info) = self.hir.structs.iter().find(|s| s.def_id == def) {
+                    // A struct is the sum of its fields. This ignores padding, which
+                    // makes it an under-estimate for a mixed layout; it is exact for
+                    // the element types a container uses today.
+                    let generics = info.generics.clone();
+                    let fields = info.fields.clone();
+                    let mut subst = std::collections::HashMap::new();
+                    for (name, arg) in generics.iter().zip(args.iter()) {
+                        subst.insert(name.clone(), *arg);
+                    }
+                    let mut total = 0;
+                    for f in fields {
+                        let ty = if subst.is_empty() {
+                            f.ty
+                        } else {
+                            self.types.substitute(f.ty, &subst)
+                        };
+                        total += self.size_of(ty)?;
+                    }
+                    return Some(total);
                 }
-                total
+                // An enum is its tag followed by the widest payload. The tag is one
+                // byte while there are at most 256 variants, which is the only
+                // count a program can reach today without an enormous declaration.
+                let info = self.hir.enums.iter().find(|e| e.def_id == def)?;
+                let generics = info.generics.clone();
+                let variants = info.variants.clone();
+                let mut subst = std::collections::HashMap::new();
+                for (name, arg) in generics.iter().zip(args.iter()) {
+                    subst.insert(name.clone(), *arg);
+                }
+                let tag: u64 = if variants.len() <= 256 { 1 } else { 4 };
+                let mut payload: u64 = 0;
+                let mut align: u64 = 1;
+                for v in variants {
+                    let tys: Vec<crate::types::TyId> = match &v.fields {
+                        crate::hir::VariantFields::Tuple(tys) => tys.clone(),
+                        crate::hir::VariantFields::Struct(fs) => fs.iter().map(|f| f.ty).collect(),
+                        crate::hir::VariantFields::Unit => Vec::new(),
+                    };
+                    let mut total = 0;
+                    for t in tys {
+                        let ty = if subst.is_empty() { t } else { self.types.substitute(t, &subst) };
+                        total += self.size_of(ty)?;
+                        align = align.max(self.align_of(ty)?);
+                    }
+                    payload = payload.max(total);
+                }
+                let start = tag.div_ceil(align) * align;
+                (start + payload).div_ceil(align) * align
             }
             _ => return None,
         })
+    }
+
+    /// The alignment of a type in bytes, matching `Layouts`.
+    fn align_of(&mut self, ty: TyId) -> Option<u64> {
+        let size = self.size_of(ty)?;
+        // A type's alignment is the largest power of two that divides every
+        // possible address of it; for the types a program can write today that is
+        // the alignment of its widest scalar field.
+        let mut a = 1;
+        while a * 2 <= size && size % (a * 2) == 0 {
+            a *= 2;
+        }
+        Some(a)
     }
 
     pub(crate) fn place_type(&mut self, place: &crate::mir::Place) -> TyId {

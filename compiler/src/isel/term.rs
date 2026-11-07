@@ -215,7 +215,7 @@ impl<'a, 't> Isel<'a, 't> {
 
         // Anything else is an indirect call through a value.
         let reg = self.operand_to_reg(callee)?;
-        out.push(Inst::Call { target: MOperand::Reg(reg) });
+        out.push(Inst::Call { target: MOperand::Reg(reg), variadic: false });
 
         // Restore the stack after a call with stack arguments.
         if stack_bytes > 0 {
@@ -384,7 +384,11 @@ impl<'a, 't> Isel<'a, 't> {
         // operand keeps the two namespaces separate in the instruction
         // representation, so a symbol can never be confused with a label.
         self.note_symbol(symbol);
-        out.push(Inst::Call { target: MOperand::Mem(Mem::symbol(symbol)) });
+        // Every call out of the program may reach a C variadic function, and SysV
+        // requires `%al` to be zero for those. A non-variadic callee ignores the
+        // register, so setting it unconditionally costs one instruction and cannot
+        // be wrong. UMAY itself has no variadic functions.
+        out.push(Inst::Call { target: MOperand::Mem(Mem::symbol(symbol)), variadic: true });
 
         if area > 0 {
             out.push(Inst::Alu {

@@ -8,3 +8,8 @@ dist/*
 # Editor/OS noise
 *.swp
 .DS_Store
+
+# Scratch files written by the runtime tests in this directory.
+/compiler/*.bin
+/compiler/note.txt
+/compiler/log.txt

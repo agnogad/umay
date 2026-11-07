@@ -363,7 +363,7 @@ fn rewrite_inst(inst: &mut Inst, allocation: &Allocation) {
             }
             fix_mem(dst, allocation);
         }
-        Inst::Call { target } => {
+        Inst::Call { target, .. } => {
             if let MOperand::Reg(r) = target {
                 *target = resolve(*r, RegWidth::W64, allocation);
             }

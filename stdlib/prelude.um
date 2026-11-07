@@ -28,6 +28,15 @@ extern fn umay_read_byte(ptr: *const u8) -> u8
 extern fn umay_write_byte(ptr: *mut u8, value: u8) -> ()
 extern fn umay_read_i64(ptr: *const u8) -> i64
 extern fn umay_write_i64(ptr: *mut u8, value: i64) -> ()
+extern fn umay_open_read(path: *const u8) -> i32
+extern fn umay_create(path: *const u8) -> i32
+extern fn umay_append(path: *const u8) -> i32
+extern fn umay_close(fd: i32) -> i32
+extern fn umay_read(fd: i32, buf: *mut u8, count: usize) -> isize
+extern fn umay_write(fd: i32, buf: *const u8, count: usize) -> isize
+extern fn umay_unlink(path: *const u8) -> i32
+extern fn umay_rename(from: *const u8, to: *const u8) -> i32
+extern fn umay_mkdir(path: *const u8) -> i32
 extern fn umay_read_u16(ptr: *const u8) -> u16
 extern fn umay_write_u16(ptr: *mut u8, value: u16) -> ()
 extern fn umay_read_u32(ptr: *const u8) -> u32

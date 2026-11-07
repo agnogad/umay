@@ -172,6 +172,12 @@ pub struct HirFn {
     pub locals: Vec<LocalInfo>,
     pub body: Option<HirBlock>,
     pub is_pub: bool,
+    /// The type a method belongs to, when it was declared in an `impl` block.
+    ///
+    /// Two types may each have a `read` method and a C library may export `read`
+    /// itself, so a method's symbol is qualified with this name. Without it a
+    /// method would take over a C function of the same name at link time.
+    pub owner: Option<String>,
 }
 
 #[derive(Debug, Clone)]

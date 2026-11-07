@@ -63,7 +63,12 @@ fn build_and_run(name: &str, source: &str) -> Run {
     );
 
     let exe = dir.join("dist").join("main");
-    let out = Command::new(&exe).output().expect("run built program");
+    // The program runs in its own scratch directory: a test that writes a file
+    // must not leave it in the directory the test binary was started from.
+    let out = Command::new(&exe)
+        .current_dir(&dir)
+        .output()
+        .expect("run built program");
     let code = out.status.code().unwrap_or_else(|| {
         use std::os::unix::process::ExitStatusExt;
         // A signal death has no exit code; report it as a large number so a
@@ -873,5 +878,87 @@ fn an_associated_function_of_a_generic_type_takes_its_instance_from_the_binding(
              return 0\n\
          }",
         "4\n9\n",
+    );
+}
+
+#[test]
+fn a_file_is_written_and_read_back() {
+    // The program writes its own scratch file, so the only thing the test asserts
+    // is that the bytes round-trip and the sizes agree.
+    expect_stdout(
+        "fs_roundtrip",
+        "fn main() -> i32 {\n\
+             let w = write_file_bytes(\"note.txt\" as *const u8, \"merhaba\\n\" as *const u8, 8)\n\
+             println_i64(if w { 1 } else { 0 })\n\
+             println_i64(file_size(\"note.txt\" as *const u8))\n\
+             let f = File::open_read(\"note.txt\" as *const u8)\n\
+             println_i64(if f.is_open() { 1 } else { 0 })\n\
+             let buf = alloc(16)\n\
+             let n = f.read(buf, 16)\n\
+             println_i64(n as i64)\n\
+             let first = read_byte(buf)\n\
+             println_i64(first as i64)\n\
+             f.close()\n\
+             dealloc(buf)\n\
+             return 0\n\
+         }",
+        "1\n8\n1\n8\n109\n",
+    );
+}
+
+#[test]
+fn a_missing_file_is_reported_rather_than_panicking() {
+    // Opening something that is not there yields a closed `File`; nothing here
+    // aborts, because a missing file is an ordinary answer.
+    expect_stdout(
+        "fs_missing",
+        "fn main() -> i32 {\n\
+             let f = File::open_read(\"definitely_absent.txt\" as *const u8)\n\
+             println_i64(if f.is_open() { 1 } else { 0 })\n\
+             println_i64(file_size(\"definitely_absent.txt\" as *const u8))\n\
+             println_i64(if file_exists(\"definitely_absent.txt\" as *const u8) { 1 } else { 0 })\n\
+             return 0\n\
+         }",
+        "0\n-1\n0\n",
+    );
+}
+
+#[test]
+fn a_file_is_appended_and_removed() {
+    expect_stdout(
+        "fs_append",
+        "fn main() -> i32 {\n\
+             let _ = write_file_bytes(\"log.txt\" as *const u8, \"one\\n\" as *const u8, 4)\n\
+             let f = File::append(\"log.txt\" as *const u8)\n\
+             let _ = f.write_str(\"two\\n\" as *const u8)\n\
+             f.close()\n\
+             println_i64(file_size(\"log.txt\" as *const u8))\n\
+             println_i64(if remove_file(\"log.txt\" as *const u8) { 1 } else { 0 })\n\
+             println_i64(if file_exists(\"log.txt\" as *const u8) { 1 } else { 0 })\n\
+             return 0\n\
+         }",
+        "8\n1\n0\n",
+    );
+}
+
+#[test]
+fn a_whole_file_is_read_into_a_byte_vector() {
+    // This is the first real use of `Vec<u8>`: the file's bytes arrive through the
+    // vector, so a wrong stride would show up as wrong bytes rather than a wrong
+    // length.
+    expect_stdout(
+        "fs_read_all",
+        "fn main() -> i32 {\n\
+             let text = \"abc\"\n\
+             let _ = write_file_bytes(\"data.bin\" as *const u8, text as *const u8, 3)\n\
+             let bytes = read_file_bytes(\"data.bin\" as *const u8)\n\
+             println_i64(bytes.len() as i64)\n\
+             println_i64(bytes.get(0))\n\
+             println_i64(bytes.get(1))\n\
+             println_i64(bytes.get(2))\n\
+             bytes.free()\n\
+             return 0\n\
+         }",
+        "3\n97\n98\n99\n",
     );
 }

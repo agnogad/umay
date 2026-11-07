@@ -214,13 +214,20 @@ pub fn print_inst(inst: &Inst, function: &str) -> String {
         Inst::SetCc { cond, dst } => format!("set{} {}", cond.suffix(), op_str(dst, RegWidth::W8)),
         Inst::Jmp(label) => format!("jmp .L{}_{}", function, label.0),
         Inst::Jcc { cond, target } => format!("j{} .L{}_{}", cond.suffix(), function, target.0),
-        Inst::Call { target } => match target {
-            Operand::Mem(mem) => match &mem.symbol {
-                Some(sym) => format!("call {}", sym.name),
-                None => format!("callq *{}", op_str(target, RegWidth::W64)),
-            },
-            other => format!("callq *{}", op_str(other, RegWidth::W64)),
-        },
+        Inst::Call { target, variadic } => {
+            // SysV requires `%al` to hold the number of vector registers used when
+            // calling a variadic function. UMAY passes none, so it is zero; a call
+            // to `open` would otherwise hand the callee whatever `%al` held.
+            let prefix = if *variadic { "    movb $0, %al\n" } else { "" };
+            let call = match target {
+                Operand::Mem(mem) => match &mem.symbol {
+                    Some(sym) => format!("call {}", sym.name),
+                    None => format!("callq *{}", op_str(target, RegWidth::W64)),
+                },
+                other => format!("callq *{}", op_str(other, RegWidth::W64)),
+            };
+            format!("{prefix}{call}")
+        }
         Inst::Ret => "ret".to_string(),
         Inst::Push(op) => format!("pushq {}", op_str(op, RegWidth::W64)),
         Inst::Pop(op) => format!("popq {}", op_str(op, RegWidth::W64)),

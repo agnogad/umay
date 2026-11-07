@@ -1,0 +1,166 @@
+// Reading and writing files.
+//
+// A `File` is a descriptor and a flag saying whether it is open. Closing twice is
+// therefore a no-op rather than a second `close` on a descriptor that the process
+// may have reused for something else — the classic way a program closes the wrong
+// file.
+//
+// Every operation that can fail returns a value the caller must look at: a
+// descriptor of `-1` or a byte count of `-1`. Nothing here panics, because a
+// missing file is an ordinary thing for a program to meet.
+
+struct File {
+    fd: i32,
+    open: bool,
+}
+
+impl File {
+    // Opens `path` for reading. Check `is_open` before using the result.
+    fn open_read(path: *const u8) -> File {
+        let fd = umay_open_read(path)
+        return File { fd: fd, open: fd >= 0 }
+    }
+
+    // Creates `path`, truncating it if it exists, and opens it for writing.
+    fn create(path: *const u8) -> File {
+        let fd = umay_create(path)
+        return File { fd: fd, open: fd >= 0 }
+    }
+
+    // Opens `path` for appending, creating it when it does not exist.
+    fn append(path: *const u8) -> File {
+        let fd = umay_append(path)
+        return File { fd: fd, open: fd >= 0 }
+    }
+
+    // True when the file was opened successfully.
+    fn is_open(&self) -> bool {
+        return self.open
+    }
+
+    // The descriptor, for passing to a function that takes one directly.
+    fn fd(&self) -> i32 {
+        return self.fd
+    }
+
+    // Reads up to `count` bytes into `buf`.
+    //
+    // Returns how many were read: 0 at the end of the file, -1 on failure. A
+    // short count is not an error; it means the file held nothing more right now.
+    fn read(&self, buf: *mut u8, count: usize) -> isize {
+        if !self.open {
+            return -1
+        }
+        return umay_read(self.fd, buf, count)
+    }
+
+    // Writes `count` bytes from `buf`, returning how many were written or -1.
+    fn write(&self, buf: *const u8, count: usize) -> isize {
+        if !self.open {
+            return -1
+        }
+        return umay_write(self.fd, buf, count)
+    }
+
+    // Writes a NUL-terminated byte string.
+    fn write_str(&self, text: *const u8) -> isize {
+        return self.write(text, byte_len(text))
+    }
+
+    // Closes the file. A second call does nothing.
+    fn close(&self) -> i32 {
+        if !self.open {
+            return 0
+        }
+        return umay_close(self.fd)
+    }
+}
+
+// The size of the file at `path` in bytes, or -1 when it cannot be read.
+//
+// The file is read to the end rather than asked its size, because the runtime
+// does not bind `stat` yet. For the sizes a program reads into memory that is the
+// same work it was going to do anyway.
+fn file_size(path: *const u8) -> i64 {
+    let f = File::open_read(path)
+    if !f.is_open() {
+        return -1
+    }
+    let buf = alloc(4096)
+    let mut total = 0 as i64
+    while true {
+        let n = f.read(buf, 4096)
+        if n <= 0 {
+            break
+        }
+        total = total + n as i64
+    }
+    f.close()
+    dealloc(buf)
+    return total
+}
+
+// Reads the whole file at `path` into a `Vec<u8>`.
+//
+// Returns an empty vector when the file cannot be opened, which the caller can
+// tell apart from an empty file with `file_exists`.
+fn read_file_bytes(path: *const u8) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new()
+    let f = File::open_read(path)
+    if !f.is_open() {
+        return out
+    }
+    let buf = alloc(4096)
+    while true {
+        let n = f.read(buf, 4096)
+        if n <= 0 {
+            break
+        }
+        let mut i = 0 as usize
+        while i < n as usize {
+            unsafe {
+                out = out.push(read_byte((buf as usize + i) as *const u8) as i64)
+            }
+            i = i + 1 as usize
+        }
+    }
+    f.close()
+    dealloc(buf)
+    return out
+}
+
+// Writes `data` to `path`, creating or truncating it. Returns true on success.
+fn write_file_bytes(path: *const u8, data: *const u8, count: usize) -> bool {
+    let f = File::create(path)
+    if !f.is_open() {
+        return false
+    }
+    let written = f.write(data, count)
+    f.close()
+    return written >= 0 && written as usize == count
+}
+
+// True when `path` names a file that can be opened for reading.
+fn file_exists(path: *const u8) -> bool {
+    let f = File::open_read(path)
+    if !f.is_open() {
+        return false
+    }
+    f.close()
+    return true
+}
+
+// Removes the file at `path`, returning true on success.
+fn remove_file(path: *const u8) -> bool {
+    return umay_unlink(path) == 0
+}
+
+// Renames `from` to `to`, returning true on success.
+fn rename_path(from: *const u8, to: *const u8) -> bool {
+    return umay_rename(from, to) == 0
+}
+
+// Creates a directory, returning true on success.
+fn create_dir(path: *const u8) -> bool {
+    return umay_mkdir(path) == 0
+}

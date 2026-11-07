@@ -227,34 +227,14 @@ impl<'t> Mono<'t> {
         self.next_id += 1;
         self.produced.insert(instance.clone(), id);
 
-        if std::env::var("UMAY_TRACE_MONO").is_ok() {
-            eprintln!("INST {} {:?} names {:?} args {:?}", instance.callee.0, hir.fns[index].name, names, instance.args);
-            for t in &hir.fns[index].params {
-                eprintln!("  param {} => {:?}", self.types.display(*t), self.types.kind(*t).clone());
-                if let TyKind::Ref(inner) = self.types.kind(*t).clone() {
-                    eprintln!("   inner {:?}", self.types.kind(inner).clone());
-                    if let TyKind::Adt { args, .. } = self.types.kind(inner).clone() {
-                        for a in args {
-                            eprintln!("    arg {} => {:?}", self.types.display(a), self.types.kind(a).clone());
-                        }
-                    }
-                }
-            }
-        }
-        let mut copy = hir.fns[index].clone();
+                let mut copy = hir.fns[index].clone();
         copy.id = id;
         copy.name = mangled(&hir.fns[index].name, &instance.args);
         // The copy is no longer generic: its parameters have been decided, so
         // leaving them in place would make the checker's own rule refuse it.
         copy.generics.clear();
-        if std::env::var("UMAY_TRACE_MONO").is_ok() {
-            eprintln!("  subst {:?} ret {} first_param {:?}", subst.iter().map(|(k,v)| (k.clone(), v.0)).collect::<Vec<_>>(), self.types.display(hir.fns[index].ret), self.types.first_param(hir.fns[index].ret));
-        }
-        substitute_fn_types(self.types, &mut copy, &subst);
-        if std::env::var("UMAY_TRACE_MONO").is_ok() {
-            eprintln!("  copy params {:?}", copy.params.iter().map(|t| self.types.display(*t)).collect::<Vec<_>>());
-        }
-        let new_index = hir.fns.len();
+                substitute_fn_types(self.types, &mut copy, &subst);
+                let new_index = hir.fns.len();
         hir.fns.push(copy);
         // The copy may call other instantiations, so its body is scanned too.
         self.collect_fn(hir, new_index);
@@ -531,10 +511,7 @@ fn substitute_fn_types(types: &mut TyCtxt, f: &mut HirFn, subst: &HashMap<String
     if subst.is_empty() {
         return;
     }
-    if std::env::var("UMAY_TRACE_MONO").is_ok() {
-        eprintln!("   SUBST in ret {} params {:?} map {:?}", types.display(f.ret), f.params.iter().map(|t| types.display(*t)).collect::<Vec<_>>(), subst.iter().map(|(k,v)| (k.clone(), v.0)).collect::<Vec<_>>());
-    }
-    let params: Vec<TyId> = f.params.iter().map(|t| types.substitute(*t, subst)).collect();
+        let params: Vec<TyId> = f.params.iter().map(|t| types.substitute(*t, subst)).collect();
     f.params = params;
     f.ret = types.substitute(f.ret, subst);
     for l in &mut f.locals {
@@ -543,10 +520,7 @@ fn substitute_fn_types(types: &mut TyCtxt, f: &mut HirFn, subst: &HashMap<String
     if let Some(body) = &mut f.body {
         substitute_block_types(types, body, subst);
     }
-    if std::env::var("UMAY_TRACE_MONO").is_ok() {
-        eprintln!("   SUBST out ret {} params {:?}", types.display(f.ret), f.params.iter().map(|t| types.display(*t)).collect::<Vec<_>>());
     }
-}
 
 fn substitute_block_types(types: &mut TyCtxt, block: &mut HirBlock, subst: &HashMap<String, TyId>) {
     for stmt in &mut block.stmts {

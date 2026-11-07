@@ -33,6 +33,34 @@ extern fn write(fd: i32, buf: *const u8, count: usize) -> isize
 // `exit(code)` terminates the process.
 extern fn exit(code: i32) -> ()
 
+// POSIX file system calls. Each returns -1 on failure, which the wrappers below
+// turn into a result the caller can branch on.
+//
+// `open(path, flags, mode)` returns a file descriptor, or -1.
+extern fn open(path: *const u8, flags: i32, mode: i32) -> i32
+// `close(fd)` releases a descriptor.
+extern fn close(fd: i32) -> i32
+// `read(fd, buf, count)` returns how many bytes were read, 0 at the end, or -1.
+extern fn read(fd: i32, buf: *mut u8, count: usize) -> isize
+// `unlink(path)` removes a file.
+extern fn unlink(path: *const u8) -> i32
+// `rename(from, to)` renames a file.
+extern fn rename(from: *const u8, to: *const u8) -> i32
+// `mkdir(path, mode)` creates a directory.
+extern fn mkdir(path: *const u8, mode: i32) -> i32
+
+// The flags `open` takes, as the kernel numbers them on Linux.
+//
+// They are spelled out rather than derived because they are an operating system's
+// constants, not the language's: a different system would need its own numbers,
+// and the day UMAY runs on one this table is what changes.
+const O_RDONLY: i32 = 0
+const O_WRONLY: i32 = 1
+const O_RDWR: i32 = 2
+const O_CREAT: i32 = 64
+const O_TRUNC: i32 = 512
+const O_APPEND: i32 = 1024
+
 // The standard file descriptors.
 const STDOUT: i32 = 1
 const STDERR: i32 = 2
@@ -105,6 +133,71 @@ pub fn umay_read_u32(ptr: *const u8) -> u32 {
 // Writes a `u32` to a raw address.
 pub fn umay_write_u32(ptr: *mut u8, value: u32) {
     unsafe { *(ptr as *mut u32) = value }
+}
+
+// --- file descriptors -------------------------------------------------------
+
+// Opens `path` for reading and returns the descriptor, or -1.
+pub fn umay_open_read(path: *const u8) -> i32 {
+    return open(path, O_RDONLY, 0)
+}
+
+// Opens `path` for writing, creating or truncating it, and returns the descriptor,
+// or -1.
+pub fn umay_create(path: *const u8) -> i32 {
+    return open(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
+}
+
+// Opens `path` for appending, creating it if it does not exist, or -1.
+pub fn umay_append(path: *const u8) -> i32 {
+    return open(path, O_WRONLY | O_CREAT | O_APPEND, 420)
+}
+
+// Closes `fd` and returns 0, or -1.
+pub fn umay_close(fd: i32) -> i32 {
+    return close(fd)
+}
+
+// Fills `buf` with up to `count` bytes from `fd`.
+//
+// Returns the number read, which is 0 at the end of the file and -1 on failure.
+pub fn umay_read(fd: i32, buf: *mut u8, count: usize) -> isize {
+    return read(fd, buf, count)
+}
+
+// Writes `count` bytes to `fd`, retrying a short write.
+//
+// A write may accept fewer bytes than it is given; without the loop the rest
+// would be lost and a file would end up truncated with no error reported.
+pub fn umay_write(fd: i32, buf: *const u8, count: usize) -> isize {
+    let mut done = 0 as usize
+    while done < count {
+        let left = count - done
+        let chunk = write(fd, unsafe { (buf as usize + done) as *const u8 }, left)
+        if chunk < 0 {
+            return -1
+        }
+        if chunk == 0 {
+            return done as isize
+        }
+        done = done + chunk as usize
+    }
+    return done as isize
+}
+
+// Removes the file at `path`.
+pub fn umay_unlink(path: *const u8) -> i32 {
+    return unlink(path)
+}
+
+// Renames a file.
+pub fn umay_rename(from: *const u8, to: *const u8) -> i32 {
+    return rename(from, to)
+}
+
+// Creates a directory.
+pub fn umay_mkdir(path: *const u8) -> i32 {
+    return mkdir(path, 493)
 }
 
 // --- byte strings -----------------------------------------------------------
