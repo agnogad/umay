@@ -14,6 +14,16 @@ impl FnChecker<'_, '_> {
         self.check_expr_hinted(e, None)
     }
 
+    /// Checks a statement's expression, which may be used at a type written on it.
+    ///
+    /// `f(x) as i64` at statement level discards its value, so nothing around it
+    /// asks for a type. The cast still names one, and the call beneath it needs
+    /// that name to resolve a generic receiver, so it is passed down as a hint
+    /// and otherwise ignored.
+    pub fn check_stmt_expr(&mut self, e: &ast::Expr) -> HirExpr {
+        self.check_expr_hinted(e, None)
+    }
+
     /// Checks an expression whose type the surrounding context already knows.
     ///
     /// The hint is only an aid to inference: a struct literal that cannot name
@@ -93,7 +103,7 @@ impl FnChecker<'_, '_> {
             ast::ExprKind::Cast { expr, ty } => self.check_cast(expr, ty, span),
             ast::ExprKind::Call { callee, args, .. } => self.check_call(callee, args, span, hint),
             ast::ExprKind::MethodCall { receiver, method, method_span, args } => {
-                self.check_method_call(receiver, method, *method_span, args, span)
+                self.check_method_call(receiver, method, *method_span, args, span, hint)
             }
             ast::ExprKind::FieldAccess { base, field, field_span } => {
                 self.check_field_access(base, field, *field_span, span)

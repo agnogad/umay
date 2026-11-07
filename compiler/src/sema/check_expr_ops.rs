@@ -384,9 +384,12 @@ impl FnChecker<'_, '_> {
     }
 
     pub fn check_cast(&mut self, expr: &ast::Expr, ty: &ast::TypeExpr, span: crate::source::Span) -> HirExpr {
-        let value = self.check_expr(expr);
+        // The cast's target is the operand's context: `make(7i64).get() as i64`
+        // says which instance the receiver of `get` must be, so the operand is
+        // checked against it rather than in isolation.
         let generics = self.generics.clone();
         let to = self.cx.resolve_type(ty, &generics);
+        let value = self.check_expr_hinted(expr, Some(to));
         if self.cx.cx.is_error(value.ty) || self.cx.cx.is_error(to) {
             return self.error_hir(span);
         }

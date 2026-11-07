@@ -2035,3 +2035,53 @@ fn main() -> i32 {
 "##;
     expect_stdout("turbofish", source, "7\n1\n");
 }
+
+#[test]
+fn a_generic_calls_result_can_be_bound_and_used() {
+    // `fn make<T>(v: T) -> B<T>` names its own parameter inside another type, so
+    // at check time the call answers `B<T>`. The value it produced is a `B<i64>`,
+    // and that is what the binding holds.
+    let source = r##"
+struct B<T> {
+    value: T,
+}
+
+impl<T> B<T> {
+    fn get(self) -> T {
+        return self.value
+    }
+}
+
+fn make<T>(v: T) -> B<T> {
+    return B { value: v }
+}
+
+fn main() -> i32 {
+    let a = make(7i64)
+    println_i64(a.get())
+    let c: i64 = make(9i64).get()
+    println_i64(c)
+    return 0
+}
+"##;
+    expect_stdout("generic_binding_result", source, "7\n9\n");
+}
+
+#[test]
+fn a_generic_functions_result_takes_the_type_the_binding_is_used_at() {
+    let source = r##"
+fn id<T>(value: T) -> T {
+    return value
+}
+
+fn main() -> i32 {
+    let a = id(7i64)
+    println_i64(a)
+    let mut v: Vec<i32> = Vec::new()
+    v = v.push(id(41i32))
+    println_i64(v.get(0) as i64)
+    return 0
+}
+"##;
+    expect_stdout("generic_binding_param", source, "7\n41\n");
+}

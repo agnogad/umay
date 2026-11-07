@@ -71,6 +71,13 @@ pub struct Checker<'a> {
     pub(crate) methods: HashMap<(String, String), FnId>,
     /// Method names belonging to each type, for "unknown method" suggestions.
     pub(crate) methods_of_type: HashMap<String, Vec<String>>,
+    /// The parameters the `impl` block around a method declared, keyed by
+    /// `(type name, method name)` and paired with the method's id.
+    ///
+    /// Recorded so that a receiver whose instance is not written down can still
+    /// be filled in: `make(7i64).get()` answers `B<T>` at check time, and only
+    /// this table says which `T` the receiver means.
+    pub(crate) method_generics: HashMap<(String, String), (FnId, Vec<String>)>,
     /// Trait declarations by name.
     pub(crate) traits: HashMap<String, ast::TraitDecl>,
     /// Constants with resolved types and bodies, checked in a later pass so
@@ -122,6 +129,7 @@ impl<'a> Checker<'a> {
             const_by_name: HashMap::new(),
             methods: HashMap::new(),
             methods_of_type: HashMap::new(),
+            method_generics: HashMap::new(),
             traits: HashMap::new(),
             pending_consts: Vec::new(),
             settled_vars: HashMap::new(),

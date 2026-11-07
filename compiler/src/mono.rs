@@ -49,6 +49,7 @@ impl Instance {
     }
 }
 
+
 /// Fills in concrete copies of every generic function the program uses.
 pub struct Mono<'t> {
     types: &'t mut TyCtxt,
@@ -70,6 +71,8 @@ pub struct Mono<'t> {
     methods: HashMap<(String, String), FnId>,
     /// Each struct or enum's name, keyed by definition id.
     def_names: HashMap<crate::types::DefId, String>,
+    /// Each function's declared return type, keyed by id.
+    returns: HashMap<FnId, TyId>,
     /// Trait method calls whose receiver never became a concrete type, as
     /// `(trait, method, span)`. Reported rather than dropped.
     pub unresolved_trait_calls: Vec<(String, String, crate::source::Span)>,
@@ -126,8 +129,10 @@ impl<'t> Mono<'t> {
         for e in &hir.enums {
             def_names.insert(e.def_id, e.name.clone());
         }
+        let returns = hir.fns.iter().map(|f| (f.id, f.ret)).collect();
         Mono {
             types,
+            returns,
             worklist: Vec::new(),
             produced: Default::default(),
             decl_generics,
@@ -157,7 +162,25 @@ impl<'t> Mono<'t> {
         }
         self.discover(hir);
         self.resolve(hir);
-        self.settle_let_types(hir);
+        // A binding whose type is settled changes the receiver type of every call
+        // on it, and a call site is resolved against the receiver, so settling and
+        // resolving have to trade places until neither changes anything. In
+        // practice one round is enough; the loop is here because a binding
+        // settled by a later round would otherwise keep a stale call.
+        let mut rounds = 0;
+        while self.settle_let_types(hir) {
+            rounds += 1;
+            if rounds > 8 {
+                break;
+            }
+            self.resolve(hir);
+            // `resolve` walks every body again and records any instance it newly
+            // needs, so those copies have to be produced before the next round can
+            // point anything at them.
+            while let Some(instance) = self.worklist.pop() {
+                self.instantiate(hir, instance);
+            }
+        }
     }
 
     /// Gives every `let` binding the type its initialiser finally has.
@@ -167,20 +190,43 @@ impl<'t> Mono<'t> {
     /// generic, and the call site is what fills `T` in. The local table kept the
     /// `B<T>`, and a type parameter nothing resolved has no size, so the function
     /// could not be laid out. This runs after instantiation has settled.
-    fn settle_let_types(&mut self, hir: &mut Hir) {
+    /// Returns true when any binding or call type changed.
+    fn settle_let_types(&mut self, hir: &mut Hir) -> bool {
+        let mut changed = false;
         for f in hir.fns.iter_mut() {
             let mut fixes: Vec<(usize, TyId)> = Vec::new();
+            // A binding's type is recorded twice: as a local, and inside the
+            // statement's pattern. The local is what lowering lays out, so it is
+            // the one that must be settled; the pattern follows it, which keeps
+            // the two from disagreeing about a destructuring initialiser.
             if let Some(body) = &f.body {
-                collect_let_fixes(body, &mut fixes);
+                collect_let_fixes(self.types, body, &f.declared_local_tys, &mut fixes);
             }
             for (local, ty) in fixes {
                 if let Some(info) = f.locals.get_mut(local) {
-                    if crate::sema::mentions_unresolved_param(self.types, info.ty) {
+                    if mentions_unresolved_param(self.types, info.ty) {
                         info.ty = ty;
+                        changed = true;
                     }
                 }
             }
+            // A call on such a local was checked against the parametric type, and
+            // the receiver's type is stored on the expression before the call is
+            // resolved, so it is settled too: `let b = make(9i64)` then
+            // `b.get()` must name `B<i64>`, not `B<T>`.
+            let settled: Vec<(usize, TyId)> = f
+                .locals
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (i, l.ty))
+                .collect();
+            if let Some(body) = &mut f.body {
+                if retype_local_refs(body, &settled) {
+                    changed = true;
+                }
+            }
         }
+        changed
     }
 
     /// Phase one: walks every body and produces the copies call sites need.
@@ -318,12 +364,27 @@ impl<'t> Mono<'t> {
         None
     }
 
+    /// A function's declared return type, for resolving a receiver from it.
+    fn hir_ret(&self, id: FnId) -> Option<TyId> {
+        self.returns.get(&id).copied()
+    }
+
+    /// The instance a still-parametric local now has, once its value is known.
+    ///
+    /// Exposed for the one place a receiver can be settled after instantiation:
+    /// a method call on a local whose type was decided before the initialiser was
+    /// instantiated.
+    pub(crate) fn settle_binding(&mut self, ty: TyId, init: TyId, hint: TyId) -> TyId {
+        settle_binding(self.types, ty, init, Some(hint))
+    }
+
     /// The produced copy for an instance, if it exists.
     fn lookup(&self, callee: FnId, args: &[TyId]) -> Option<FnId> {
         if !self.is_generic(callee) {
             return Some(callee);
         }
-        self.produced.get(&Instance::new(callee, args.to_vec())).copied()
+        let inst = Instance::new(callee, args.to_vec());
+        self.produced.get(&inst).copied()
     }
 }
 
@@ -534,6 +595,31 @@ impl<'m, 't, 'h> Rewriter<'m, 't, 'h> {
                 self.rewrite_expr(receiver);
                 for a in args.iter_mut() {
                     self.rewrite_expr(a);
+                }
+                // A receiver's own type is the answer, and so is the type the call
+                // is used at: `let b = make(9i64)` records the receiver as `B<T>`
+                // at check time, but the value it holds is a `B<i64>`, and
+                // `b.get()` is used where an `i64` is expected.
+                let base = peel_refs(self.mono.types, receiver.ty);
+                if self.mono.types.first_param(base).is_some() {
+                    // The instance may also come from the method's own result: a
+                    // method that answers `T` used where an `i64` is expected says
+                    // the receiver is the `T = i64` instance.
+                    let names = self
+                        .mono
+                        .impl_generics
+                        .get(method)
+                        .cloned()
+                        .unwrap_or_default();
+                    let from_result = self
+                        .mono
+                        .hir_ret(*method)
+                        .and_then(|ret| fill_from_result(self.mono.types, base, ret, e.ty, &names));
+                    let hint = from_result.unwrap_or(e.ty);
+                    let mut settled = self.mono.settle_binding(base, receiver.ty, hint);
+                    if !crate::sema::mentions_unresolved_param(self.mono.types, settled) {
+                        receiver.ty = settled;
+                    }
                 }
                 let Some(instance_args) = self.mono.infer_method(*method, receiver.ty) else {
                     return;
@@ -871,26 +957,180 @@ pub fn synthetic() -> Span {
 
 /// Pairs every `let` binding with the type its initialiser now has, when the
 /// binding's type still names a parameter.
-fn collect_let_fixes(block: &HirBlock, out: &mut Vec<(usize, TyId)>) {
+fn collect_let_fixes(
+    types: &mut TyCtxt,
+    block: &HirBlock,
+    hints: &std::collections::HashMap<usize, TyId>,
+    out: &mut Vec<(usize, TyId)>,
+) {
     for stmt in &block.stmts {
         match &stmt.kind {
-            HirStmtKind::Let { bindings, init, .. } => {
+            HirStmtKind::Let { bindings, init, pattern } => {
                 if let Some(init) = init {
+                    let hint = match &pattern.kind {
+                        HirPatternKind::Binding { local, .. } => hints.get(&(local.0 as usize)).copied(),
+                        _ => None,
+                    };
                     if let Some(b) = bindings.first() {
-                        out.push((b.0 as usize, init.ty));
+                        out.push((b.0 as usize, settle_binding(types, init.ty, init.ty, hint)));
                     }
                 }
             }
-            HirStmtKind::Expr(e) => collect_let_fixes_expr(e, out),
+            HirStmtKind::Expr(e) => collect_let_fixes_expr(types, e, hints, out),
         }
     }
     if let Some(tail) = &block.tail {
-        collect_let_fixes_expr(tail, out);
+        collect_let_fixes_expr(types, tail, hints, out);
     }
 }
 
-fn collect_let_fixes_expr(e: &HirExpr, out: &mut Vec<(usize, TyId)>) {
-    for child in crate::hir::child_exprs(e) {
-        collect_let_fixes_expr(child, out);
+fn collect_let_fixes_expr(
+    types: &mut TyCtxt,
+    e: &HirExpr,
+    hints: &std::collections::HashMap<usize, TyId>,
+    out: &mut Vec<(usize, TyId)>,
+) {
+    match &e.kind {
+        HirExprKind::If { then_block, else_branch, .. } => {
+            collect_let_fixes(types, then_block, hints, out);
+            if let Some(else_branch) = else_branch {
+                collect_let_fixes_expr(types, else_branch, hints, out);
+            }
+        }
+        HirExprKind::While { body, .. }
+        | HirExprKind::Loop { body }
+        | HirExprKind::Defer(body)
+        | HirExprKind::Unsafe(body)
+        | HirExprKind::For { body, .. }
+        | HirExprKind::Block(body) => collect_let_fixes(types, body, hints, out),
+        HirExprKind::Match { arms, .. } => {
+            for arm in arms.iter() {
+                collect_let_fixes_expr(types, &arm.body, hints, out);
+            }
+        }
+        _ => {}
     }
+    for child in crate::hir::child_exprs(e) {
+        collect_let_fixes_expr(types, child, hints, out);
+    }
+}
+
+/// The instance a receiver must have for a method's result to be `want`.
+///
+/// `fn get(self) -> T` on `impl<T> B<T>` answers a bare `T`, so a use that wants
+/// an `i64` says the receiver is `T = i64`. A result that names no parameter, or
+/// one that wraps the parameter in a different declaration, gives nothing.
+fn fill_from_result(
+    types: &mut TyCtxt,
+    recv_base: TyId,
+    declared_ret: TyId,
+    want: TyId,
+    names: &[String],
+) -> Option<TyId> {
+    if crate::sema::mentions_unresolved_param(types, want) {
+        return None;
+    }
+    let TyKind::Adt { def, args } = types.kind(recv_base).clone() else { return None };
+    if args.len() != names.len() {
+        return None;
+    }
+    let TyKind::Param { name } = types.kind(declared_ret).clone() else { return None };
+    let position = names.iter().position(|g| *g == name)?;
+    let mut fixed = args;
+    fixed[position] = want;
+    Some(types.adt(def, fixed))
+}
+
+/// Gives every reference to a local the local's settled type.
+///
+/// The type of `b` in `b.get()` is a field of the receiver expression, decided
+/// when the expression was checked. Once the local's type is settled that copy is
+/// stale, and the call behind it resolves against the stale one.
+fn retype_local_refs(block: &mut HirBlock, locals: &[(usize, TyId)]) -> bool {
+    let mut changed = false;
+    for stmt in &mut block.stmts {
+        match &mut stmt.kind {
+            HirStmtKind::Let { init, .. } => {
+                if let Some(init) = init {
+                    changed |= retype_local_refs_expr(init, locals);
+                }
+            }
+            HirStmtKind::Expr(e) => changed |= retype_local_refs_expr(e, locals),
+        }
+    }
+    if let Some(tail) = &mut block.tail {
+        changed |= retype_local_refs_expr(tail, locals);
+    }
+    changed
+}
+
+fn retype_local_refs_expr(e: &mut HirExpr, locals: &[(usize, TyId)]) -> bool {
+    let mut changed = false;
+    if let HirExprKind::Local(id) = e.kind {
+        if let Some((_, ty)) = locals.get(id.0 as usize) {
+            if e.ty != *ty {
+                e.ty = *ty;
+                changed = true;
+            }
+        }
+    }
+    for child in crate::hir::child_exprs_mut(e) {
+        changed |= retype_local_refs_expr(child, locals);
+    }
+    changed
+}
+
+/// The type a `let` binding finally has, once its initialiser is concrete.
+///
+/// An initialiser that answered `B<T>` while its value carried `B<i64>` naming
+/// the same declaration is the case this exists for: a generic function whose
+/// result names its own parameter inside another type answers with the template,
+/// because the call is checked before it is instantiated. The declaration is the
+/// same on both sides, so the known instance is the answer.
+fn settle_binding(types: &mut TyCtxt, ty: TyId, init: TyId, hint: Option<TyId>) -> TyId {
+    if !mentions_unresolved_param(types, ty) {
+        return ty;
+    }
+    // A parameter with no structure around it is the one `fn id<T>(v: T) -> T`
+    // answers with, and the value itself is the answer.
+    if matches!(types.kind(ty), TyKind::Param { .. }) && !mentions_unresolved_param(types, init) {
+        return init;
+    }
+    // Otherwise the binding names a declaration whose instance the initialiser
+    // or the annotation wrote out, and that instance is the answer.
+    for candidate in [Some(init), hint].into_iter().flatten() {
+        if let (
+            TyKind::Adt { def: d1, .. },
+            TyKind::Adt { def: d2, args: candidate_args },
+        ) = (types.kind(ty).clone(), types.kind(candidate).clone())
+        {
+            if d1 == d2 && instance_is_known(types, &candidate_args) {
+                return types.adt(d1, candidate_args);
+            }
+        }
+    }
+    ty
+}
+
+fn args_mention_param(types: &TyCtxt, args: &[TyId]) -> bool {
+    args.iter().any(|a| types.first_param(*a).is_some())
+}
+
+/// True when an instance has already been decided, rather than still naming a
+/// parameter.
+///
+/// `B<i64>` is one; `B<T>` and `B` (no arguments at all) are not. The empty case
+/// matters: a type written without arguments is what `make` answers before
+/// instantiation, and it is just as undecided as one holding a parameter.
+fn instance_is_known(types: &TyCtxt, args: &[TyId]) -> bool {
+    !args.is_empty() && !args_mention_param(types, args)
+}
+
+/// True when `ty` is, or contains, a type parameter nothing has decided.
+///
+/// This is deliberately wider than the checker's version of the same question: a
+/// `let` that took its type from a generic call records the parameter itself, not
+/// an error standing in for one, so only looking for errors would miss it.
+fn mentions_unresolved_param(types: &TyCtxt, ty: TyId) -> bool {
+    types.first_param(ty).is_some() || crate::sema::mentions_unresolved_param(types, ty)
 }

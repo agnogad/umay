@@ -37,6 +37,12 @@ pub struct FnChecker<'c, 's> {
     pub unsafe_depth: u32,
     /// Local types, indexed by LocalId, to support `finish_locals`.
     pub local_tys: HashMap<LocalId, TyId>,
+    /// The type each `let` was annotated with, keyed by local index.
+    ///
+    /// An annotation is an inference hint, and for a generic call it is the only
+    /// place the intended instance is written down: the call itself answers with
+    /// the template. Monomorphisation reads this to settle the binding.
+    pub declared_local_tys: HashMap<usize, TyId>,
 }
 
 impl<'c, 's> FnChecker<'c, 's> {
@@ -52,6 +58,7 @@ impl<'c, 's> FnChecker<'c, 's> {
             pending_defaults: Vec::new(),
             unsafe_depth: 0,
             local_tys: HashMap::new(),
+            declared_local_tys: HashMap::new(),
         }
     }
 
@@ -289,6 +296,11 @@ impl<'c, 's> FnChecker<'c, 's> {
         let pattern = self.bind_pattern(&l.pattern, binding_ty, l.mutable);
         let mut ids = Vec::new();
         collect_hir_binding_locals(&pattern, &mut ids);
+        if let Some(a) = annotation {
+            for id in &ids {
+                self.declared_local_tys.insert(id.0 as usize, a);
+            }
+        }
         // The initializer is kept so that MIR can evaluate it, and the pattern is
         // kept so lowering knows which part of it each binding came from: a
         // destructuring `let` gives every binding its own projection, not just the

@@ -211,6 +211,7 @@ impl<'a> Checker<'a> {
             is_pub: true,
             owner: None,
             link_name: None,
+            declared_local_tys: Default::default(),
         });
         id
     }
@@ -247,6 +248,7 @@ impl<'a> Checker<'a> {
                 is_pub: true,
                 owner: Some(self_ty_name.clone()),
                 link_name: None,
+                declared_local_tys: Default::default(),
             });
             }
     }
@@ -412,6 +414,15 @@ impl<'a> Checker<'a> {
                         self.cx.param_bounds.push(entry);
                     }
                 }
+            }
+        }
+        // A method of a generic type records which parameters its `impl` block
+        // declared. Somewhere else, a receiver whose instance is not written yet
+        // (`make(7i64).get()`) needs to know which parameters to fill in, and the
+        // declaration is the only place that says so.
+        if let (Some(owner), Some(id)) = (receiver, slot) {
+            if !outer_generics.is_empty() {
+                self.method_generics.insert((owner.to_string(), f.name.clone()), (id, outer_generics.to_vec()));
             }
         }
         let mut params = Vec::new();
@@ -828,6 +839,7 @@ impl<'a> Checker<'a> {
         }
 
         let defaults = fcx.literal_defaults();
+        let declared_local_tys = fcx.declared_local_tys.clone();
         let mut locals = fcx.finish_locals();
         let mut body_hir = block;
         // Rewrite unresolved literal types in the body so that lowering sees
@@ -841,6 +853,7 @@ impl<'a> Checker<'a> {
         if let Some(info) = self.hir.fns.iter_mut().find(|x| x.id == id) {
             info.body = Some(body_hir);
             info.locals = locals;
+            info.declared_local_tys = declared_local_tys;
         }
     }
 }

@@ -186,6 +186,13 @@ pub struct HirFn {
     /// A declaration may reach a C function without taking its name, which is what
     /// lets the prelude call `read` while a program is free to define its own.
     pub link_name: Option<String>,
+    /// The type a `let` binding was declared with, when it had an annotation.
+    ///
+    /// Keyed by local index. A `let x: Vec<i64> = ...` names the instance an
+    /// initialiser could not infer on its own, and the annotation is the only
+    /// record of it once checking is done: the local's own type is whatever the
+    /// initialiser answered, which for a generic call is the template.
+    pub declared_local_tys: std::collections::HashMap<usize, TyId>,
 }
 
 #[derive(Debug, Clone)]
@@ -726,6 +733,140 @@ fn rewrite_expr(e: &mut HirExpr, map: &std::collections::HashMap<TyId, TyId>) {
 /// A pass that needs to look through an expression without re-implementing the
 /// shape of all of them walks this. Blocks are descended into, because a `break`
 /// or a call is usually a statement or a tail rather than a bare operand.
+pub fn child_exprs_mut(e: &mut HirExpr) -> Vec<&mut HirExpr> {
+    let mut out: Vec<&mut HirExpr> = Vec::new();
+    fn push_block<'a>(b: &'a mut HirBlock, out: &mut Vec<&'a mut HirExpr>) {
+        for st in b.stmts.iter_mut() {
+            match &mut st.kind {
+                HirStmtKind::Let { init, .. } => {
+                    if let Some(i) = init {
+                        out.push(i);
+                    }
+                }
+                HirStmtKind::Expr(x) => out.push(x),
+            }
+        }
+        if let Some(t) = b.tail.as_mut() {
+            out.push(t);
+        }
+    }
+    match &mut e.kind {
+        HirExprKind::Unary { operand, .. } => out.push(operand),
+        HirExprKind::Binary { lhs, rhs, .. } => {
+            out.push(lhs);
+            out.push(rhs);
+        }
+        HirExprKind::Assign { place, value } | HirExprKind::AssignOp { place, value, .. } => {
+            out.push(place);
+            out.push(value);
+        }
+        HirExprKind::Ref { place, .. } => out.push(place),
+        HirExprKind::Deref(inner) | HirExprKind::Move(inner) | HirExprKind::Try(inner) => {
+            out.push(inner)
+        }
+        HirExprKind::Cast { expr, .. } => out.push(expr),
+        HirExprKind::PtrOffset { ptr, count } => {
+            out.push(ptr);
+            out.push(count);
+        }
+        HirExprKind::Call { callee, args } => {
+            out.push(callee);
+            for a in args.iter_mut() {
+                out.push(a);
+            }
+        }
+        HirExprKind::MethodCall { receiver, args, .. }
+        | HirExprKind::TraitMethodCall { receiver, args, .. } => {
+            out.push(receiver);
+            for a in args.iter_mut() {
+                out.push(a);
+            }
+        }
+        HirExprKind::BuiltinMethod { receiver, args, .. } => {
+            out.push(receiver);
+            for a in args.iter_mut() {
+                out.push(a);
+            }
+        }
+        HirExprKind::StructLit { fields, base, .. } => {
+            for f in fields.iter_mut() {
+                out.push(&mut f.value);
+            }
+            if let Some(base) = base {
+                out.push(base);
+            }
+        }
+        HirExprKind::TupleVariant { args, .. } => {
+            for a in args.iter_mut() {
+                out.push(a);
+            }
+        }
+        HirExprKind::StructVariant { fields, .. } => {
+            for f in fields.iter_mut() {
+                out.push(&mut f.value);
+            }
+        }
+        HirExprKind::ArrayLit { elems } | HirExprKind::Tuple { elems } => {
+            for x in elems.iter_mut() {
+                out.push(x);
+            }
+        }
+        HirExprKind::ArrayRepeat { value, .. } => out.push(value),
+        HirExprKind::RangeExpr { start, end, .. } => {
+            out.push(start);
+            out.push(end);
+        }
+        HirExprKind::IterSource { source, .. } => out.push(source),
+        HirExprKind::Field { base, .. } | HirExprKind::TupleIndex { base, .. } => out.push(base),
+        HirExprKind::Index { base, index } => {
+            out.push(base);
+            out.push(index);
+        }
+        HirExprKind::If { cond, then_block, else_branch } => {
+            out.push(cond);
+            push_block(then_block, &mut out);
+            if let Some(e) = else_branch {
+                out.push(e);
+            }
+        }
+        HirExprKind::Match { scrutinee, arms } => {
+            out.push(scrutinee);
+            for arm in arms.iter_mut() {
+                if let Some(g) = arm.guard.as_mut() {
+                    out.push(g);
+                }
+                out.push(&mut arm.body);
+            }
+        }
+        HirExprKind::While { cond, body } => {
+            out.push(cond);
+            push_block(body, &mut out);
+        }
+        HirExprKind::Loop { body } | HirExprKind::Defer(body) | HirExprKind::Unsafe(body) => {
+            push_block(body, &mut out)
+        }
+        HirExprKind::For { iter, body, .. } => {
+            out.push(iter);
+            push_block(body, &mut out);
+        }
+        HirExprKind::Block(b) => push_block(b, &mut out),
+        HirExprKind::Return(v) | HirExprKind::Break(v) => {
+            if let Some(v) = v {
+                out.push(v);
+            }
+        }
+        HirExprKind::StrInterp { parts } => {
+            for p in parts.iter_mut() {
+                if let HirStrPart::Value(v) = p {
+                    out.push(v);
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 pub fn child_exprs(e: &HirExpr) -> Vec<&HirExpr> {
     let mut out: Vec<&HirExpr> = Vec::new();
     fn push_block<'a>(b: &'a HirBlock, out: &mut Vec<&'a HirExpr>) {

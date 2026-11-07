@@ -363,6 +363,7 @@ impl FnChecker<'_, '_> {
         method_span: crate::source::Span,
         args: &[ast::Expr],
         span: crate::source::Span,
+        hint: Option<crate::types::TyId>,
     ) -> HirExpr {
         let recv = self.check_expr(receiver);
         let arg_hirs: Vec<HirExpr> = args.iter().map(|a| self.check_expr(a)).collect();
@@ -495,6 +496,23 @@ impl FnChecker<'_, '_> {
         if self_mutable {
             self.check_mutable_place(&recv);
         }
+
+        // The receiver's instance decides the method's parameters. A receiver
+        // written as `make(7i64).get()` has no instance: `make` answers `B<T>` at
+        // check time, and only monomorphisation knows it is `B<i64>`. The declared
+        // result and the context the call sits in are what name it, and both are
+        // available here, so the gap is closed where it is visible instead of
+        // being deferred to a call site that never learns the type.
+        let mut recv_base = recv_base;
+        if matches!(self.cx.cx.kind(recv_base), TyKind::Adt { .. })
+            && self.cx.cx.first_param(recv_base).is_some()
+        {
+            if let Some(fixed) =
+                self.adopt_receiver_instance(&type_name, method, recv_base, ret, hint)
+            {
+                recv_base = fixed;
+            }
+        }
         // Receiver compatibility, with the automatic borrows UMAY performs:
         //   * `&self`  accepts `T`, `&T` and `&mut T`
         //   * `&mut self` accepts `T` and `&mut T`, never `&T`
@@ -547,6 +565,39 @@ impl FnChecker<'_, '_> {
             ty: ret,
             span,
         }
+    }
+
+    /// Fills in a receiver's instance from the method's declared result.
+    ///
+    /// `fn get(self) -> T` on `impl<T> B<T>` declares a result that mentions the
+    /// parameters the receiver is missing, so a result the context asks to be
+    /// `i64` says the receiver is `B<i64>`. Only parameters the result mentions
+    /// can be filled this way; anything left unknown keeps the receiver as it
+    /// was, which the backend reports rather than miscompiles.
+    fn adopt_receiver_instance(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        recv_base: TyId,
+        declared_ret: TyId,
+        hint: Option<TyId>,
+    ) -> Option<TyId> {
+        let hint = hint?;
+        let names = self
+            .cx
+            .method_generics
+            .get(&(type_name.to_string(), method.to_string()))?
+            .1
+            .clone();
+        let TyKind::Adt { def, args } = self.cx.cx.kind(recv_base).clone() else { return None };
+        if args.len() != names.len() {
+            return None;
+        }
+        let TyKind::Param { name } = self.cx.cx.kind(declared_ret).clone() else { return None };
+        let position = names.iter().position(|g| *g == name)?;
+        let mut fixed = args;
+        fixed[position] = hint;
+        Some(self.cx.cx.adt(def, fixed))
     }
 
     /// The type arguments an instantiated type carries, keyed by parameter name.
