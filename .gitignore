@@ -1,0 +1,10 @@
+# Rust build artifacts for the *compiler* itself live in cargo's own target dir.
+/target/
+
+# UMAY build output. Only final artifacts belong here.
+dist/*
+!dist/.gitkeep
+
+# Editor/OS noise
+*.swp
+.DS_Store

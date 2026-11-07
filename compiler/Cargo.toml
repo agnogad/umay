@@ -1,0 +1,21 @@
+[package]
+name = "umayc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The UMAY compiler (umay) - reference frontend and custom backend"
+
+[[bin]]
+name = "umay"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

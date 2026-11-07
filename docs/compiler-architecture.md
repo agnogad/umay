@@ -1,0 +1,185 @@
+# UMAY Compiler Architecture
+
+Status: normative for the reference implementation. Phase 1 is implemented.
+
+## 1. Pipeline
+
+```text
+Source text
+    │
+    ▼
+SourceMap  ── file ids, byte spans, line/column mapping        [implemented]
+    │
+    ▼
+Lexer      ── tokens + lexical diagnostics                     [implemented]
+    │
+    ▼
+Parser     ── AST + syntax diagnostics (error recovery)        [implemented]
+    │
+    ▼
+HIR        ── names resolved, desugared, types attached        [Phase 2/3]
+    │
+    ▼
+Type check ── inference, trait resolution, exhaustiveness      [Phase 2]
+    │
+    ▼
+MIR        ── typed CFG: moves, borrows, drops, blocks         [Phase 3]
+    │
+    ▼
+Ownership/borrow checking (dataflow over the MIR CFG)          [Phase 4]
+    │
+    ▼
+MIR optimisation (folding, DCE, inlining, copy prop)            [Phase 5+]
+    │
+    ▼
+Codegen: x86_64 instruction selection, register allocation      [Phase 5]
+    │
+    ▼
+ELF object + relocations                                       [Phase 5]
+    │
+    ▼
+Linker (system linker initially)                               [Phase 5]
+    │
+    ▼
+Native executable in dist/
+```
+
+Each arrow is a module boundary with a narrow, explicit interface. No stage
+reads source text except the lexer. No stage after HIR depends on syntax shape.
+
+## 2. Module responsibilities
+
+| Module | Owns | Must not |
+|--------|------|----------|
+| `source` | Source text, `FileId`, `Span`, `LineCol` | know about tokens |
+| `token` | Token kinds, keyword table | know about syntax |
+| `lexer` | Character → token conversion | know about the AST |
+| `ast` | Syntax tree shapes | resolve names or types |
+| `parser` | Tokens → AST, error recovery | resolve names or types |
+| `diagnostics` | Diagnostic data, human + JSON rendering | depend on compiler phases |
+| `explain` | Static code → explanation table | be optional or incomplete |
+| `cache` | External cache location, AST JSON | write to the project dir |
+| `hir` (Phase 2) | Named, desugared trees | know about machine types |
+| `types` (Phase 2) | Type representations, inference | generate code |
+| `mir` (Phase 3) | CFG, places, moves, drops | know about syntax |
+| `ownership` (Phase 4) | Move/init/drop dataflow | rewrite MIR semantics |
+| `borrowck` (Phase 4) | Borrow/lifetime analysis | rely on source text |
+| `optimizer` | MIR → MIR transformations | change observable behaviour |
+| `codegen` | MIR → machine instructions | be LLVM or Cranelift |
+| `linker` | Objects → executable | implement a linker front-end |
+| `build` | Incremental driver, cache keys | create project-local targets |
+
+Dependency direction is strictly downward in this table. `diagnostics` is a leaf
+so that every phase can emit diagnostics without depending on higher phases.
+
+## 3. Key data structures
+
+### 3.1 Spans
+
+```rust
+struct Span { file: FileId, start: u32, end: u32 }   // half-open byte range
+```
+
+Spans are small, `Copy`, and carry the file so that multi-file diagnostics need
+no context argument. All user-facing positions are derived via
+`SourceMap::resolve`, which converts byte offsets to 1-based line/column while
+counting *characters*, not bytes.
+
+### 3.2 Tokens
+
+Tokens carry a `line` field computed once by a single forward pass over the
+source. The parser uses it for newline-aware statement termination, so the lexer
+never needs to emit explicit "newline" tokens (which would either pollute every
+consumer or be filtered out anyway).
+
+### 3.3 AST
+
+The AST is a faithful syntax representation: every node has a span, no name is
+resolved, no sugar is desugared. `PatternKind::Literal` holds a boxed `Expr`
+(the box breaks the `Expr`↔`Pattern` recursion and keeps node sizes sane).
+
+Recursive descent with:
+
+- precedence climbing for binary operators,
+- a nesting-depth guard (`MAX_DEPTH = 256`, diagnostic `E0052`) so adversarial
+  input cannot overflow the stack,
+- statement- and item-level error recovery that always consumes at least one
+  token, guaranteeing termination.
+
+## 4. Error recovery strategy
+
+The parser never bails out on the first error. Guidelines:
+
+1. **Report, then resynchronise.** On a malformed item, skip to the next
+   item-starting keyword or matched brace. On a malformed statement, skip to the
+   next `;` or statement keyword at the same brace depth.
+2. **Never emit two diagnostics for one byte range.** If the lexer already
+   produced an error token, the parser stays silent about that token.
+3. **Prefer one root-cause diagnostic over cascades.** A missing `)` reports the
+   missing `)` and, if it can be avoided, not the three follow-on errors.
+4. **Always make progress.** Every recovery path consumes at least one token or
+   the token stream is exhausted.
+
+Two invariants are enforced by tests:
+
+- the parser never panics on *any* truncated prefix of a valid program,
+- the parser never panics on mutated input (a deterministic fuzz loop).
+
+## 5. Diagnostics architecture
+
+Diagnostics are pure data (`Diagnostic`), rendered by two independent backends:
+
+- a human renderer producing the canonical layout with ANSI colours optional,
+- a JSON emitter producing the versioned schema (see
+  [diagnostics.md](diagnostics.md)).
+
+Both live in `diagnostics`. Compiler phases never format output themselves,
+which is what keeps the JSON schema stable across phases.
+
+Every code is registered in `explain::EXPLAIN`. A test asserts that every code
+the parser can emit has an entry, so `umay explain <code>` is never a dead end.
+
+## 6. Custom backend commitment
+
+The production backend is written in this repository.
+
+- x86_64 Linux first: ELF64 objects, System V AMD64 ABI.
+- No LLVM, no Cranelift, no external IR as the production path.
+- The system linker (`cc`/`ld`) is acceptable initially for the final link step.
+- The backend is target-abstracted: instruction selection consumes a target
+  description, so adding aarch64 later does not touch the frontend.
+
+Correctness before optimisation. Optimisation levels are explicit
+(`--opt-level 0..3`) and must never change program semantics.
+
+## 7. Naming and code conventions
+
+- Rust edition 2021; no `unsafe` in the compiler (`unsafe_code = "deny"` at the
+  crate level).
+- Diagnostic codes are string constants at the emission site, and every one is
+  registered in `explain.rs`.
+- Public interfaces between phases take data, not callbacks.
+- Parser submodules (`items`, `expr`, `stmt`) are plain `impl Parser` blocks in
+  separate files to keep each file reviewable; they share no state beyond
+  `Parser`.
+
+## 8. Testing strategy per phase
+
+| Phase | Required tests |
+|-------|----------------|
+| Lexer | unit tests per token class, malformed literal tests |
+| Parser | accept/reject tests per construct, error recovery tests, panic-freedom invariants |
+| Semantics | accept/reject program pairs per rule |
+| Borrow check | adversarial memory-safety fixtures, one per violation kind |
+| Codegen | executable tests asserting program output and exit codes |
+| Diagnostics | snapshot tests per code, JSON schema stability tests |
+
+A bug fix must ship with a regression test. No exceptions.
+
+## 9. Reproducibility
+
+- Diagnostics are sorted deterministically (file, start, end, severity, code).
+- No diagnostic depends on hash-map iteration order.
+- Builds use content-addressed cache keys (see
+  [build-system.md](build-system.md)) so identical inputs produce identical
+  outputs.
