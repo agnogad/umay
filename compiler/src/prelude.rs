@@ -29,6 +29,8 @@ pub const PRELUDE_SOURCE: &str = concat!(
     include_str!("../../stdlib/prelude.um"),
     "\n",
     include_str!("../../stdlib/string.um"),
+    "\n",
+    include_str!("../../stdlib/vec.um"),
 );
 
 /// The name the prelude's file is registered under in the source map.

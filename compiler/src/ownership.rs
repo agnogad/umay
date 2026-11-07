@@ -52,6 +52,7 @@ pub(crate) fn path_of(place: &Place) -> MovePath {
     for proj in &place.projection {
         match proj {
             Projection::Field(i) => path.push(PathElem::Field(*i)),
+            Projection::EnumField { index, .. } => path.push(PathElem::Field(*index)),
             Projection::Index(op) => path.push(PathElem::Index(index_literal(op))),
             Projection::Deref => path.push(PathElem::Deref),
         }

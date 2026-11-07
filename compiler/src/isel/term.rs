@@ -401,6 +401,22 @@ impl<'a, 't> Isel<'a, 't> {
         if let Some(dst) = destination {
             if sret.is_none() {
                 self.store_place_into(dst, MOperand::Reg(Reg::Phys(0)), out)?;
+                // An aggregate of more than eight bytes comes back in a pair of
+                // registers; the callee writes both and the caller must read both,
+                // or the upper half of the value is whatever the call left behind.
+                let dst_ty = self.place_ty(dst);
+                let size = self.layouts.layout(dst_ty).map(|l| l.size).unwrap_or(0);
+                if self.layouts.is_aggregate(dst_ty) && size > 8 {
+                    let place = dst.clone();
+                    let mem = self.place_addr(&place)?;
+                    let mut high = mem;
+                    high.offset += 8;
+                    out.push(Inst::Store {
+                        kind: MoveKind::Move(RegWidth::W64),
+                        src: MOperand::Reg(Reg::Phys(2)),
+                        dst: high,
+                    });
+                }
             }
         }
         out.push(Inst::Jmp(self.block_labels[target.0 as usize]));

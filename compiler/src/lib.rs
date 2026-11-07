@@ -35,6 +35,7 @@ pub mod lower_flow;
 pub mod lower_match;
 pub mod mir;
 pub mod mir_parse;
+pub mod mono;
 pub mod regalloc;
 pub mod opt;
 pub mod ownership;
@@ -121,7 +122,7 @@ pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
 
     // Ownership checking runs on MIR, never on source text, so its results do
     // not depend on formatting or expression nesting.
-    let mut lowered = lower::lower(&sema.hir, &mut sema.types);
+    let mut lowered = lower::lower(&mut sema.hir, &mut sema.types);
     drop_elab::elaborate(&mut lowered.program, &sema.types);
     let ownership = ownership::check_program(&lowered.program, &sema.types);
     append_all(&mut diagnostics, &ownership);
@@ -188,7 +189,7 @@ pub fn lower_to_mir_opt(
     if diagnostics.has_errors() {
         return Err((diagnostics, map));
     }
-    let mut lowered = lower::lower(&sema.hir, &mut sema.types);
+    let mut lowered = lower::lower(&mut sema.hir, &mut sema.types);
     drop_elab::elaborate(&mut lowered.program, &sema.types);
     crate::opt::optimize(&mut lowered.program, &sema.types, level);
     // `umay mir` shows the lowering, so ownership errors are not fatal here:
@@ -314,7 +315,7 @@ fn codegen_source_impl(
         return Err((diagnostics, map));
     }
 
-    let mut lowered = lower::lower(&sema.hir, &mut sema.types);
+    let mut lowered = lower::lower(&mut sema.hir, &mut sema.types);
     drop_elab::elaborate(&mut lowered.program, &sema.types);
     let ownership = ownership::check_program(&lowered.program, &sema.types);
     append_all(&mut diagnostics, &ownership);

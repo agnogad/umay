@@ -87,9 +87,20 @@ pub fn select<'t>(
         .locals
         .iter()
         .take(body.arg_count as usize)
-        .map(|l| match isel.width(l.ty) {
-            Ok(w) => w,
-            Err(_) => RegWidth::W64,
+        .map(|l| {
+            // An aggregate travels in a register but is stored into a slot only as
+            // wide as the value: writing a full word into a one-byte slot would
+            // spill into whatever the frame placed next to it.
+            let size = isel.layouts.layout(l.ty).map(|x| x.size).unwrap_or(8);
+            if size <= 1 {
+                RegWidth::W8
+            } else if size <= 2 {
+                RegWidth::W16
+            } else if size <= 4 {
+                RegWidth::W32
+            } else {
+                RegWidth::W64
+            }
         })
         .collect();
 
@@ -195,6 +206,7 @@ impl<'a, 't> Isel<'a, 't> {
             TyKind::I16 | TyKind::U16 => RegWidth::W16,
             TyKind::I32 | TyKind::U32 | TyKind::Char | TyKind::F32 => RegWidth::W32,
             TyKind::Never | TyKind::Unit => RegWidth::W8,
+
             // Everything else, including aggregates and references, is moved a
             // word at a time by the selector; aggregates are copied bytewise by
             // the caller where that matters.
@@ -275,6 +287,11 @@ impl<'a, 't> Isel<'a, 't> {
                     mem.offset += offset;
                     current_ty = self.field_ty(current_ty, *index)?;
                 }
+                Projection::EnumField { variant, index } => {
+                    let (offset, field_ty) = self.enum_field_offset(current_ty, *variant, *index)?;
+                    mem.offset += offset;
+                    current_ty = field_ty;
+                }
                 Projection::Deref => {
                     // Load the pointer, then use it as the base.
                     let ptr = self.load_place_mem(&mem, current_ty)?;
@@ -308,18 +325,20 @@ impl<'a, 't> Isel<'a, 't> {
     pub(crate) fn load_place_mem(&mut self, mem: &Mem, ty: TyId) -> Result<Reg, String> {
         let width = self.width(ty)?;
         let dst = self.vreg();
-        // The load happens at the value's own width. A narrower register write
-        // already clears the upper half, so a sub-word load is clean without an
-        // explicit extension. Sign or zero *extension* is a separate concern and
-        // belongs to `cast`, which knows both types: widening here would make
-        // every `i32` read out as a non-negative 64-bit value, so `-1i32` would
-        // come back as `4294967295` and any later sign-aware arithmetic would be
-        // wrong.
-        self.emit(Inst::Load {
-            kind: MoveKind::Move(width),
-            src: mem.clone(),
-            dst: MOperand::Reg(dst),
-        });
+        // A narrow load must zero the upper bits: writing `%al` leaves the rest of
+        // `%rax` untouched, so a byte read straight into `%al` and then compared as
+        // a word would compare whatever the register held before. `W32` needs no
+        // extension because a 32-bit register write clears the top half on its own.
+        //
+        // A signed widening is a different matter and belongs to `cast`, which
+        // knows both types: sign-extending here would make every `i32` read out to
+        // 64 bits, so `-1i32` would become `4294967295`.
+        let kind = match width {
+            RegWidth::W8 => MoveKind::ZeroExtend { from: RegWidth::W8, to: RegWidth::W64 },
+            RegWidth::W16 => MoveKind::ZeroExtend { from: RegWidth::W16, to: RegWidth::W64 },
+            other => MoveKind::Move(other),
+        };
+        self.emit(Inst::Load { kind, src: mem.clone(), dst: MOperand::Reg(dst) });
         Ok(dst)
     }
 
@@ -388,12 +407,38 @@ impl<'a, 't> Isel<'a, 't> {
         }
     }
 
+    /// The byte offset and type of a field inside an enum variant's payload.
+    fn enum_field_offset(&mut self, base_ty: TyId, variant: u32, index: u32) -> Result<(i64, TyId), String> {
+        let TyKind::Adt { def, args } = self.types().kind_owned(base_ty) else {
+            return Err(format!("enum field access on non-adt"));
+        };
+        let payload = self
+            .layouts
+            .enum_payload_offset(def, &args)
+            .map_err(|e| format!("{e:?}"))?;
+        let offsets = self
+            .layouts
+            .variant_field_offsets(def, variant, &args)
+            .map_err(|e| format!("{e:?}"))?;
+        let tys = self
+            .layouts
+            .variant_field_tys_pub(def, variant, &args)
+            .map_err(|e| format!("{e:?}"))?;
+        let field = *offsets.get(index as usize).ok_or_else(|| format!("field {index} out of range"))?;
+        let ty = *tys.get(index as usize).ok_or_else(|| format!("field {index} out of range"))?;
+        Ok(((payload + field) as i64, ty))
+    }
+
     /// The type of a place.
     pub(crate) fn place_ty(&mut self, place: &Place) -> TyId {
         let mut ty = self.frame.slot(place.local).ty;
         for projection in &place.projection {
             ty = match projection {
                 Projection::Field(index) => self.field_ty(ty, *index).unwrap_or(ty),
+                Projection::EnumField { variant, index } => self
+                    .enum_field_offset(ty, *variant, *index)
+                    .map(|(_, t)| t)
+                    .unwrap_or(ty),
                 Projection::Deref => match self.types().kind_owned(ty) {
                     TyKind::Ref(inner) | TyKind::RefMut(inner) => inner,
                     TyKind::RawPtr(inner) | TyKind::RawPtrMut(inner) => inner,

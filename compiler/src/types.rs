@@ -175,6 +175,26 @@ impl TyCtxt {
         self.intern(TyKind::Error)
     }
 
+    /// The `u8` type, the width of an enum's tag.
+    pub fn u8_ty(&mut self) -> TyId {
+        self.intern(TyKind::U8)
+    }
+
+    /// The boolean type.
+    pub fn bool_ty(&mut self) -> TyId {
+        self.intern(TyKind::Bool)
+    }
+
+    /// The default integer type, used for an unsuffixed literal.
+    pub fn i32_ty(&mut self) -> TyId {
+        self.intern(TyKind::I32)
+    }
+
+    /// The default float type, used for an unsuffixed literal.
+    pub fn f64_ty(&mut self) -> TyId {
+        self.intern(TyKind::F64)
+    }
+
     /// Resolves a primitive type name to its type, if it is a primitive.
     pub fn primitive(&mut self, name: &str) -> Option<TyId> {
         let kind = match name {

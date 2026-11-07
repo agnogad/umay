@@ -117,7 +117,7 @@ mod tests {
         let id = map.add("test.um", src);
         let out = crate::parse_file(&map, id);
         let mut sema = crate::sema::analyze(&out.program, &map);
-        let mut lowered = crate::lower::lower(&sema.hir, &mut sema.types);
+        let mut lowered = crate::lower::lower(&mut sema.hir, &mut sema.types);
         crate::drop_elab::elaborate(&mut lowered.program, &sema.types);
         let mut layouts = Layouts::new(&mut sema.types, &sema.hir);
         build_frame(&lowered.program.bodies[0], &mut layouts).expect("frame")

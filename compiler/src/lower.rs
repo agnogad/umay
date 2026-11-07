@@ -30,9 +30,20 @@ pub struct Lowered {
 }
 
 /// Lowers every function with a body into MIR.
-pub fn lower(hir: &Hir, types: &mut crate::types::TyCtxt) -> Lowered {
+///
+/// Generic declarations are instantiated first: a body that names a parameter has
+/// no size, so every body reaching this point is concrete. The instantiation
+/// appends copies to `hir`, which is why the HIR is taken by `&mut`.
+pub fn lower(hir: &mut Hir, types: &mut crate::types::TyCtxt) -> Lowered {
+    crate::mono::Mono::new(types, hir).run(hir);
     let mut program = MirProgram::default();
-    for f in &hir.fns {
+    for f in hir.fns.iter() {
+        // A generic declaration is a template, not a function: its body was
+        // copied once per instantiation and no call can reach the original. It has
+        // no concrete type to compile, so it is skipped rather than reported.
+        if !f.generics.is_empty() {
+            continue;
+        }
         let Some(body) = &f.body else { continue };
         let l = Lowering::new(hir, types, f, &mut program);
         let mir = l.lower_fn(body);

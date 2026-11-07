@@ -852,17 +852,16 @@ fn main() -> i32 {
 }
 
 #[test]
-fn a_body_using_a_generic_parameter_is_reported_not_miscompiled() {
-    // Monomorphisation does not exist yet, so a body that needs a concrete `T`
-    // is refused with a code the backend would otherwise raise later. Saying so
-    // in the checker keeps `umay check` and `umay build` in agreement.
-    err("
+fn a_generic_body_is_accepted() {
+    // A body naming a parameter is checked once, as written; monomorphisation
+    // produces the concrete copies later, so the checker no longer refuses it.
+    ok("
 struct Box<T> { value: T }
 impl<T> Box<T> {
     fn get(&self) -> T { return self.value }
 }
 fn main() -> i32 { return 0 }
-", "E3001");
+");
 }
 
 #[test]

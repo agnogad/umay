@@ -74,7 +74,7 @@ reported as `E3001` rather than miscompiled; see
 | 3 | HIR and MIR | **complete** |
 | 4 | Ownership and borrow checking | **complete** |
 | 5 | Custom x86_64 backend | **complete** |
-| 6 | Runtime and standard library | **runtime and `String` done, `Vec<T>` blocked on generics** |
+| 6 | Runtime and standard library | **runtime, `String`, generics and `Vec<T>` done** |
 | 7 | AI developer experience | not started |
 | 8 | Build system and packages | not started |
 | 9 | Stabilization | not started |

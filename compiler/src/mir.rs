@@ -133,6 +133,12 @@ impl Place {
         self
     }
 
+    /// A field inside an enum variant's payload.
+    pub fn enum_field(mut self, variant: u32, index: u32) -> Self {
+        self.projection.push(Projection::EnumField { variant, index });
+        self
+    }
+
     pub fn index(mut self, by: Operand) -> Self {
         self.projection.push(Projection::Index(by));
         self
@@ -148,6 +154,12 @@ impl Place {
 pub enum Projection {
     /// Named field or tuple element, by resolved index.
     Field(u32),
+    /// A field inside an enum variant's payload.
+    ///
+    /// A `Field` alone is not enough: an enum's payload starts after its tag and
+    /// its layout depends on which variant is active, which only the pattern knows.
+    /// `variant` is the variant index the access is valid under.
+    EnumField { variant: u32, index: u32 },
     /// Array or slice element, by a runtime index.
     Index(Operand),
     /// `*place`

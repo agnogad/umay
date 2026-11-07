@@ -73,6 +73,20 @@ pub fn umay_write_byte(ptr: *mut u8, value: u8) {
     unsafe { *ptr = value }
 }
 
+// Reads an `i64` from a raw address.
+//
+// A container stores values wider than a byte, and the language cannot yet write
+// through a computed offset, so reading and writing a whole value goes through
+// these two functions the same way bytes do.
+pub fn umay_read_i64(ptr: *const u8) -> i64 {
+    return unsafe { *(ptr as *const i64) }
+}
+
+// Writes an `i64` to a raw address.
+pub fn umay_write_i64(ptr: *mut u8, value: i64) {
+    unsafe { *(ptr as *mut i64) = value }
+}
+
 // --- byte strings -----------------------------------------------------------
 
 // The number of bytes before the terminating zero.

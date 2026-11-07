@@ -276,7 +276,7 @@ fn stats_report_that_work_was_done() {
     let id = map.add("test.um", src);
     let out = umayc::parse_file(&map, id);
     let mut sema = umayc::sema::analyze(&out.program, &map);
-    let mut lowered = umayc::lower::lower(&sema.hir, &mut sema.types);
+    let mut lowered = umayc::lower::lower(&mut sema.hir, &mut sema.types);
     umayc::drop_elab::elaborate(&mut lowered.program, &sema.types);
     let stats = optimize(&mut lowered.program, &sema.types, OptLevel::O2);
     assert!(stats.branches_folded > 0, "constant folding should have run: {stats:?}");

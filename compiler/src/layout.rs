@@ -119,7 +119,7 @@ impl<'a> Layouts<'a> {
         // Saying so here, before the recursion guard, keeps the diagnostic about
         // the real problem instead of reporting a self-referential type.
         if let crate::types::TyKind::Param { name } = self.types.kind(ty) {
-            return Err(LayoutError::Unsized(format!("unsubstituted parameter `{name}`")));
+            return Err(LayoutError::Unsized(format!("unsubstituted parameter `{name}` at {}", ty.0)));
         }
         // A type cannot contain itself: the recursion guard turns a malformed
         // definition into a diagnostic instead of a hang.
@@ -180,8 +180,9 @@ impl<'a> Layouts<'a> {
             TyKind::IntVar(_) => Layout::new(4, 4),
             TyKind::FloatVar(_) => Layout::new(8, 8),
             TyKind::Param { name } => {
-                return Err(LayoutError::Unsized(format!("unsubstituted parameter `{name}`")));
+                return Err(LayoutError::Unsized(format!("unsubstituted parameter `{name}` at {}", ty.0)));
             }
+
             TyKind::Error => return Err(LayoutError::Unresolved(ty)),
         })
     }
@@ -206,8 +207,13 @@ impl<'a> Layouts<'a> {
     }
 
     /// Field offsets of a specific enum variant's payload.
-    pub fn variant_field_offsets(&mut self, def: DefId, index: u32) -> Result<Vec<u64>, LayoutError> {
-        let tys = self.variant_field_tys(def, index)?;
+    pub fn variant_field_offsets(
+        &mut self,
+        def: DefId,
+        index: u32,
+        args: &[TyId],
+    ) -> Result<Vec<u64>, LayoutError> {
+        let tys = self.variant_field_tys(def, index, args)?;
         let mut offset = 0u64;
         let mut offsets = Vec::with_capacity(tys.len());
         for ty in tys {
@@ -221,32 +227,64 @@ impl<'a> Layouts<'a> {
 
     /// The types of a struct's fields, with generic arguments substituted.
     ///
-    /// Phase 2 does not yet monomorphise, so a generic struct uses its declared
-    /// field types verbatim. That is correct for the non-generic structs that
-    /// exist today and will need revisiting alongside trait checking.
-    fn struct_field_tys(&mut self, def: DefId, _args: &[TyId]) -> Result<Vec<TyId>, LayoutError> {
+    /// `Box<i64>` stores an `i64`, not a `T`: the declaration's field types are a
+    /// template, and the instantiation fills it in. Without this step the layout
+    /// would be asked for the size of a parameter, which has none.
+    pub fn struct_field_tys(&mut self, def: DefId, args: &[TyId]) -> Result<Vec<TyId>, LayoutError> {
         let info = self
             .hir
             .structs
             .iter()
             .find(|s| s.def_id == def)
             .ok_or(LayoutError::UnknownType(def))?;
-        Ok(info.fields.iter().map(|f| f.ty).collect())
+        let declared: Vec<TyId> = info.fields.iter().map(|f| f.ty).collect();
+        if info.generics.is_empty() || args.is_empty() {
+            return Ok(declared);
+        }
+        let mut subst = std::collections::HashMap::new();
+        for (name, arg) in info.generics.iter().zip(args.iter()) {
+            subst.insert(name.clone(), *arg);
+        }
+        Ok(declared.into_iter().map(|t| self.types.substitute(t, &subst)).collect())
     }
 
-    fn variant_field_tys(&mut self, def: DefId, index: u32) -> Result<Vec<TyId>, LayoutError> {
+    /// The types of a variant's fields, with the enum's generic arguments filled in.
+    pub fn variant_field_tys_pub(
+        &mut self,
+        def: DefId,
+        index: u32,
+        args: &[TyId],
+    ) -> Result<Vec<TyId>, LayoutError> {
+        self.variant_field_tys(def, index, args)
+    }
+
+    fn variant_field_tys(
+        &mut self,
+        def: DefId,
+        index: u32,
+        args: &[TyId],
+    ) -> Result<Vec<TyId>, LayoutError> {
         let info = self
             .hir
             .enums
             .iter()
             .find(|e| e.def_id == def)
             .ok_or(LayoutError::UnknownType(def))?;
+        let generics = info.generics.clone();
         let variant = info.variants.get(index as usize).ok_or(LayoutError::UnknownType(def))?;
-        Ok(match &variant.fields {
+        let declared: Vec<TyId> = match &variant.fields {
             crate::hir::VariantFields::Unit => Vec::new(),
             crate::hir::VariantFields::Tuple(tys) => tys.clone(),
             crate::hir::VariantFields::Struct(fields) => fields.iter().map(|f| f.ty).collect(),
-        })
+        };
+        if generics.is_empty() || args.is_empty() {
+            return Ok(declared);
+        }
+        let mut subst = std::collections::HashMap::new();
+        for (name, arg) in generics.iter().zip(args.iter()) {
+            subst.insert(name.clone(), *arg);
+        }
+        Ok(declared.into_iter().map(|t| self.types.substitute(t, &subst)).collect())
     }
 
     fn adt_layout(&mut self, def: DefId, args: &[TyId]) -> Result<Layout, LayoutError> {
@@ -256,7 +294,10 @@ impl<'a> Layouts<'a> {
             return self.struct_from_fields(&offsets, &tys);
         }
         if self.hir.enums.iter().any(|e| e.def_id == def) {
-            return self.enum_layout(def);
+            return self.enum_layout(def, args);
+        }
+        if std::env::var("UMAY_TRACE_MONO").is_ok() {
+            eprintln!("unknown adt {:?}; enums {:?} structs {:?}", def, self.hir.enums.iter().map(|e| (e.def_id, e.name.clone())).collect::<Vec<_>>(), self.hir.structs.iter().map(|s| (s.def_id, s.name.clone())).collect::<Vec<_>>());
         }
         Err(LayoutError::UnknownType(def))
     }
@@ -277,7 +318,7 @@ impl<'a> Layouts<'a> {
     /// This is the simple representation, not a niche optimisation. It costs
     /// space and buys correctness and a small amount of backend code, which is
     /// the right trade until there is a reason to do otherwise.
-    fn enum_layout(&mut self, def: DefId) -> Result<Layout, LayoutError> {
+    fn enum_layout(&mut self, def: DefId, args: &[TyId]) -> Result<Layout, LayoutError> {
         let info = self
             .hir
             .enums
@@ -291,8 +332,8 @@ impl<'a> Layouts<'a> {
         let mut payload_size = 0u64;
         let mut payload_align = 1u64;
         for (index, _) in info.variants.iter().enumerate() {
-            let offsets = self.variant_field_offsets(def, index as u32)?;
-            let tys = self.variant_field_tys(def, index as u32)?;
+            let offsets = self.variant_field_offsets(def, index as u32, args)?;
+            let tys = self.variant_field_tys(def, index as u32, args)?;
             let l = self.struct_from_fields(&offsets, &tys)?;
             payload_align = payload_align.max(l.align());
             payload_size = payload_size.max(l.size);
@@ -306,7 +347,7 @@ impl<'a> Layouts<'a> {
 
     /// Offset of the payload inside an enum, i.e. the size of the tag rounded up
     /// to the payload's alignment.
-    pub fn enum_payload_offset(&mut self, def: DefId) -> Result<u64, LayoutError> {
+    pub fn enum_payload_offset(&mut self, def: DefId, args: &[TyId]) -> Result<u64, LayoutError> {
         let info = self
             .hir
             .enums
@@ -316,8 +357,8 @@ impl<'a> Layouts<'a> {
         let tag = if info.variants.len() <= 256 { 1 } else { 4 };
         let mut payload_align = 1u64;
         for index in 0..info.variants.len() {
-            let offsets = self.variant_field_offsets(def, index as u32)?;
-            let tys = self.variant_field_tys(def, index as u32)?;
+            let offsets = self.variant_field_offsets(def, index as u32, args)?;
+            let tys = self.variant_field_tys(def, index as u32, args)?;
             let l = self.struct_from_fields(&offsets, &tys)?;
             payload_align = payload_align.max(l.align());
         }
@@ -575,7 +616,7 @@ mod tests {
             let def = l.hir().enums.iter().find(|e| e.name == "E").unwrap().def_id;
             let ty = l.types_mut().adt(def, Vec::new());
             assert_eq!(l.layout(ty).unwrap(), Layout::new(16, 8));
-            assert_eq!(l.enum_payload_offset(def).unwrap(), 8);
+            assert_eq!(l.enum_payload_offset(def, &[]).unwrap(), 8);
         });
     }
 

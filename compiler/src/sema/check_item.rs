@@ -689,10 +689,14 @@ impl<'a> Checker<'a> {
                 }
                 ast::Item::Impl(block) => {
                     let ty_name = type_name_of(&block.self_ty);
+                    // The block's parameters are in scope inside each method, so
+                    // the body can see that `T` is `T`.
+                    let block_generics: Vec<String> =
+                        block.generics.iter().map(|g| g.name.clone()).collect();
                     for m in &block.methods {
                         let slot = ty_name.as_ref().and_then(|t| self.methods.get(&(t.clone(), m.name.clone())).copied());
                         if let Some(id) = slot {
-                            self.check_one_body(id, m, &[]);
+                            self.check_one_body(id, m, &block_generics);
                         }
                     }
                 }
@@ -707,7 +711,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_one_body(&mut self, id: FnId, f: &ast::FnDecl, _generics: &[String]) {
+    fn check_one_body(&mut self, id: FnId, f: &ast::FnDecl, generics: &[String]) {
         let Some(body) = &f.body else { return };
         let body = body.clone();
         let f = f.clone();
@@ -716,6 +720,10 @@ impl<'a> Checker<'a> {
         let has_self = f.self_param.is_some();
 
         let mut fcx = self.fn_context(Some(id));
+        // The body may name the declaration's parameters: inside `impl<T> Vec<T>`
+        // a literal `Vec { .. }` means the `Vec<T>` being defined.
+        fcx.generics.extend(generics.iter().cloned());
+        fcx.generics.extend(f.generics.iter().map(|g| g.name.clone()));
         if has_self {
             let sp = f.self_param.as_ref().map(|s| s.span).unwrap_or(f.name_span);
             let ty = params.first().copied().unwrap_or_else(|| fcx.cx.cx.error());
@@ -760,30 +768,6 @@ impl<'a> Checker<'a> {
 
         let defaults = fcx.literal_defaults();
         let mut locals = fcx.finish_locals();
-        // A body still mentioning a generic parameter cannot be lowered: the
-        // parameter has no size, and no monomorphisation pass exists to give it
-        // one. Reporting that here, in the checker, is honest in a way that
-        // letting it reach the backend is not — `umay check` and `umay build`
-        // then say the same thing, and the program is never half-compiled.
-        let unsubstituted = locals.iter().find_map(|l| self.cx.first_param(l.ty));
-        if let Some(param) = unsubstituted {
-            self.push(
-                Diagnostic::error(
-                    "E3001",
-                    format!("`{}` uses the generic parameter `{param}` in its body", f.name),
-                )
-                .at(f.name_span)
-                .with_cause(
-                    "monomorphisation is not implemented, so a generic body cannot be compiled",
-                )
-                .with_explanation(
-                    "A generic declaration is type-checked as written, but the code generator \
-                     needs a concrete type for every local. Until monomorphisation lands, a \
-                     method or function whose body names a generic parameter has no machine code \
-                     to generate. Writing the same code for one concrete type works.",
-                ),
-            );
-        }
         let mut body_hir = block;
         // Rewrite unresolved literal types in the body so that lowering sees
         // concrete types everywhere.

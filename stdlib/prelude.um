@@ -26,6 +26,8 @@ extern fn umay_alloc(bytes: usize) -> *mut u8
 extern fn umay_dealloc(ptr: *mut u8) -> ()
 extern fn umay_read_byte(ptr: *const u8) -> u8
 extern fn umay_write_byte(ptr: *mut u8, value: u8) -> ()
+extern fn umay_read_i64(ptr: *const u8) -> i64
+extern fn umay_write_i64(ptr: *mut u8, value: i64) -> ()
 
 // ---------------------------------------------------------------------------
 // Output
@@ -94,6 +96,16 @@ pub fn read_byte(ptr: *const u8) -> u8 {
 // Writes `value` to the byte at `ptr`.
 pub fn write_byte(ptr: *mut u8, value: u8) {
     umay_write_byte(ptr, value)
+}
+
+// Reads an `i64` from `ptr`.
+pub fn read_i64(ptr: *const u8) -> i64 {
+    return umay_read_i64(ptr)
+}
+
+// Writes `value` to the `i64` at `ptr`.
+pub fn write_i64(ptr: *mut u8, value: i64) {
+    umay_write_i64(ptr, value)
 }
 
 // ---------------------------------------------------------------------------

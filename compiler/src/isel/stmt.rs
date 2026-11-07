@@ -49,9 +49,14 @@ impl<'a, 't> Isel<'a, 't> {
             }
             Rvalue::Discriminant(inner) => {
                 let mem = self.place_addr(inner)?;
-                // The tag is the first byte of the enum.
-                let inner_ty = self.place_ty(inner);
-                let tag = self.load_place_mem(&mem, inner_ty)?;
+                // The tag is one byte at the start of the enum, whatever the
+                // payload's size: loading the whole value would read past it.
+                let tag = self.vreg();
+                self.emit(Inst::Load {
+                    kind: MoveKind::Move(RegWidth::W8),
+                    src: mem,
+                    dst: MOperand::Reg(tag),
+                });
                 let dst = self.vreg();
                 self.emit(Inst::Move {
                     kind: MoveKind::ZeroExtend { from: RegWidth::W8, to: RegWidth::W64 },
@@ -547,11 +552,15 @@ impl<'a, 't> Isel<'a, 't> {
         ty: TyId,
     ) -> Result<(), String> {
         let base = self.place_addr(dst)?;
+        // An enum needs its tag written before the payload. Its generic
+        // arguments come from the value's own type, which is what makes an
+        // `Option<i64>` store eight payload bytes rather than a `T`.
+        let type_args = self.adt_args(ty);
         // An enum needs its tag written before the payload.
         if let AggregateKind::Variant { def, index } = kind {
             let payload = self
                 .layouts
-                .enum_payload_offset(*def)
+                .enum_payload_offset(*def, &type_args)
                 .map_err(|e| format!("{e:?}"))?;
             let mut tag_mem = base.clone();
             tag_mem.offset += 0;
@@ -560,7 +569,12 @@ impl<'a, 't> Isel<'a, 't> {
                 src: MOperand::Imm(*index as i64),
                 dst: tag_mem,
             });
-            self.write_fields(&base, payload as i64, operands, VariantFieldTypes::Enum(*def, *index))
+            self.write_fields(
+                &base,
+                payload as i64,
+                operands,
+                VariantFieldTypes::Enum(*def, *index, type_args),
+            )
         } else {
             self.write_fields(&base, 0, operands, VariantFieldTypes::Aggregate(ty))
         }
@@ -575,21 +589,21 @@ impl<'a, 't> Isel<'a, 't> {
         field_types: VariantFieldTypes,
     ) -> Result<(), String> {
         for (index, operand) in operands.iter().enumerate() {
-            let (offset, field_ty) = match field_types {
+            let (offset, field_ty) = match &field_types {
                 VariantFieldTypes::Aggregate(ty) => {
-                    let offsets = self.aggregate_offsets(ty)?;
-                    let tys = self.aggregate_field_types(ty)?;
+                    let offsets = self.aggregate_offsets(*ty)?;
+                    let tys = self.aggregate_field_types(*ty)?;
                     (
                         *offsets.get(index).ok_or_else(|| format!("field {index} out of range"))?,
                         *tys.get(index).ok_or_else(|| format!("field {index} out of range"))?,
                     )
                 }
-                VariantFieldTypes::Enum(def, variant) => {
+                VariantFieldTypes::Enum(def, variant, args) => {
                     let offsets = self
                         .layouts
-                        .variant_field_offsets(def, variant)
+                        .variant_field_offsets(*def, *variant, args)
                         .map_err(|e| format!("{e:?}"))?;
-                    let tys = self.variant_field_types(def, variant)?;
+                    let tys = self.variant_field_types(*def, *variant, args)?;
                     (
                         *offsets.get(index).ok_or_else(|| format!("field {index} out of range"))?,
                         *tys.get(index).ok_or_else(|| format!("field {index} out of range"))?,
@@ -659,44 +673,36 @@ impl<'a, 't> Isel<'a, 't> {
         match self.types().kind_owned(ty) {
             TyKind::Tuple(items) => Ok(items),
             TyKind::Array { elem, len } => Ok(vec![elem; len as usize]),
-            TyKind::Adt { def, .. } => {
-                let info = self
-                    .layouts
-                    .hir()
-                    .structs
-                    .iter()
-                    .find(|s| s.def_id == def)
-                    .ok_or_else(|| format!("unknown struct {def:?}"))?;
-                Ok(info.fields.iter().map(|f| f.ty).collect())
-            }
+            TyKind::Adt { def, args } => self
+                .layouts
+                .struct_field_tys(def, &args)
+                .map_err(|e| format!("{e:?}")),
             other => Err(format!("no fields for {other:?}")),
         }
     }
 
     /// Field types of an enum variant's payload.
-    fn variant_field_types(&mut self, def: crate::types::DefId, variant: u32) -> Result<Vec<TyId>, String> {
-        let info = self
-            .layouts
-            .hir()
-            .enums
-            .iter()
-            .find(|e| e.def_id == def)
-            .ok_or_else(|| format!("unknown enum {def:?}"))?;
-        let v = info
-            .variants
-            .get(variant as usize)
-            .ok_or_else(|| format!("variant {variant} out of range"))?;
-        Ok(match &v.fields {
-            crate::hir::VariantFields::Unit => Vec::new(),
-            crate::hir::VariantFields::Tuple(tys) => tys.clone(),
-            crate::hir::VariantFields::Struct(fields) => fields.iter().map(|f| f.ty).collect(),
-        })
+    fn variant_field_types(
+        &mut self,
+        def: crate::types::DefId,
+        variant: u32,
+        args: &[TyId],
+    ) -> Result<Vec<TyId>, String> {
+        self.layouts.variant_field_tys_pub(def, variant, args).map_err(|e| format!("{e:?}"))
+    }
+
+    /// The generic arguments an `Adt` type carries, empty for anything else.
+    fn adt_args(&mut self, ty: TyId) -> Vec<TyId> {
+        match self.types().kind_owned(ty) {
+            TyKind::Adt { args, .. } => args,
+            _ => Vec::new(),
+        }
     }
 }
 
 /// Which field-type source to use when writing an aggregate.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum VariantFieldTypes {
     Aggregate(TyId),
-    Enum(crate::types::DefId, u32),
+    Enum(crate::types::DefId, u32, Vec<TyId>),
 }

@@ -1,0 +1,124 @@
+// A growable array of `T`.
+//
+// The elements live in one contiguous block. `len` is how many are in use and
+// `cap` how many the block holds; the block is replaced with a larger one when a
+// push would overflow it, so the cost of growing averages out over the pushes
+// that caused it.
+//
+// Every method that needs to read or write raw memory is `unsafe`: the block is
+// reached through a `*mut u8`, and the compiler cannot prove that an index is
+// in bounds. The container keeps `len` and `cap` consistent, which is what makes
+// each of those accesses sound.
+struct Vec<T> {
+    ptr: *mut u8,
+    len: usize,
+    cap: usize,
+}
+
+impl<T> Vec<T> {
+    // The number of elements in the vector.
+    fn len(&self) -> usize {
+        return self.len
+    }
+
+    // True when the vector holds no elements.
+    fn is_empty(&self) -> bool {
+        return self.len == 0
+    }
+
+    // How many elements the allocation can hold before it must grow.
+    fn capacity(&self) -> usize {
+        return self.cap
+    }
+
+    // The address of element `index`, in bytes.
+    //
+    // The stride is `T`'s size, which is why this needs the layout: the block is
+    // addressed as bytes so that one `Vec` implementation serves every `T`.
+    fn address_of(&self, index: usize) -> *mut u8 {
+        unsafe {
+            let base = self.ptr as usize
+            let stride = 8 as usize
+            return (base + index * stride) as *mut u8
+        }
+    }
+}
+
+impl<T> Vec<T> {
+    // An empty vector that allocates nothing until something is pushed.
+    fn new() -> Vec<T> {
+        unsafe {
+            return Vec { ptr: alloc(0), len: 0, cap: 0 }
+        }
+    }
+
+    // A vector with room for at least `capacity` elements.
+    fn with_capacity(capacity: usize) -> Vec<T> {
+        unsafe {
+            let bytes = capacity * 8 as usize
+            return Vec { ptr: alloc(bytes), len: 0, cap: capacity }
+        }
+    }
+
+    // Grows the allocation so that at least one more element fits.
+    //
+    // A fresh vector gets room for two elements; after that the block doubles.
+    // Doubling is what keeps the average cost of a push constant: the copies that
+    // a grow performs are paid for by the pushes that made it necessary. Nothing
+    // is copied when the block already has room, so `push` is cheap in the common
+    // case.
+    fn grow(&self) -> Vec<T> {
+        unsafe {
+            let new_cap = if self.cap == 0 { 2 as usize } else { self.cap * 2 as usize }
+            let fresh = alloc(new_cap * 8 as usize)
+            copy_bytes(self.ptr, fresh, self.len * 8 as usize)
+            if self.cap > 0 {
+                dealloc(self.ptr)
+            }
+            return Vec { ptr: fresh, len: self.len, cap: new_cap }
+        }
+    }
+
+    // Appends `value` and returns the vector with room for it.
+    //
+    // The vector is taken and returned by value, because growing may move the
+    // elements to a new block: the caller must use the returned vector, and the
+    // checker enforces that by moving the old one.
+    fn push(&self, value: i64) -> Vec<T> {
+        unsafe {
+            let current = Vec { ptr: self.ptr, len: self.len, cap: self.cap }
+            let grown = if current.len < current.cap { current } else { current.grow() }
+            return grown.with_value_at(grown.len, value)
+        }
+    }
+
+    // Writes `value` at `index` and counts it as an element.
+    fn with_value_at(&self, index: usize, value: i64) -> Vec<T> {
+        unsafe {
+            write_i64(self.address_of(index), value)
+            return Vec { ptr: self.ptr, len: index + 1 as usize, cap: self.cap }
+        }
+    }
+
+    // The element at `index`, or `0` when the index is out of range.
+    //
+    // A bounds check rather than a trap: a caller that wants to know whether the
+    // index was valid should compare it with `len` first.
+    fn get(&self, index: usize) -> i64 {
+        unsafe {
+            if index < self.len {
+                return read_i64(self.address_of(index))
+            }
+            return 0
+        }
+    }
+
+    // Releases the vector's allocation.
+    fn free(&self) {
+        unsafe {
+            if self.cap > 0 {
+                dealloc(self.ptr)
+            }
+        }
+    }
+}

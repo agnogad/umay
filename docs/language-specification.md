@@ -382,14 +382,39 @@ instance. Field reads check against the substituted field type, and a method's
 signature is substituted from its receiver, so `Box<i64>::get` returns `i64`.
 Two instantiations of one declaration are different types.
 
-**Monomorphisation does not exist yet.** A generic *body* still names its
-parameter, and nothing gives it a concrete size. Such a body is rejected with
-`E3001` — the same code the backend would otherwise raise, reported early so
-`umay check` and `umay build` agree and nothing is half-compiled. A generic
-declaration without a generic body is accepted.
+**Bodies are monomorphised.** Every generic function, method and impl method
+that a concrete call reaches is copied with its type arguments substituted, and
+the call is rewritten to that copy. A declaration is never compiled on its own:
+only the instances a program actually needs exist in the output.
 
-Consequently `Vec<T>`, `Option<T>`, `Result<T, E>` and `Iterator` are not
-available. If you need a container today, write it for one concrete element type.
+```umay
+struct Box<T> { value: T }
+
+impl<T> Box<T> {
+    fn get(&self) -> T { return self.value }
+}
+
+fn main() -> i32 {
+    let b: Box<i64> = Box { value: 7 }
+    println_i64(b.get())   // 7
+    return 0
+}
+```
+
+A type annotation is also an inference hint, which matters where no value can
+name the instance:
+
+```umay
+let empty: Option<i64> = Option::None   // `T` comes from the annotation
+```
+
+Without such an annotation an instance that nothing names is reported
+("cannot infer the type parameter `T`") rather than guessed.
+
+`Vec<T>` is available in the standard library — see `stdlib/vec.um`. Its stride
+is currently fixed at eight bytes, so it serves eight-byte element types until
+`size_of::<T>()` exists. `Option`, `Result` and `Iterator` are not in the standard
+library yet, though the declaration form works.
 
 ---
 

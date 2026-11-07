@@ -125,7 +125,7 @@ fn enum_payload_is_aligned_after_the_tag() {
         let ty = l.types_mut().adt(def, Vec::new());
         // u8 tag, payload at 8, 16 bytes of payload, total 24.
         assert_eq!(l.layout(ty).unwrap(), Layout::new(24, 8));
-        assert_eq!(l.enum_payload_offset(def).unwrap(), 8);
+        assert_eq!(l.enum_payload_offset(def, &[]).unwrap(), 8);
     });
 }
 

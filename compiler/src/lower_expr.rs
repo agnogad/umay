@@ -124,7 +124,18 @@ impl Lowering<'_> {
             }
             HirExprKind::FnRef(id) => Operand::Constant(Constant::Fn(*id)),
             HirExprKind::UnitVariant { def, index } => {
-                Operand::Constant(Constant::UnitVariant { def: *def, index: *index })
+                // A fieldless variant is still a value with a tag: build it as an
+                // aggregate so the backend writes that tag like any other variant.
+                let t = self.temp_place(e.ty);
+                self.assign(
+                    t.clone(),
+                    Rvalue::Aggregate {
+                        kind: AggregateKind::Variant { def: *def, index: *index },
+                        operands: Vec::new(),
+                    },
+                    e.span,
+                );
+                Operand::Copy(t)
             }
 
             HirExprKind::Unary { op, operand } => self.lower_unary(*op, operand, e),
@@ -312,6 +323,53 @@ impl Lowering<'_> {
                 Operand::Constant(Constant::Unit)
             }
         }
+    }
+
+    /// The type of a place after every projection, e.g. the `Option<i64>` behind
+    /// a `&Option<i64>` that `match *self` dereferences.
+    pub(crate) fn place_type(&mut self, place: &crate::mir::Place) -> TyId {
+        let mut ty = self.local_ty(place.local);
+        for projection in &place.projection {
+            ty = match projection {
+                crate::mir::Projection::Field(i) | crate::mir::Projection::EnumField { index: i, .. } => {
+                    self.field_ty_of(ty, *i)
+                }
+                crate::mir::Projection::Deref => match self.types.kind(ty).clone() {
+                    crate::types::TyKind::Ref(inner)
+                    | crate::types::TyKind::RefMut(inner)
+                    | crate::types::TyKind::RawPtr(inner)
+                    | crate::types::TyKind::RawPtrMut(inner) => inner,
+                    _ => ty,
+                },
+                crate::mir::Projection::Index(_) => match self.types.kind(ty).clone() {
+                    crate::types::TyKind::Array { elem, .. } => elem,
+                    crate::types::TyKind::Slice(elem) => elem,
+                    _ => ty,
+                },
+            };
+        }
+        ty
+    }
+
+    /// The declared type of a field by index, or `ty` when it cannot be resolved.
+    fn field_ty_of(&mut self, ty: TyId, index: u32) -> TyId {
+        let crate::types::TyKind::Adt { def, args } = self.types.kind(ty).clone() else {
+            return ty;
+        };
+        if let Some(info) = self.hir.structs.iter().find(|s| s.def_id == def) {
+            let Some(f) = info.fields.get(index as usize) else { return ty };
+            let declared = f.ty;
+            let generics = info.generics.clone();
+            if generics.is_empty() || args.is_empty() {
+                return declared;
+            }
+            let mut subst = std::collections::HashMap::new();
+            for (name, arg) in generics.iter().zip(args.iter()) {
+                subst.insert(name.clone(), *arg);
+            }
+            return self.types.substitute(declared, &subst);
+        }
+        ty
     }
 
     pub(crate) fn local_ty_of_operand(&self, op: &Operand) -> TyId {

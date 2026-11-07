@@ -644,3 +644,126 @@ fn two_literal_locals_keep_their_own_default_width() {
         "6\n",
     );
 }
+
+#[test]
+fn a_match_selects_the_arm_whose_pattern_matches() {
+    // Every arm's body must be behind a test on the enum's tag. Without one each
+    // body would run in turn and the result would be the last arm's, whatever the
+    // value was.
+    expect_stdout(
+        "match_selects",
+        "enum E { A, B, C }\n\
+         fn pick(e: E) -> i64 {\n\
+             return match e { E::A => 10, E::B => 20, E::C => 30 }\n\
+         }\n\
+         fn main() -> i32 {\n\
+             println_i64(pick(E::A))\n\
+             println_i64(pick(E::B))\n\
+             println_i64(pick(E::C))\n\
+             return 0\n\
+         }",
+        "10\n20\n30\n",
+    );
+}
+
+#[test]
+fn a_match_on_a_bool_takes_the_right_branch() {
+    expect_stdout(
+        "match_bool",
+        "fn describe(b: bool) -> i64 {\n\
+             return match b { true => 1, false => 0 }\n\
+         }\n\
+         fn main() -> i32 {\n\
+             println_i64(describe(true))\n\
+             println_i64(describe(false))\n\
+             return 0\n\
+         }",
+        "1\n0\n",
+    );
+}
+
+#[test]
+fn a_generic_enum_payload_binds_its_concrete_type() {
+    // The variant's field type is written in terms of `T`, so matching an
+    // `Option<i64>` must bind an `i64`: a binding left as `T` would have no size
+    // and the backend would refuse to lay it out.
+    expect_stdout(
+        "generic_enum",
+        "enum Option<T> { None, Some(T) }\n\
+         fn unwrap_or(o: Option<i64>, fallback: i64) -> i64 {\n\
+             return match o { Option::Some(v) => v, Option::None => fallback }\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let a = Option::Some(7i64)\n\
+             let b: Option<i64> = Option::None\n\
+             println_i64(unwrap_or(a, 0))\n\
+             println_i64(unwrap_or(b, -1))\n\
+             return 0\n\
+         }",
+        "7\n-1\n",
+    );
+}
+
+#[test]
+fn a_generic_method_reads_its_receiver_field() {
+    expect_stdout(
+        "generic_method",
+        "struct Box2<T> { value: T }\n\
+         impl<T> Box2<T> {\n\
+             fn get(&self) -> i64 {\n\
+                 return self.value\n\
+             }\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let b: Box2<i64> = Box2 { value: 7 }\n\
+             println_i64(b.get())\n\
+             return 0\n\
+         }",
+        "7\n",
+    );
+}
+
+#[test]
+fn a_vector_grows_and_keeps_its_elements() {
+    // The vector starts with no allocation, grows to two, then doubles. Every
+    // earlier element must survive each move to the larger block.
+    expect_stdout(
+        "vec_push",
+        "fn main() -> i32 {\n\
+             unsafe {\n\
+                 let mut v: Vec<i64> = Vec::new()\n\
+                 v = v.push(10)\n\
+                 v = v.push(20)\n\
+                 v = v.push(30)\n\
+                 println_i64(v.len() as i64)\n\
+                 println_i64(v.get(0))\n\
+                 println_i64(v.get(1))\n\
+                 println_i64(v.get(2))\n\
+                 println_i64(v.get(99))\n\
+                 v.free()\n\
+             }\n\
+             return 0\n\
+         }",
+        "3\n10\n20\n30\n0\n",
+    );
+}
+
+#[test]
+fn an_out_of_range_index_does_not_read_past_the_allocation() {
+    // `get` checks the index against `len`, so an index past the end yields the
+    // default instead of whatever byte follows the block.
+    expect_stdout(
+        "vec_bounds",
+        "fn main() -> i32 {\n\
+             unsafe {\n\
+                 let mut v: Vec<i64> = Vec::new()\n\
+                 v = v.push(5)\n\
+                 println_i64(v.get(1))\n\
+                 println_i64(v.capacity() as i64)\n\
+                 v.free()\n\
+             }\n\
+             return 0\n\
+         }",
+        "0\n2\n",
+    );
+}

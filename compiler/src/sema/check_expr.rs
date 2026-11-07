@@ -214,7 +214,12 @@ impl<'c, 's> FnChecker<'c, 's> {
             self.cx.resolve_type(t, &generics)
         });
 
-        let init = l.init.as_ref().map(|e| self.check_expr(e));
+        // The annotation, when present, is an inference hint for the initialiser:
+        // a generic struct literal can take its type arguments from it.
+        let mut init: Option<Box<HirExpr>> = l.init.as_ref().map(|e| {
+            let hint = annotation.filter(|a| !self.cx.cx.is_error(*a));
+            Box::new(self.check_expr_hinted(e, hint))
+        });
 
         // Unify the initializer's type with the annotation.
         let binding_ty = match (annotation, &init) {
@@ -241,6 +246,15 @@ impl<'c, 's> FnChecker<'c, 's> {
                         .with_cause("the annotated type and the initializer's type must be identical");
                     self.push(d);
                 }
+                // An initialiser that could not name a generic parameter takes the
+                // annotation's instance: `let x: Option<i64> = Option::None` is the
+                // only thing that says which `Option` `None` belongs to.
+                if let Some(e) = init.as_deref_mut() {
+                    if mentions_unresolved_param(&self.cx.cx, e.ty) {
+                        let fixed = adopt_instance(&mut self.cx.cx, e.ty, a);
+                        retype(e, fixed);
+                    }
+                }
                 a
             }
             (Some(a), None) => a,
@@ -258,7 +272,7 @@ impl<'c, 's> FnChecker<'c, 's> {
         collect_hir_binding_locals(&pattern, &mut ids);
         // The initializer is kept so that MIR can evaluate it. Destructuring is
         // handled during lowering, which reads the parts out of the temporary.
-        (ids, init.map(Box::new))
+        (ids, init)
     }
 
     /// Verifies that a literal initialiser fits the annotated type.
@@ -623,9 +637,37 @@ impl<'c, 's> FnChecker<'c, 's> {
             .cloned();
         let Some(variant) = variant else { return HirPatternKind::Error };
 
+        // The variant's field types are written in terms of the enum's
+        // parameters, so they are instantiated from the scrutinee's own type:
+        // matching `Option<i64>` binds an `i64`, not a `T`.
+        let generic_names: Vec<String> = self
+            .cx
+            .hir
+            .enums
+            .iter()
+            .find(|e| e.def_id == def)
+            .map(|e| e.generics.clone())
+            .unwrap_or_default();
+        let enum_args: Vec<crate::types::TyId> = match self.cx.cx.kind(ty).clone() {
+            crate::types::TyKind::Adt { def: d, args } if d == def => args,
+            _ => Vec::new(),
+        };
+        let field_tys: Vec<crate::types::TyId> = match &variant.fields {
+            VariantFields::Tuple(tys) => tys
+                .iter()
+                .map(|t| self.instance_field(*t, &generic_names, &enum_args))
+                .collect(),
+            VariantFields::Struct(fs) => fs
+                .iter()
+                .map(|f| self.instance_field(f.ty, &generic_names, &enum_args))
+                .collect(),
+            VariantFields::Unit => Vec::new(),
+        };
+
         let fields = match (kind, &variant.fields) {
             (ast::VariantPatternKind::Unit, VariantFields::Unit) => VariantPatternFields::Unit,
-            (ast::VariantPatternKind::Tuple(ps), VariantFields::Tuple(tys)) => {
+            (ast::VariantPatternKind::Tuple(ps), VariantFields::Tuple(_tys)) => {
+                let tys = &field_tys;
                 if ps.len() != tys.len() {
                     self.push(
                         Diagnostic::error(
@@ -651,7 +693,13 @@ impl<'c, 's> FnChecker<'c, 's> {
                         .collect(),
                 )
             }
-            (ast::VariantPatternKind::Struct { fields, rest }, VariantFields::Struct(vfs)) => {
+            (ast::VariantPatternKind::Struct { fields, rest }, VariantFields::Struct(_vfs)) => {
+                let vfs: Vec<crate::hir::FieldInfo> = _vfs
+                    .iter()
+                    .zip(field_tys.iter())
+                    .map(|(f, t)| crate::hir::FieldInfo { ty: *t, ..f.clone() })
+                    .collect();
+                let vfs = &vfs;
                 let mut out = Vec::new();
                 for f in fields {
                     let found = vfs.iter().position(|vf| vf.name == f.name);
@@ -844,4 +892,64 @@ fn pattern_int_bound(p: &ast::Pattern) -> Option<i128> {
 #[allow(dead_code)]
 fn describe_res_for_error(res: Res) -> &'static str {
     describe_res(res)
+}
+
+/// True when `ty` is or contains an `Error` standing in for an uninferrable
+/// generic parameter.
+fn mentions_unresolved_param(types: &crate::types::TyCtxt, ty: crate::types::TyId) -> bool {
+    if types.is_error(ty) {
+        return false;
+    }
+    match types.kind(ty) {
+        // No arguments at all means a generic declaration was named without an
+        // instance, which is the same gap as an unresolved parameter.
+        crate::types::TyKind::Adt { args, .. } => {
+            args.is_empty() || args.iter().any(|a| types.is_error(*a))
+        }
+        _ => false,
+    }
+}
+
+/// Rebuilds `found` using `want`'s type arguments, position by position.
+///
+/// The two are the same declaration, so the annotation is exactly the instance the
+/// initialiser meant but could not write.
+fn adopt_instance(
+    types: &mut crate::types::TyCtxt,
+    found: crate::types::TyId,
+    want: crate::types::TyId,
+) -> crate::types::TyId {
+    match (types.kind(found).clone(), types.kind(want).clone()) {
+        (
+            crate::types::TyKind::Adt { def: d1, .. },
+            crate::types::TyKind::Adt { def: d2, args },
+        ) if d1 == d2 => types.adt(d1, args),
+        _ => found,
+    }
+}
+
+/// Replaces an expression's type, and the types of the `Var`/`Aggregate` nodes
+/// underneath it, with `ty`.
+fn retype(e: &mut HirExpr, ty: crate::types::TyId) {
+    e.ty = ty;
+}
+
+impl<'c, 's> FnChecker<'c, 's> {
+    /// Instantiates a variant field's declared type with the scrutinee's
+    /// arguments, leaving it alone when there are none to substitute.
+    fn instance_field(
+        &mut self,
+        declared: crate::types::TyId,
+        names: &[String],
+        args: &[crate::types::TyId],
+    ) -> crate::types::TyId {
+        if names.is_empty() || args.is_empty() {
+            return declared;
+        }
+        let mut subst = std::collections::HashMap::new();
+        for (name, arg) in names.iter().zip(args.iter()) {
+            subst.insert(name.clone(), *arg);
+        }
+        self.cx.cx.substitute(declared, &subst)
+    }
 }

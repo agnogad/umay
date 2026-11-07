@@ -664,6 +664,14 @@ fn parse_place(s: &str, strings: &mut Vec<String>, n: usize) -> Result<Place, Pa
                 rest = r2;
                 continue;
             }
+            if let Some(r3) = r.strip_prefix('v') {
+                let (variant, r4) = split_number(r3, n)?;
+                let r5 = r4.strip_prefix('.').unwrap_or(r4);
+                let (index, r6) = split_number(r5, n)?;
+                place.projection.push(Projection::EnumField { variant, index });
+                rest = r6;
+                continue;
+            }
             let (f, r2) = split_number(r, n)?;
             place.projection.push(Projection::Field(f));
             rest = r2;

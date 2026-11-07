@@ -229,11 +229,14 @@ resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
   the instance is carried on the value's type, a method's signature is
   substituted from the receiver's arguments (`Box<i64>::get -> T` is `-> i64`),
   and field access checks against the instantiated field type.
-- [ ] **Monomorphisation** — the remaining blocker for `Vec<T>`. A generic *body*
-  still names its parameter, and no pass gives it a concrete type. This is now a
-  clean diagnostic (`E3001`) rather than a backend crash: `umay check` and
-  `umay build` agree, and nothing is half-compiled.
-- [ ] `Vec<T>` — arrives with monomorphisation.
+- [x] **Monomorphisation** (`compiler/src/mono.rs`). Each generic function, method
+  and impl method reached from a concrete call is copied with its type arguments
+  substituted, and the call is rewritten to the copy. Discovery runs over the
+  bodies to a fixed point, so an instance created inside another instance is
+  found too. A template is never lowered: only its instances are.
+- [x] `Vec<T>` in `stdlib/vec.um` — `new`, `with_capacity`, `push`, `get`, `len`,
+  `capacity`, `is_empty`, `free`, with doubling growth and a bounds check in
+  `get`. `Vec<i64>` pushes, grows and reads back correctly.
 
 - [ ] `Option`, `Result`, `Iterator` basics.
 - [ ] `fs`: read, write, open, metadata.
@@ -268,6 +271,53 @@ Known gaps this step depends on, none of which are covered yet:
 - `&mut T` does not coerce to `&T` (`E1001`).
 - A literal local used at a wider type (`let mut i = 0` used as a `usize`) is
   now settled to that type and stored at its width.
+
+### Generics and containers
+
+Monomorphisation landed, and `Vec<T>` with it. Six more defects surfaced on the
+way, each now fixed and tested:
+
+- `lower_match` emitted **no tests at all**: every arm's body ran in order and the
+  result was whichever ran last. A `match` on an enum always produced its final
+  arm's value. Each pattern now emits a `switchInt` on its variant index, its
+  literal, or its `bool`, and bindings are stored only in the arm that matched.
+- `Discriminant` loaded the **whole enum** instead of its tag byte, so reading a
+  tag from anything but an eight-byte payload read past the value.
+- A narrow load left the **upper bits of the register** untouched: writing `%al`
+  preserves the rest of `%rax`, so a byte read and then compared as a word
+  compared whatever the register held before. `W8`/`W16` loads now zero-extend.
+- A parameter whose type is a **one-byte aggregate** was stored with a 64-bit
+  move into a one-byte slot, overwriting the saved frame pointer beside it. A
+  parameter is now stored at its own size.
+- A fieldless variant (`E::A`) had **no code path at all** (`E3001`); it is built
+  as an aggregate with a tag, which is what it is.
+- A pattern binding inside `match o` kept the declared type **`T`** rather than
+  the scrutinee's `i64`, because the variant's field types were never
+  instantiated from the scrutinee's arguments. They are now.
+
+Inference also learned three things:
+
+- A `let` annotation is an inference hint: `let v: Vec<i64> = Vec { .. }` names
+  the instance the literal could not.
+- `Option::None` has no payload to infer `T` from, so it takes the annotation's
+  instance; with no annotation it is reported ("cannot infer the type parameter
+  `T`") rather than guessed.
+- A literal written inside `impl<T> Vec<T>` means the `Vec<T>` being defined, so a
+  constructor can build its own type without an annotation.
+
+`Vec::new()` is called as `Vec::new()` with a type annotation rather than
+`Vec::<i64>::new()`: turbofish is still a parser gap.
+
+Known gaps this step depends on, now listed rather than assumed:
+
+- An associated function is not callable as `Type::fn(..)`: only `Vec::new()`
+  works, and only because it resolves to the single `new` in scope. Real
+  `Type::fn` resolution is a front-end task.
+- `Vec<T>` stores its stride as a literal `8`, because `size_of::<T>()` does not
+  exist yet; a `Vec<u8>` would therefore use the wrong stride.
+- `push` takes and returns the vector by value, so a caller must write
+  `v = v.push(x)`. An `&mut self` method that reallocates would be the better
+  shape, but `&mut T` does not coerce to `&T` yet.
 
 Fixing the aggregate-ABI work also turned up two printed-MIR round-trip holes and
 a stack-argument bug, all now fixed and tested:

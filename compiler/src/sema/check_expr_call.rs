@@ -102,9 +102,59 @@ impl FnChecker<'_, '_> {
         let info = self.cx.hir.enums.iter().find(|e| e.def_id == def)?.clone();
         let variant_name = &path.segments[1].name;
         let index = info.variants.iter().position(|v| v.name == *variant_name)?;
-        let ty = self.cx.cx.adt(def, Vec::new());
         let args: Vec<HirExpr> = args.iter().map(|a| self.check_expr(a)).collect();
-        let variant = &info.variants[index];
+        let variant = info.variants[index].clone();
+        // A generic enum infers its arguments from the payload it is given, the
+        // same way a struct literal does: `Option::Some(7)` is an `Option<i32>`.
+        let mut inferred: std::collections::HashMap<String, crate::types::TyId> =
+            std::collections::HashMap::new();
+        if !info.generics.is_empty() {
+            let field_tys: Vec<crate::types::TyId> = match &variant.fields {
+                VariantFields::Tuple(tys) => tys.clone(),
+                VariantFields::Struct(fields) => fields.iter().map(|f| f.ty).collect(),
+                VariantFields::Unit => Vec::new(),
+            };
+            for (p, a) in field_tys.iter().zip(args.iter()) {
+                let crate::types::TyKind::Param { name } = self.cx.cx.kind(*p).clone() else {
+                    continue;
+                };
+                if self.cx.cx.is_error(a.ty) {
+                    continue;
+                }
+                let mut ty = a.ty;
+                if self.cx.cx.is_integer_var(ty) {
+                    ty = self.cx.cx.i32_ty();
+                } else if self.cx.cx.is_float_var(ty) {
+                    ty = self.cx.cx.f64_ty();
+                }
+                inferred.entry(name).or_insert(ty);
+            }
+        }
+        let mut ty_args: Vec<crate::types::TyId> = Vec::with_capacity(info.generics.len());
+        for g in &info.generics {
+            // A parameter no payload mentions stays an error: guessing would pick
+            // the wrong type silently, and an annotation is the way to say it.
+            match inferred.get(g).copied() {
+                Some(t) => ty_args.push(t),
+                None => {
+                    self.push(
+                        Diagnostic::error(
+                            "E1001",
+                            format!("cannot infer the type parameter `{g}` of `{enum_name}`"),
+                        )
+                        .at(span)
+                        .with_cause("this variant carries no value that could name the parameter")
+                        .with_explanation(
+                            "A variant like `Option::None` holds no data, so nothing in the \
+                             expression says what `T` is. Give the binding a type, as in \
+                             `let empty: Option<i64> = Option::None`, and the value takes it.",
+                        ),
+                    );
+                    ty_args.push(self.cx.cx.error());
+                }
+            }
+        }
+        let ty = self.cx.cx.adt(def, ty_args);
 
         match &variant.fields {
             VariantFields::Unit => {
@@ -135,7 +185,8 @@ impl FnChecker<'_, '_> {
                     );
                 }
                 for (p, a) in field_tys.iter().zip(&args) {
-                    self.check_variant_field(*p, a);
+                    let want = self.cx.cx.substitute(*p, &inferred);
+                    self.check_variant_field(want, a);
                 }
             }
             VariantFields::Struct(fields) => {
@@ -504,7 +555,10 @@ impl FnChecker<'_, '_> {
             .find(|(_, f)| f.name == field)
         {
             Some((index, f)) => {
-                let ty = f.ty;
+                // A field of a generic struct has the type its instantiation chose:
+                // `Pair<i64, i32>::first` is an `i64`, not an `A`.
+                let subst = self.instance_of(base_ty);
+                let ty = self.cx.cx.substitute(f.ty, &subst);
                 HirExpr {
                     kind: HirExprKind::Field {
                         base: Box::new(base_hir),
@@ -581,6 +635,7 @@ impl FnChecker<'_, '_> {
         fields: &[ast::FieldInit],
         base: Option<&ast::Expr>,
         span: crate::source::Span,
+        hint: Option<crate::types::TyId>,
     ) -> HirExpr {
         let name = path.segments.last().map(|s| s.name.clone()).unwrap_or_default();
         let Some(def) = self.cx.def_by_name.get(&name).copied() else {
@@ -644,8 +699,20 @@ impl FnChecker<'_, '_> {
                     // parameter to the literal's type, which is settled to its
                     // default width in the same pass that settles every other
                     // unresolved literal.
+                    // A bare literal is recorded at the type it will actually be
+                    // stored as. Keeping the unresolved variable would let the
+                    // struct's layout be asked for a width the literal never takes.
+                    let mut ty = probed.ty;
+                    // `i32` and `f64` are the documented defaults for an unsuffixed
+                    // literal, so instantiating at them matches what the literal
+                    // would be stored as anywhere else.
+                    if self.cx.cx.is_integer_var(ty) {
+                        ty = self.cx.cx.i32_ty();
+                    } else if self.cx.cx.is_float_var(ty) {
+                        ty = self.cx.cx.f64_ty();
+                    }
                     if let std::collections::hash_map::Entry::Vacant(slot) = inferred.entry(name) {
-                        slot.insert(probed.ty);
+                        slot.insert(ty);
                     }
                 }
             }
@@ -762,9 +829,30 @@ impl FnChecker<'_, '_> {
 
         // The value's type carries the instantiation, so every later phase sees
         // `Vec<i64>` rather than a bare `Vec`, and layout can size the fields.
+        // The expected type, when the context supplied one, names the instance
+        // directly: `let v: Vec<i64> = Vec { .. }` needs no field to say what `T`
+        // is. It is used only for parameters nothing else could infer.
+        let hinted: Vec<crate::types::TyId> = match hint.map(|h| self.cx.cx.kind(h).clone()) {
+            Some(crate::types::TyKind::Adt { def: d, args }) if d == def => args,
+            _ => Vec::new(),
+        };
         let mut args: Vec<crate::types::TyId> = Vec::with_capacity(info.generics.len());
-        for g in &info.generics {
-            match inferred.get(g).copied() {
+        for (index, g) in info.generics.iter().enumerate() {
+            match hinted
+                .get(index)
+                .copied()
+                .filter(|t| !self.cx.cx.is_error(*t))
+                .or_else(|| inferred.get(g).copied())
+                // Inside the declaration's own `impl`, an uninstantiated literal is
+                // written in terms of the block's parameters: `Vec { .. }` in
+                // `impl<T> Vec<T>` is the `Vec<T>` being defined.
+                .or_else(|| {
+                    if self.generics.iter().any(|x| x == g) {
+                        Some(self.cx.cx.param(g.clone()))
+                    } else {
+                        None
+                    }
+                }) {
                 Some(t) => args.push(t),
                 None => {
                     self.push(

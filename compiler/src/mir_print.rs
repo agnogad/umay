@@ -55,7 +55,10 @@ fn ty_ann(ty: crate::types::TyId, types: &mut crate::types::TyCtxt) -> String {
     // A context that does not know the id (round-trip printing of parsed MIR)
     // still prints the id, so no information is lost.
     if types.contains(ty) {
-        format!("{}@{}", types.display(ty), ty.0)
+        match types.kind(ty).clone() {
+            crate::types::TyKind::Adt { def: _, args } => format!("{}<{:?}>@{}", types.display(ty), args.iter().map(|a| a.0).collect::<Vec<_>>(), ty.0),
+            _ => format!("{}@{}", types.display(ty), ty.0),
+        }
     } else {
         format!("?@{}", ty.0)
     }
@@ -123,6 +126,9 @@ fn print_place(p: &Place) -> String {
         match proj {
             Projection::Field(i) => {
                 let _ = write!(s, ".{}", i);
+            }
+            Projection::EnumField { variant, index } => {
+                let _ = write!(s, ".v{}.{}", variant, index);
             }
             Projection::Index(op) => {
                 let _ = write!(s, "[{}]", print_operand(op, &mut crate::types::TyCtxt::new(), &[]));

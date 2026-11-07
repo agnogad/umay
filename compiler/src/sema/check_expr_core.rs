@@ -11,6 +11,20 @@ use crate::types::{TyId, TyKind};
 
 impl FnChecker<'_, '_> {
     pub fn check_expr(&mut self, e: &ast::Expr) -> HirExpr {
+        self.check_expr_hinted(e, None)
+    }
+
+    /// Checks an expression whose type the surrounding context already knows.
+    ///
+    /// The hint is only an aid to inference: a struct literal that cannot name
+    /// its own type arguments takes them from the hint, so
+    /// `let v: Vec<i64> = Vec { .. }` is accepted. Nothing else changes, and a
+    /// wrong hint is still reported as a type mismatch by the caller.
+    pub fn check_expr_hinted(
+        &mut self,
+        e: &ast::Expr,
+        hint: Option<crate::types::TyId>,
+    ) -> HirExpr {
         let span = e.span;
         let kind = match &e.kind {
             ast::ExprKind::IntLit { value, suffix } => self.check_int_lit(*value, *suffix, span),
@@ -78,7 +92,9 @@ impl FnChecker<'_, '_> {
                 self.check_field_access(base, field, *field_span, span)
             }
             ast::ExprKind::Index { base, index } => self.check_index(base, index, span),
-            ast::ExprKind::StructLit { path, fields, base } => self.check_struct_lit(path, fields, base.as_deref(), span),
+            ast::ExprKind::StructLit { path, fields, base } => {
+                self.check_struct_lit(path, fields, base.as_deref(), span, hint)
+            }
             ast::ExprKind::ArrayLit { elems } => self.check_array_lit(elems, span),
             ast::ExprKind::ArrayRepeat { value, count } => self.check_array_repeat(value, count, span),
             ast::ExprKind::Tuple { elems } => self.check_tuple_lit(elems, span),

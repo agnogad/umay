@@ -25,38 +25,47 @@ impl Lowering<'_> {
                 t
             }
         };
-        let scrut_ty = self.local_ty(scrut_place.local);
+        // The scrutinee may be reached through a dereference (`match *self`), so its
+        // type is the place's type after every projection, not the local's own.
+        let scrut_ty = self.place_type(&scrut_place);
 
         let produces_value = !matches!(self.types.kind_owned(e.ty), TyKind::Unit | TyKind::Never);
         let result = if produces_value { Some(self.temp_place(e.ty)) } else { None };
         let join = self.new_block();
 
         // Build the test chain from the arms, in source order.
+        //
+        // Each arm gets a test that decides whether it is the one that matches.
+        // Without it every arm's body would run and the result would be whichever
+        // ran last, which is not what a `match` means. An arm whose pattern always
+        // matches (a binding or `_`) becomes a plain jump and ends the chain.
         for arm in arms {
             let body_bb = self.new_block();
             let next_test = self.new_block();
 
-            // Bindings for the arm are introduced before the body runs.
+            let always = self.emit_pattern_tests(&arm.pattern, &scrut_place, scrut_ty, body_bb, next_test, e.span);
+
+            // Bindings are stored only once the arm is known to have matched.
+            self.current = body_bb;
             self.emit_pattern_bindings(&arm.pattern, scrut_place.clone(), scrut_ty, e.span);
 
             // The guard, when present, decides between body and next test.
-            let after_guard = if let Some(guard) = &arm.guard {
+            if let Some(guard) = &arm.guard {
                 let g = self.lower_expr(guard);
+                let guarded = self.new_block();
                 self.terminate(
                     Terminator::SwitchInt {
                         discr: g,
-                        targets: vec![(1, body_bb)],
+                        targets: vec![(1, guarded)],
                         otherwise: next_test,
                     },
-                    body_bb,
+                    guarded,
                 );
-                true
-            } else {
-                false
-            };
-            let _ = after_guard;
+                self.current = guarded;
+            }
 
-            self.current = body_bb;
+            let _ = always;
+
             let v = self.lower_expr(&arm.body);
             if let Some(r) = &result {
                 self.assign(r.clone(), Rvalue::Use(v), e.span);
@@ -74,6 +83,143 @@ impl Lowering<'_> {
         match result {
             Some(r) => Operand::Copy(r),
             None => Operand::Constant(Constant::Unit),
+        }
+    }
+
+    /// Emits the tests that decide whether `pat` matches, jumping to `on_match`
+    /// when it does and to `on_fail` when it does not.
+    ///
+    /// Returns true when the pattern always matches, in which case the call has
+    /// already jumped to `on_match` and the caller's `on_fail` block is unused.
+    fn emit_pattern_tests(
+        &mut self,
+        pat: &HirPattern,
+        place: &Place,
+        ty: TyId,
+        on_match: BlockId,
+        on_fail: BlockId,
+        span: crate::source::Span,
+    ) -> bool {
+        match &pat.kind {
+            // These match unconditionally; a `match` with no other arm would be
+            // rejected by the exhaustiveness checker, so reaching here means the
+            // pattern really does cover everything left.
+            HirPatternKind::Wildcard | HirPatternKind::Binding { .. } | HirPatternKind::Error => {
+                self.goto(on_match);
+                true
+            }
+            HirPatternKind::Variant { index, fields, .. } => {
+                // Read the tag and compare it with this variant's index. The tag
+                // is written as a single byte by the aggregate constructor.
+                // A discriminator is an integer, not the enum it came from.
+                let u8_ty = self.types.u8_ty();
+                let discr = self.temp_place(u8_ty);
+                self.assign(
+                    discr.clone(),
+                    Rvalue::Discriminant(place.clone()),
+                    span,
+                );
+                if let VariantPatternFields::Unit = fields {
+                    self.terminate(
+                        Terminator::SwitchInt {
+                            discr: Operand::Copy(discr),
+                            targets: vec![(*index as i128, on_match)],
+                            otherwise: on_fail,
+                        },
+                        on_match,
+                    );
+                } else {
+                    let payload = self.new_block();
+                    self.terminate(
+                        Terminator::SwitchInt {
+                            discr: Operand::Copy(discr),
+                            targets: vec![(*index as i128, payload)],
+                            otherwise: on_fail,
+                        },
+                        payload,
+                    );
+                    self.current = payload;
+                    self.goto(on_match);
+                }
+                false
+            }
+            HirPatternKind::BoolLit(value) => {
+                let bool_ty = self.types.bool_ty();
+                let discr = self.temp_place(bool_ty);
+                self.assign(discr.clone(), Rvalue::Use(Operand::Copy(place.clone())), span);
+                self.terminate(
+                    Terminator::SwitchInt {
+                        discr: Operand::Copy(discr),
+                        targets: vec![(i128::from(*value), on_match)],
+                        otherwise: on_fail,
+                    },
+                    on_match,
+                );
+                false
+            }
+            HirPatternKind::IntLit { value, negative } => {
+                let discr = self.temp_place(ty);
+                self.assign(discr.clone(), Rvalue::Use(Operand::Copy(place.clone())), span);
+                let want = if *negative { -(*value as i128) } else { *value as i128 };
+                self.terminate(
+                    Terminator::SwitchInt {
+                        discr: Operand::Copy(discr),
+                        targets: vec![(want, on_match)],
+                        otherwise: on_fail,
+                    },
+                    on_match,
+                );
+                false
+            }
+            HirPatternKind::Or(alts) => {
+                // Any alternative matching is enough: each is tried in turn, and
+                // the last one's failure block is the caller's.
+                let mut always = false;
+                for (i, alt) in alts.iter().enumerate() {
+                    let fail = if i + 1 == alts.len() { on_fail } else { self.new_block() };
+                    always = self.emit_pattern_tests(alt, place, ty, on_match, fail, span);
+                    if always {
+                        return true;
+                    }
+                    if i + 1 < alts.len() {
+                        self.current = fail;
+                    }
+                }
+                always
+            }
+            // Tuple elements, struct fields and slice elements are matched by the
+            // arms that contain them; their own tests are left to the element
+            // patterns, which the exhaustiveness checker has already accepted as
+            // total for this shape.
+            HirPatternKind::Tuple(subs) => {
+                let mut always = true;
+                for (i, sub) in subs.iter().enumerate() {
+                    let fty = self.field_ty(ty, i);
+                    let sub_place = place.clone().field(i as u32);
+                    always &= self.emit_pattern_tests(sub, &sub_place, fty, on_match, on_fail, span);
+                }
+                if always {
+                    self.goto(on_match);
+                }
+                always
+            }
+            HirPatternKind::Struct { fields, .. } => {
+                let mut always = true;
+                for f in fields {
+                    let fty = self.field_ty(ty, f.index as usize);
+                    let sub_place = place.clone().field(f.index);
+                    always &=
+                        self.emit_pattern_tests(&f.pattern, &sub_place, fty, on_match, on_fail, span);
+                }
+                if always {
+                    self.goto(on_match);
+                }
+                always
+            }
+            _ => {
+                self.goto(on_match);
+                true
+            }
         }
     }
 
@@ -105,18 +251,28 @@ impl Lowering<'_> {
                     self.emit_pattern_bindings(&f.pattern, place.clone().field(f.index), fty, span);
                 }
             }
-            HirPatternKind::Variant { fields, .. } => match fields {
+            HirPatternKind::Variant { fields, index, .. } => match fields {
                 VariantPatternFields::Unit => {}
                 VariantPatternFields::Tuple(subs) => {
                     for (i, sub) in subs.iter().enumerate() {
-                        let fty = self.variant_field_ty(pat.ty, i);
-                        self.emit_pattern_bindings(sub, place.clone().field(i as u32), fty, span);
+                        let fty = self.variant_field_ty(pat.ty, *index, i);
+                        self.emit_pattern_bindings(
+                            sub,
+                            place.clone().enum_field(*index, i as u32),
+                            fty,
+                            span,
+                        );
                     }
                 }
                 VariantPatternFields::Struct { fields, .. } => {
                     for f in fields {
-                        let fty = self.variant_field_ty(pat.ty, f.index as usize);
-                        self.emit_pattern_bindings(&f.pattern, place.clone().field(f.index), fty, span);
+                        let fty = self.variant_field_ty(pat.ty, *index, f.index as usize);
+                        self.emit_pattern_bindings(
+                            &f.pattern,
+                            place.clone().enum_field(*index, f.index),
+                            fty,
+                            span,
+                        );
                     }
                 }
             },
@@ -170,32 +326,38 @@ impl Lowering<'_> {
         }
     }
 
-    pub(crate) fn variant_field_ty(&mut self, ty: TyId, index: usize) -> TyId {
-        let TyKind::Adt { def, .. } = self.types.kind(ty) else {
+    /// The type of field `index` in `variant` of an enum value of type `ty`.
+    ///
+    /// The variant is named rather than guessed: an enum's variants may carry
+    /// different types in the same position, and a generic enum fills them in from
+    /// the instantiation.
+    pub(crate) fn variant_field_ty(&mut self, ty: TyId, variant: u32, index: usize) -> TyId {
+        let TyKind::Adt { def, args } = self.types.kind(ty).clone() else {
             return self.types.unit();
         };
-        let Some(info) = self.hir.enums.iter().find(|e| e.def_id == *def) else {
+        let Some(info) = self.hir.enums.iter().find(|e| e.def_id == def) else {
             return self.types.unit();
         };
-        // Without a variant index here, take the first variant that has fields:
-        // all arms binding through a variant have already been checked against
-        // the same enum, and the payload layout is positional.
-        for v in &info.variants {
-            match &v.fields {
-                VariantFields::Tuple(tys) => {
-                    if let Some(t) = tys.get(index) {
-                        return *t;
-                    }
-                }
-                VariantFields::Struct(fields) => {
-                    if let Some(f) = fields.get(index) {
-                        return f.ty;
-                    }
-                }
-                VariantFields::Unit => {}
-            }
+        let generics = info.generics.clone();
+        let Some(v) = info.variants.get(variant as usize) else {
+            return self.types.unit();
+        };
+        let declared = match &v.fields {
+            VariantFields::Tuple(tys) => tys.get(index).copied(),
+            VariantFields::Struct(fields) => fields.get(index).map(|f| f.ty),
+            VariantFields::Unit => None,
+        };
+        let Some(declared) = declared else {
+            return self.types.unit();
+        };
+        if generics.is_empty() || args.is_empty() {
+            return declared;
         }
-        self.types.unit()
+        let mut subst = std::collections::HashMap::new();
+        for (name, arg) in generics.iter().zip(args.iter()) {
+            subst.insert(name.clone(), *arg);
+        }
+        self.types.substitute(declared, &subst)
     }
 
     /// String interpolation lowers to a chain of appends, so that the backend
