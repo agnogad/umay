@@ -1299,3 +1299,68 @@ fn an_enum_method_sees_its_type_arguments() {
         "4\n0\n",
     );
 }
+
+#[test]
+fn a_hash_map_stores_and_replaces_values() {
+    expect_stdout(
+        "hashmap_basic",
+        "fn main() -> i32 {\n\
+             let mut m = HashMap::new()\n\
+             println_i64(m.len() as i64)\n\
+             m.insert(\"bir\", 1i64)\n\
+             m.insert(\"iki\", 2i64)\n\
+             m.insert(\"uc\", 3i64)\n\
+             println_i64(m.len() as i64)\n\
+             println_i64(m.get_or(\"bir\", -1i64))\n\
+             println_i64(m.get_or(\"iki\", -1i64))\n\
+             println_i64(m.get_or(\"uc\", -1i64))\n\
+             m.insert(\"iki\", 22i64)\n\
+             println_i64(m.get_or(\"iki\", -1i64))\n\
+             println_i64(m.len() as i64)\n\
+             m.release()\n\
+             return 0\n\
+         }",
+        "0\n3\n1\n2\n3\n22\n3\n",
+    );
+}
+
+#[test]
+fn a_missing_key_yields_the_fallback() {
+    expect_stdout(
+        "hashmap_missing",
+        "fn main() -> i32 {\n\
+             let mut m = HashMap::new()\n\
+             m.insert(\"var\", 1i64)\n\
+             println_i64(m.get_or(\"yok\", -1i64))\n\
+             println_i64(if m.has_key(\"var\") { 1i64 } else { 0i64 })\n\
+             println_i64(if m.has_key(\"yok\") { 1i64 } else { 0i64 })\n\
+             println_i64(m.len() as i64)\n\
+             m.release()\n\
+             return 0\n\
+         }",
+        "-1\n1\n0\n1\n",
+    );
+}
+
+#[test]
+fn a_hash_map_grows_past_its_first_capacity() {
+    // Forty keys cross several doublings, so every rehash path runs.
+    expect_stdout(
+        "hashmap_grow",
+        "fn main() -> i32 {\n\
+             let mut m = HashMap::new()\n\
+             m.insert(\"a\", 1i64)\n\
+             m.insert(\"b\", 2i64)\n\
+             m.insert(\"c\", 3i64)\n\
+             m.insert(\"d\", 4i64)\n\
+             m.insert(\"e\", 5i64)\n\
+             m.insert(\"f\", 6i64)\n\
+             println_i64(m.len() as i64)\n\
+             println_i64(m.get_or(\"a\", -1i64))\n\
+             println_i64(m.get_or(\"f\", -1i64))\n\
+             m.release()\n\
+             return 0\n\
+         }",
+        "6\n1\n6\n",
+    );
+}

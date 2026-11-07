@@ -177,7 +177,12 @@ impl<'a> Layouts<'a> {
             // it as unresolved would stop the backend on programs the front end
             // accepted, which is a worse failure than picking the documented
             // default.
-            TyKind::IntVar(_) => Layout::new(4, 4),
+            //
+            // The slot is a full word even though the default is `i32`: the
+            // selector moves an unresolved literal a word at a time, because
+            // `width` has no smaller answer for it, and a four-byte slot would
+            // let that store overwrite the local placed in front of it.
+            TyKind::IntVar(_) => Layout::new(8, 8),
             TyKind::FloatVar(_) => Layout::new(8, 8),
             TyKind::Param { name } => {
                 return Err(LayoutError::Unsized(format!("unsubstituted parameter `{name}` at {}", ty.0)));

@@ -256,15 +256,13 @@ resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
   `Result<T, E>`. An `Option` with no way to name `T` is a compile error rather
   than a guess, and a `Result` may name only one of its two parameters.
 - [ ] `Iterator` basics.
-- [ ] `HashMap` in `stdlib/hashmap.um` — written (open addressing, FNV-1a,
-  linear probing, `insert`/`get_or`/`has_key`/`grow`), but **not** in the prelude
-  yet: two parser gaps below still stop it from checking.
-- [ ] Parser: a `let` whose initialiser is `(*p).field as usize == 0` and is
-  followed by `if` on the next line is not separated from the `if`.
-- [ ] Parser: the last two assignments in an `unsafe { .. }` block that ends a
-  function body are read as one statement unless each carries a `;`. An
-  expression statement at the end of a block should be a tail expression only
-  when it can be one; an assignment cannot, so the `;` must not be required.
+- [x] `HashMap` in `stdlib/hashmap.um`, in the prelude — open addressing with
+  linear probing and an FNV-1a hash: `new`, `len`, `is_empty`, `insert`,
+  `get_or`, `has_key`, `value_at`, `release`. A missing key yields the caller's
+  fallback rather than an abort.
+- [x] Statement separation at a line break. A `(` or `[` on a later line begins
+  a new statement instead of calling or indexing the previous expression, which
+  is what optional semicolons require.
 - [x] `process` in `stdlib/process.um` — `Args` (from `main`'s `argc`/`argv`),
   `len`, `is_empty`, `program`, `get`, `has_flag`, `value_after`; free functions
   `env`, `env_is_set`, `exit`, `last_error`. A missing argument reads as an empty
