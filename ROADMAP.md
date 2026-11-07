@@ -212,18 +212,46 @@ signedness read from a comparison's result type, every load widening to 64 bits,
 `%rax` used as scratch while it held an address, a spilled address never
 resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
 
-### Step 2 — a real standard library · planned
+### Step 2 — a real standard library · in progress
 
-- `String` and `Vec<T>` as UMAY source over `alloc`, with `impl` blocks.
-- Prelude `print`/`println`/`len`/`panic` mapping onto the runtime instead of the
-  placeholder `FnId(u32::MAX)`.
-- `Option`, `Result`, `Iterator` basics.
-- `fs`: read, write, open, metadata.
-- `process`: exit codes, arguments.
-- `net`: TCP basics, only once the memory model is stable.
+- [x] The prelude is **real UMAY source** (`stdlib/prelude.um`), parsed with every
+  program: `print`, `println`, `eprintln`, `println_i64`, `byte_len`, `alloc`,
+  `dealloc`, `read_byte`, `write_byte`, `panic`. The placeholder `FnId(u32::MAX)`
+  entries are gone, and a call is an ordinary call.
+- [x] `stdlib/string.um`: `String`, an owned growable byte buffer with `new`,
+  `from_str`, `len`, `is_empty`, `as_ptr`, `push`, `push_str`. Doubling growth, a
+  NUL terminator kept one past the last byte so the buffer can be handed to the
+  runtime's printers, and byte lengths that never split a multi-byte sequence.
+- [x] A method from a real `impl` block now wins over a built-in of the same name,
+  which is what lets the standard library define `String::len` in ordinary source.
+- [ ] `Vec<T>` — **blocked**: generic instantiation is not implemented. A struct
+  literal does not infer its arguments (`Box2 { value: 7 }` reports that the field
+  expects `T`), and a method cannot return a parameter type. This is a front-end
+  feature, not a library one; `Vec<T>` arrives with it.
+- [ ] `Option`, `Result`, `Iterator` basics.
+- [ ] `fs`: read, write, open, metadata.
+- [ ] `process`: exit codes, arguments.
+- [ ] `net`: TCP basics, only once the memory model is stable.
 
-Exit criteria: a non-trivial CLI program can be written and built with only the
-standard library.
+Writing `String` exposed three more backend miscompilations and two front-end
+gaps, all now fixed and covered by tests:
+
+- Aggregate arguments by value were not passed at all: a 24-byte struct arrived
+  as whichever eight bytes happened to be in `%rdi`, so
+  `fn push(self, byte: u8) -> String` read garbage. Both sides now classify every
+  argument with the same SysV rules — two eightbytes or less in registers, larger
+  copies to the caller's outgoing area, and once one argument spills every later
+  one does too — and the area is built in one aligned allocation.
+- The callee's argument classification did not apply the spill rule, so it read a
+  later scalar from a register the caller had left empty.
+- `drop(_ret)` on an aggregate return worked, but the return copy was emitted
+  after the (no-op) drop rather than at the single epilogue, which the sret paths
+  now share.
+
+Front-end gaps found: `impl<T>` parameters were not in scope for a method's own
+signature (`fn new() -> Vec<T>` reported an unknown type `T`), now threaded
+through; and the prelude's `String::len` was shadowed by the built-in, now
+resolved in favour of the `impl`.
 
 Known gaps this step depends on, none of which are covered yet:
 
@@ -231,6 +259,9 @@ Known gaps this step depends on, none of which are covered yet:
 - An assignment through a computed pointer, `*(p.offset(n)) = v`, is rejected;
   only a write through a named pointer works, which is why `write_byte` exists.
 - `&mut T` does not coerce to `&T` (`E1001`).
+- A literal used with a wider type than its default (`let mut i = 0` used as a
+  `usize`) is accepted but keeps the narrower type, so a 64-bit read of the local
+  sees its neighbours. Annotate, or wait for literal inference to be widened.
 
 ---
 

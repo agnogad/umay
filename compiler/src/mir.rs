@@ -49,6 +49,9 @@ pub struct Body {
     pub entry: BlockId,
     /// Span of the function this body came from.
     pub span: Span,
+    /// True when `ret_ty` is an aggregate too large to return in registers, so
+    /// the value travels through a hidden pointer instead.
+    pub ret_is_sret: bool,
 }
 
 impl Body {

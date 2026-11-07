@@ -93,6 +93,37 @@ pub fn select<'t>(
         })
         .collect();
 
+    // The classification must match the caller's exactly, or an argument would
+    // be read from a place nothing was written. The two rules that matter are
+    // the SysV ones: an aggregate of two eightbytes or less travels in
+    // registers, and once an argument goes on the stack every later one does
+    // too, because the callee reads stack arguments from fixed offsets.
+    let mut arg_kinds = Vec::with_capacity(body.arg_count as usize);
+    let mut registers_used = usize::from(body.ret_is_sret);
+    let mut spilled = false;
+    for local in body.locals.iter().take(body.arg_count as usize) {
+        let is_aggregate = isel.layouts.is_aggregate(local.ty);
+        let size = isel.layouts.layout(local.ty).map(|l| l.size).unwrap_or(8);
+        let needed = if !is_aggregate || size <= 8 {
+            1
+        } else if size <= 16 {
+            2
+        } else {
+            0
+        };
+        if !spilled && needed > 0 && registers_used + needed <= 6 {
+            arg_kinds.push(if needed == 1 {
+                crate::machine::ArgKind::Register
+            } else {
+                crate::machine::ArgKind::RegisterPair
+            });
+            registers_used += needed;
+        } else {
+            arg_kinds.push(crate::machine::ArgKind::Stack(size));
+            spilled = true;
+        }
+    }
+
     Ok(MachineFunction {
         name: body.name.clone(),
         blocks: isel.blocks,
@@ -110,6 +141,8 @@ pub fn select<'t>(
         arg_count: body.arg_count,
         block_count: body.blocks.len() as u32,
         arg_widths,
+        sret_offset: isel.frame.sret.as_ref().map(|s| s.offset),
+        arg_kinds,
     })
 }
 

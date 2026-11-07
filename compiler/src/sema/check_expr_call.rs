@@ -220,12 +220,21 @@ impl FnChecker<'_, '_> {
             return self.error_hir(span);
         };
 
-        // Built-in methods on standard library types.
-        if let Some(e) = self.builtin_method(recv.clone(), &type_name, method, &arg_hirs, method_span, span) {
-            return e;
+        // A method from a real `impl` block wins over a built-in of the same name.
+        // The built-ins exist for types a program cannot write an `impl` for
+        // (`str`, arrays); once the standard library defines `String` in ordinary
+        // UMAY source, its own methods must be the ones that run.
+        let user_impl = self.cx.methods.get(&(type_name.clone(), method.to_string())).copied();
+
+        if user_impl.is_none() {
+            if let Some(e) =
+                self.builtin_method(recv.clone(), &type_name, method, &arg_hirs, method_span, span)
+            {
+                return e;
+            }
         }
 
-        let Some(fn_id) = self.cx.methods.get(&(type_name.clone(), method.to_string())).copied() else {
+        let Some(fn_id) = user_impl else {
             let candidates: Vec<String> = self
                 .cx
                 .methods_of_type

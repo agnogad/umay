@@ -117,6 +117,9 @@ fn parse_body(lines: &mut Lines<'_>) -> Result<(Body, Vec<String>), ParseError> 
             blocks,
             entry: BlockId(0),
             span: crate::source::Span::DUMMY,
+            // A parsed body has no layouts yet, so the decision is made in
+            // instruction selection once the return type's size is known.
+            ret_is_sret: false,
         },
         strings,
     ))
@@ -228,19 +231,16 @@ fn parse_terminator(line: &str, strings: &mut Vec<String>, n: usize) -> Result<T
         }
         return Ok(Terminator::SwitchInt { discr, targets, otherwise });
     }
-    if let Some(rest) = line.strip_prefix("call ") {
-        // `<dest> = call <callee>(<args>) -> b<n>;` or `_ = call ...;`.
-        let eq = find_call_eq(rest).ok_or_else(|| ParseError {
-            line: n,
-            message: format!("bad call terminator `{line}`"),
-        })?;
-        let dest_text = rest[..eq].trim();
+    if let Some(eq) = find_call_eq(line) {
+        // `<dest> = call <callee>(<args>) -> b<n>;`, also spelled `_ = call ...;`
+        // when the call returns nothing worth keeping.
+        let dest_text = line[..eq].trim();
         let destination = if dest_text == "_" {
             None
         } else {
             Some(parse_place(dest_text, strings, n)?)
         };
-        let after = rest[eq + 4..].trim_start_matches("call ");
+        let after = line[eq + " = call ".len()..].trim_start_matches("call ");
         let open = after
             .find('(')
             .ok_or_else(|| ParseError { line: n, message: "call without arguments".into() })?;
@@ -497,6 +497,8 @@ fn parse_operand_list(s: &str, strings: &mut Vec<String>, n: usize) -> Result<Ve
 }
 
 fn parse_operand(s: &str, strings: &mut Vec<String>, n: usize) -> Result<Operand, ParseError> {
+    // The printer writes function constants as `const fn<id>`, matching the
+    // spelling used for every other constant.
     let s = s.trim();
     if let Some(rest) = s.strip_prefix("copy ") {
         return Ok(Operand::Copy(parse_place(rest, strings, n)?));

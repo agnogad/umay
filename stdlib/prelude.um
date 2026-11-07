@@ -1,0 +1,109 @@
+// The UMAY prelude: what every program can call without importing anything.
+//
+// This file is compiled with every program. It is ordinary UMAY source, so the
+// type checker, the borrow checker and the code generator see it exactly as they
+// would see code you wrote yourself.
+//
+// The bodies here are thin: they call into the runtime, which is linked into
+// every program and is where the actual byte handling lives. Keeping the two
+// apart means this file is the language's surface — the names and signatures a
+// program depends on — while the runtime can change underneath it.
+
+// ---------------------------------------------------------------------------
+// Runtime bindings
+// ---------------------------------------------------------------------------
+//
+// These four are the runtime's output and allocation entry points. They are
+// declared `extern` because the runtime is compiled as its own object.
+
+extern fn umay_print(s: *const u8) -> ()
+extern fn umay_println(s: *const u8) -> ()
+extern fn umay_eprintln(s: *const u8) -> ()
+extern fn umay_println_i64(v: i64) -> ()
+extern fn umay_byte_len(s: *const u8) -> usize
+extern fn umay_fail(message: *const u8) -> ()
+extern fn umay_alloc(bytes: usize) -> *mut u8
+extern fn umay_dealloc(ptr: *mut u8) -> ()
+extern fn umay_read_byte(ptr: *const u8) -> u8
+extern fn umay_write_byte(ptr: *mut u8, value: u8) -> ()
+
+// ---------------------------------------------------------------------------
+// Output
+// ---------------------------------------------------------------------------
+
+// Writes a byte string with no trailing newline.
+pub fn print(s: *const u8) {
+    umay_print(s)
+}
+
+// Writes a byte string followed by a newline.
+pub fn println(s: *const u8) {
+    umay_println(s)
+}
+
+// Writes a byte string followed by a newline to standard error.
+pub fn eprintln(s: *const u8) {
+    umay_eprintln(s)
+}
+
+// Writes a signed 64-bit integer in decimal, followed by a newline.
+pub fn println_i64(v: i64) {
+    umay_println_i64(v)
+}
+
+// ---------------------------------------------------------------------------
+// Length
+// ---------------------------------------------------------------------------
+
+// The number of bytes before the terminating zero.
+//
+// A string in UMAY is a pointer to NUL-terminated bytes, so the length is a
+// scan. The runtime does the scanning, which keeps this function from being a
+// loop in every program that asks.
+pub fn byte_len(s: *const u8) -> usize {
+    return umay_byte_len(s)
+}
+
+// ---------------------------------------------------------------------------
+// Allocation
+// ---------------------------------------------------------------------------
+
+// Allocates `bytes` bytes and aborts if the request cannot be met.
+//
+// Returning a null pointer would let a program continue with memory it does not
+// have, so a failure here ends the process with a message instead.
+pub fn alloc(bytes: usize) -> *mut u8 {
+    return umay_alloc(bytes)
+}
+
+// Releases a block obtained from `alloc`.
+pub fn dealloc(ptr: *mut u8) {
+    umay_dealloc(ptr)
+}
+
+// Reads the byte at `ptr`.
+//
+// The language can read through a pointer with `*` inside `unsafe`, but writing
+// through one is only allowed for a simple pointer, not for a computed offset
+// such as `*(p.offset(n))`. These two functions are that gap's home until the
+// syntax covers it.
+pub fn read_byte(ptr: *const u8) -> u8 {
+    return umay_read_byte(ptr)
+}
+
+// Writes `value` to the byte at `ptr`.
+pub fn write_byte(ptr: *mut u8, value: u8) {
+    umay_write_byte(ptr, value)
+}
+
+// ---------------------------------------------------------------------------
+// Failure
+// ---------------------------------------------------------------------------
+
+// Prints a message to standard error and ends the process with status 101.
+//
+// A message must be a byte string; formatting a value into one needs `String`,
+// which arrives with the standard library.
+pub fn panic(message: *const u8) {
+    umay_fail(message)
+}

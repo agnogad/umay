@@ -35,57 +35,128 @@ pub fn print_function(function: &MachineFunction, spill_bytes: u64, callee_saved
         let _ = writeln!(out, "    subq ${frame}, %rsp");
     }
 
-    // Move incoming register arguments into their stack slots. They are stored
-    // after the prologue because the prologue uses the same registers. Only the
-    // first `arg_count` locals are parameters, and each is stored at its own
-    // width so that a 4-byte argument does not overwrite its neighbour.
-    let arg_regs = [7u8, 6, 2, 1, 8, 9]; // rdi, rsi, rdx, rcx, r8, r9
-    for (index, (_, offset)) in function.local_slots.iter().take(6).enumerate() {
-        if index as u32 >= function.arg_count {
-            break;
-        }
-        // The store width comes from the parameter's own size, so a 4-byte
-        // argument does not overwrite the slot below it.
-        let width = function
-            .arg_widths
-            .get(index)
-            .copied()
-            .unwrap_or(RegWidth::W64);
-        let _ = writeln!(
-            out,
-            "    mov{} %{}, {}(%rbp)",
-            width.suffix(),
-            register_name(arg_regs[index], width),
-            offset
-        );
+    // Move incoming arguments into their stack slots. They are stored after the
+    // prologue because the prologue uses the same registers.
+    //
+    // When the return value travels through a hidden pointer, `rdi` holds that
+    // pointer instead of the first argument, so every argument moves along one
+    // register.
+    if let Some(offset) = function.sret_offset {
+        let _ = writeln!(out, "    movq %rdi, {offset}(%rbp)");
     }
-    // Parameters past the sixth arrive on the stack, at fixed positions above
-    // the return address: `16(%rbp)` is the seventh, and so on. They are copied
-    // into ordinary slots so the rest of code generation never cares where an
-    // argument came from.
-    for (index, (_, offset)) in function.local_slots.iter().enumerate().skip(6) {
-        if index as u32 >= function.arg_count {
-            break;
-        }
+    let all_arg_regs = [7u8, 6, 2, 1, 8, 9]; // rdi, rsi, rdx, rcx, r8, r9
+    let mut next_reg = usize::from(function.sret_offset.is_some());
+    // Stack arguments begin just above the return address; an eightbyte of
+    // padding sits there only when it keeps the area aligned, which the caller
+    // already arranged.
+    let mut stack_offset = 16i64;
+    for (index, (_, offset)) in function.local_slots.iter().take(function.arg_count as usize).enumerate() {
+        let kind = function
+            .arg_kinds
+            .get(index)
+            .copied()
+            .unwrap_or(crate::machine::ArgKind::Register);
         let width = function
             .arg_widths
             .get(index)
             .copied()
             .unwrap_or(RegWidth::W64);
-        let _ = writeln!(
-            out,
-            "    mov{} {}(%rbp), %{}",
-            width.suffix(),
-            16 + (index as i64 - 6) * 8,
-            register_name(0, width)
-        );
-        let _ = writeln!(
-            out,
-            "    mov{} %{}, {}(%rbp)",
-            width.suffix(),
-            register_name(0, width),
-            offset
-        );
+        match kind {
+            crate::machine::ArgKind::Register => {
+                if next_reg < all_arg_regs.len() {
+                    let _ = writeln!(
+                        out,
+                        "    mov{} %{}, {}(%rbp)",
+                        width.suffix(),
+                        register_name(all_arg_regs[next_reg], width),
+                        offset
+                    );
+                    next_reg += 1;
+                } else {
+                    // Past the register file, delivered on the stack.
+                    let _ = writeln!(
+                        out,
+                        "    mov{} {}(%rbp), %{}",
+                        width.suffix(),
+                        stack_offset,
+                        register_name(0, width)
+                    );
+                    let _ = writeln!(
+                        out,
+                        "    mov{} %{}, {}(%rbp)",
+                        width.suffix(),
+                        register_name(0, width),
+                        offset
+                    );
+                    stack_offset += 8;
+                }
+            }
+            crate::machine::ArgKind::RegisterPair => {
+                // Two eightbytes, in two registers. A member that does not need
+                // all eight bytes of its slot still occupies one whole register.
+                let pair = if next_reg + 1 < all_arg_regs.len() {
+                    Some((all_arg_regs[next_reg], all_arg_regs[next_reg + 1]))
+                } else {
+                    None
+                };
+                match pair {
+                    Some((low, high)) => {
+                        let _ = writeln!(
+                            out,
+                            "    movq %{}, {}(%rbp)",
+                            register_name(low, RegWidth::W64),
+                            offset
+                        );
+                        let _ = writeln!(
+                            out,
+                            "    movq %{}, {}(%rbp)",
+                            register_name(high, RegWidth::W64),
+                            offset + 8
+                        );
+                        next_reg += 2;
+                    }
+                    None => {
+                        for i in 0..2u64 {
+                            let _ = writeln!(
+                                out,
+                                "    movq {}(%rbp), %rax",
+                                stack_offset + (i as i64) * 8
+                            );
+                            let _ = writeln!(
+                                out,
+                                "    movq %rax, {}(%rbp)",
+                                offset + (i as i64) * 8
+                            );
+                        }
+                        stack_offset += 16;
+                    }
+                }
+            }
+            crate::machine::ArgKind::Stack(size) => {
+                // An aggregate larger than two eightbytes travels in the
+                // caller's outgoing area, which starts at `16(%rbp)`.
+                let mut copied = 0u64;
+                while copied < size {
+                    let width = if size - copied >= 8 { RegWidth::W64 } else { RegWidth::W8 };
+                    let _ = writeln!(
+                        out,
+                        "    mov{} {}(%rbp), %{}",
+                        width.suffix(),
+                        stack_offset + copied as i64,
+                        register_name(0, width)
+                    );
+                    let _ = writeln!(
+                        out,
+                        "    mov{} %{}, {}(%rbp)",
+                        width.suffix(),
+                        register_name(0, width),
+                        offset + copied as i64
+                    );
+                    copied += width.bytes();
+                }
+                stack_offset += size.div_ceil(8) as i64 * 8;
+            }
+        }
     }
 
     for block in &function.blocks {

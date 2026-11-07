@@ -31,6 +31,9 @@ pub struct Frame {
     pub slots: Vec<Slot>,
     /// Total size of the locals area, before outgoing arguments.
     pub local_bytes: u64,
+    /// The slot holding the hidden return pointer, when the function returns an
+    /// aggregate larger than two eightbytes. `None` otherwise.
+    pub sret: Option<Slot>,
 }
 
 impl Frame {
@@ -75,10 +78,18 @@ pub fn build_frame(body: &Body, layouts: &mut Layouts) -> Result<Frame, LayoutEr
         offset = start + reserved as i64;
         slots.push(Slot { offset: -offset, ty: local.ty, size, align });
     }
+    // A function that returns a large aggregate receives a pointer to the
+    // caller's storage in `rdi`.
+    let sret = if body.ret_is_sret {
+        offset = round_up(offset, 8) + 8;
+        Some(Slot { offset: -offset, ty: body.ret_ty, size: 8, align: 8 })
+    } else {
+        None
+    };
     // The frame as a whole is kept 16-byte aligned so that calls can reuse the
     // same alignment without a second adjustment.
     let local_bytes = round_up(offset, 16).max(0) as u64;
-    Ok(Frame { slots, local_bytes })
+    Ok(Frame { slots, local_bytes, sret })
 }
 
 /// Rounds `n` up to a multiple of `align`.

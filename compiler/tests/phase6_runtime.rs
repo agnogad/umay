@@ -106,10 +106,9 @@ fn println_writes_text_and_a_newline() {
     let run = build_and_run(
         "println_text",
         r#"
-extern fn println(s: *const u8) -> ()
 fn main() -> i32 {
-    println("merhaba" as *const u8)
-    println("dunya" as *const u8)
+    println("merhaba")
+    println("dunya")
     return 0
 }
 "#,
@@ -126,12 +125,10 @@ fn print_writes_without_a_newline() {
     let run = build_and_run(
         "print_no_newline",
         r#"
-extern fn print(s: *const u8) -> ()
-extern fn println(s: *const u8) -> ()
 fn main() -> i32 {
-    print("a" as *const u8)
-    print("b" as *const u8)
-    println("" as *const u8)
+    print("a")
+    print("b")
+    println("")
     return 0
 }
 "#,
@@ -148,11 +145,9 @@ fn empty_string_writes_nothing() {
     let run = build_and_run(
         "empty_string",
         r#"
-extern fn println_i64(v: i64) -> ()
-extern fn byte_len(s: *const u8) -> usize
 fn main() -> i32 {
-    println_i64(byte_len("" as *const u8) as i64)
-    println_i64(byte_len("abc" as *const u8) as i64)
+    println_i64(byte_len("") as i64)
+    println_i64(byte_len("abc") as i64)
     return 0
 }
 "#,
@@ -170,10 +165,8 @@ fn byte_len_counts_bytes_not_characters() {
     let run = build_and_run(
         "byte_len_utf8",
         r#"
-extern fn println_i64(v: i64) -> ()
-extern fn byte_len(s: *const u8) -> usize
 fn main() -> i32 {
-    println_i64(byte_len("ğ" as *const u8) as i64)
+    println_i64(byte_len("ğ") as i64)
     return 0
 }
 "#,
@@ -193,7 +186,6 @@ fn println_i64_formats_positive_numbers() {
     let run = build_and_run(
         "i64_positive",
         r#"
-extern fn println_i64(v: i64) -> ()
 fn main() -> i32 {
     println_i64(0)
     println_i64(7)
@@ -214,7 +206,6 @@ fn println_i64_formats_negative_numbers() {
     let run = build_and_run(
         "i64_negative",
         r#"
-extern fn println_i64(v: i64) -> ()
 fn main() -> i32 {
     println_i64(-1)
     println_i64(-42)
@@ -236,7 +227,6 @@ fn println_i64_formats_the_extremes() {
     let run = build_and_run(
         "i64_extremes",
         r#"
-extern fn println_i64(v: i64) -> ()
 fn main() -> i32 {
     println_i64(9223372036854775807)
     println_i64(-9223372036854775808)
@@ -258,7 +248,6 @@ fn integer_comparison_is_signed() {
     let run = build_and_run(
         "signed_compare",
         r#"
-extern fn println_i64(v: i64) -> ()
 fn main() -> i32 {
     let a = -1
     let b = 0
@@ -289,16 +278,12 @@ fn alloc_gives_usable_memory() {
     let run = build_and_run(
         "alloc_bytes",
         r#"
-extern fn println(s: *const u8) -> ()
-extern fn alloc(n: usize) -> *mut u8
-extern fn dealloc(p: *mut u8) -> ()
-extern fn write_byte(p: *mut u8, v: u8) -> ()
 fn main() -> i32 {
     let p = alloc(16)
     write_byte(p.offset(0 as isize), 65u8)
     write_byte(p.offset(1 as isize), 66u8)
     write_byte(p.offset(2 as isize), 0u8)
-    println(p as *const u8)
+    println(p)
     dealloc(p)
     return 0
 }
@@ -317,10 +302,6 @@ fn alloc_returns_distinct_blocks() {
     let run = build_and_run(
         "alloc_distinct",
         r#"
-extern fn println(s: *const u8) -> ()
-extern fn alloc(n: usize) -> *mut u8
-extern fn dealloc(p: *mut u8) -> ()
-extern fn write_byte(p: *mut u8, v: u8) -> ()
 fn fill(p: *mut u8, a: u8, b: u8) {
     write_byte(p.offset(0 as isize), a)
     write_byte(p.offset(1 as isize), b)
@@ -331,8 +312,8 @@ fn main() -> i32 {
     let two = alloc(8)
     fill(one, 88u8, 0u8)
     fill(two, 89u8, 0u8)
-    println(one as *const u8)
-    println(two as *const u8)
+    println(one)
+    println(two)
     dealloc(one)
     dealloc(two)
     return 0
@@ -352,12 +333,6 @@ fn a_large_allocation_is_writable_end_to_end() {
     let run = build_and_run(
         "alloc_large",
         r#"
-extern fn println(s: *const u8) -> ()
-extern fn println_i64(v: i64) -> ()
-extern fn alloc(n: usize) -> *mut u8
-extern fn dealloc(p: *mut u8) -> ()
-extern fn write_byte(p: *mut u8, v: u8) -> ()
-extern fn read_byte(p: *const u8) -> u8
 fn main() -> i32 {
     let p = alloc(1024)
     let mut i = 0
@@ -409,9 +384,8 @@ fn a_program_that_prints_and_returns_a_status_does_both() {
     let run = build_and_run(
         "print_and_status",
         r#"
-extern fn println(s: *const u8) -> ()
 fn main() -> i32 {
-    println("before" as *const u8)
+    println("before")
     return 7
 }
 "#,
@@ -462,16 +436,12 @@ fn a_raw_pointer_may_be_cast_to_the_other_mutability() {
     let run = build_and_run(
         "mut_to_const",
         r#"
-extern fn println(s: *const u8) -> ()
-extern fn alloc(n: usize) -> *mut u8
-extern fn dealloc(p: *mut u8) -> ()
-extern fn write_byte(p: *mut u8, v: u8) -> ()
 fn main() -> i32 {
     let p = alloc(4)
     write_byte(p.offset(0 as isize), 79u8)
     write_byte(p.offset(1 as isize), 75u8)
     write_byte(p.offset(2 as isize), 0u8)
-    println(p as *const u8)
+    println(p)
     dealloc(p)
     return 0
 }
@@ -490,7 +460,6 @@ fn output_is_the_same_at_every_optimisation_level() {
         return;
     }
     let source = r#"
-extern fn println_i64(v: i64) -> ()
 fn main() -> i32 {
     let mut sum = 0
     let mut i = 1
@@ -527,4 +496,151 @@ fn main() -> i32 {
             "wrong output at {level}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// `String`, the standard library's first owned type
+// ---------------------------------------------------------------------------
+//
+// These run the same public interface a program uses. `String` lives in ordinary
+// UMAY source on top of `alloc`, so a failure here is a failure of the language
+// or the backend, never of a hand-written special case.
+
+/// Runs a program and asserts on its whole standard output.
+#[track_caller]
+fn expect_stdout(name: &str, source: &str, expected: &str) {
+    let run = build_and_run(name, source);
+    assert_eq!(run.stdout, expected, "{name} printed the wrong text");
+    assert_eq!(run.status, 0, "{name} exited with {}", run.status);
+}
+
+#[test]
+fn a_string_starts_empty() {
+    expect_stdout(
+        "str_empty",
+        "fn main() -> i32 {\n\
+             let s = String::new()\n\
+             println_i64(s.len() as i64)\n\
+             return 0\n\
+         }",
+        "0\n",
+    );
+}
+
+#[test]
+fn bytes_can_be_appended_one_at_a_time() {
+    // Thirty bytes forces several growth steps: the buffer starts empty and
+    // doubles, so a growth mistake shows up as a truncated or corrupt result.
+    expect_stdout(
+        "str_push_grow",
+        "fn main() -> i32 {\n\
+             let mut s = String::new()\n\
+             let mut i = 0\n\
+             while i < 30 {\n\
+                 s = s.push(65 + (i % 26) as u8)\n\
+                 i = i + 1\n\
+             }\n\
+             println(s.as_ptr())\n\
+             println_i64(s.len() as i64)\n\
+             return 0\n\
+         }",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZABCD\n30\n",
+    );
+}
+
+#[test]
+fn a_string_can_be_built_from_existing_text() {
+    expect_stdout(
+        "str_from_str",
+        "fn main() -> i32 {\n\
+             let t = String::from_str(\"merhaba\")\n\
+             println(t.as_ptr())\n\
+             println_i64(t.len() as i64)\n\
+             return 0\n\
+         }",
+        "merhaba\n7\n",
+    );
+}
+
+#[test]
+fn text_can_be_appended_to_a_string() {
+    expect_stdout(
+        "str_push_str",
+        "fn main() -> i32 {\n\
+             let s = String::new()\n\
+             let s = s.push_str(\"umay\")\n\
+             let s = s.push_str(\" \")\n\
+             let s = s.push_str(\"dili\")\n\
+             println(s.as_ptr())\n\
+             println_i64(s.len() as i64)\n\
+             return 0\n\
+         }",
+        "umay dili\n9\n",
+    );
+}
+
+#[test]
+fn an_empty_string_is_empty() {
+    expect_stdout(
+        "str_is_empty",
+        "fn main() -> i32 {\n\
+             let a = String::new()\n\
+             if a.is_empty() { println(\"empty\") }\n\
+             let b = a.push(120)\n\
+             if b.is_empty() { println(\"still empty\") } else { println(\"full\") }\n\
+             return 0\n\
+         }",
+        "empty\nfull\n",
+    );
+}
+
+#[test]
+fn byte_length_counts_bytes_not_characters() {
+    // "ş" is two bytes in UTF-8, so a length that counted characters would
+    // report 1 and a buffer walk would stop early.
+    expect_stdout(
+        "str_utf8_len",
+        "fn main() -> i32 {\n\
+             let t = String::from_str(\"şş\")\n\
+             println_i64(t.len() as i64)\n\
+             return 0\n\
+         }",
+        "4\n",
+    );
+}
+
+#[test]
+fn a_literal_local_adopts_the_width_it_is_used_at() {
+    // `i` starts as an untyped `{integer}` and meets a `usize`. It must become a
+    // `usize` for good: a local that typed the expression `usize` while keeping a
+    // four-byte slot would let a 64-bit read pick up the neighbouring variable,
+    // and `100000 + 0` would come out as something else entirely.
+    expect_stdout(
+        "literal_width",
+        "fn main() -> i32 {\n\
+             let i = 0\n\
+             let n: usize = 100000\n\
+             let k = n + i\n\
+             println_i64(k as i64)\n\
+             return 0\n\
+         }",
+        "100000\n",
+    );
+}
+
+#[test]
+fn two_literal_locals_keep_their_own_default_width() {
+    // Neither local meets a concrete type, so both fall back to the default and
+    // the arithmetic stays in it. This is the other side of the rule above: a
+    // substitution must not be invented where none was decided.
+    expect_stdout(
+        "literal_default",
+        "fn main() -> i32 {\n\
+             let a = 2\n\
+             let b = 3\n\
+             println_i64((a * b) as i64)\n\
+             return 0\n\
+         }",
+        "6\n",
+    );
 }

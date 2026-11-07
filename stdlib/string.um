@@ -1,0 +1,147 @@
+// `String`: an owned, growable sequence of bytes.
+//
+// The representation is three words — a pointer, a length and a capacity — which
+// is exactly what the aggregate argument and return rules handle, so a `String`
+// moves by copying three words and shrinking the caller's variable is a plain
+// move rather than a hidden allocation.
+//
+// Bytes, not characters: the length counts bytes and the interface never splits
+// a multi-byte sequence, but it does not pretend to be a character type either.
+// A `Text` type that validates encoding belongs to a later revision.
+
+struct String {
+    // Points at `capacity` bytes, of which the first `len` are in use.
+    ptr: *mut u8,
+    len: usize,
+    capacity: usize,
+}
+
+impl String {
+    // An empty string that owns no memory.
+    //
+    // Growing it allocates, which keeps a program that never builds a string from
+    // paying for the capability.
+    fn new() -> String {
+        // A null pointer: the string owns nothing until the first append
+        // allocates. `dealloc` is never called on it because `capacity` is zero.
+        // Turning an integer into a pointer is `unsafe` because most integers are
+        // not addresses, and zero is the one value that is safe by definition.
+        let empty = unsafe { 0 as usize as *mut u8 }
+        return String { ptr: empty, len: 0, capacity: 0 }
+    }
+
+    // A string holding a copy of the bytes of `text`.
+    //
+    // The bytes are copied, not borrowed: the runtime's own text lives in static
+    // storage, and a `String` that pointed at it would outlive nothing but would
+    // also be unable to grow.
+    fn from_str(text: *const u8) -> String {
+        let count = byte_len(text)
+        let mut out = String::new()
+        out = out.reserve(count)
+        out = out.append_bytes(text, 0, count)
+        return out
+    }
+
+    // The number of bytes the string holds.
+    fn len(&self) -> usize {
+        return self.len
+    }
+
+    // True when the string holds no bytes.
+    fn is_empty(&self) -> bool {
+        return self.len == 0
+    }
+
+    // The bytes, as a pointer to a NUL-terminated buffer.
+    //
+    // Every `String` keeps a terminator one past its last byte so that the same
+    // buffer can be handed to the runtime's printing functions, which take
+    // `*const u8`. The terminator is not counted in `len`, and it is rewritten
+    // after every change.
+    fn as_ptr(&self) -> *const u8 {
+        return self.ptr as *const u8
+    }
+
+    // Appends one byte and returns the string.
+    //
+    // Returning the string rather than mutating in place is what lets the checker
+    // follow ownership: `let s = s.push(65)` replaces the old value with the new
+    // one, and the old one is gone.
+    fn push(self, byte: u8) -> String {
+        let mut out = self
+        out = out.reserve(1)
+        write_byte(out.ptr.offset(out.len as isize), byte)
+        out.len = out.len + 1
+        out = out.write_terminator()
+        return out
+    }
+
+    // Appends every byte of `text` and returns the string.
+    fn push_str(self, text: *const u8) -> String {
+        let mut out = self
+        let count = byte_len(text)
+        out = out.reserve(count)
+        out = out.append_bytes(text, 0, count)
+        return out
+    }
+
+    // Makes room for `extra` more bytes, growing the buffer if it must.
+    //
+    // Growth doubles, so a loop that appends one byte at a time allocates a
+    // logarithmic number of times instead of once per byte.
+    fn reserve(self, extra: usize) -> String {
+        let mut out = self
+        let needed = out.len + extra
+        if needed + 1 <= out.capacity {
+            return out
+        }
+        let mut next: usize = if out.capacity == 0 { 8 } else { out.capacity }
+        while next < needed + 1 {
+            next = next * 2
+        }
+        let fresh = alloc(next)
+        if out.len > 0 {
+            copy_bytes(out.ptr as *const u8, fresh, out.len)
+        }
+        if out.capacity > 0 {
+            dealloc(out.ptr)
+        }
+        out.ptr = fresh
+        out.capacity = next
+        return out
+    }
+
+    // Copies `count` bytes from `source + start` to the end of the string.
+    fn append_bytes(self, source: *const u8, start: usize, count: usize) -> String {
+        let mut out = self
+        let mut i: usize = 0
+        while i < count {
+            let byte = read_byte(source.offset((start + i) as isize))
+            write_byte(out.ptr.offset((out.len + i) as isize), byte)
+            i = i + 1
+        }
+        out.len = out.len + count
+        out = out.write_terminator()
+        return out
+    }
+
+    // Writes the NUL that lets the buffer be used as a C-style string.
+    fn write_terminator(self) -> String {
+        let out = self
+        write_byte(out.ptr.offset(out.len as isize), 0)
+        return out
+    }
+}
+
+// Copies `count` bytes from `source` to `destination`.
+//
+// The two must not overlap; every caller here moves bytes into a freshly
+// allocated buffer, so they never do.
+fn copy_bytes(source: *const u8, destination: *mut u8, count: usize) {
+    let mut i: usize = 0
+    while i < count {
+        write_byte(destination.offset(i as isize), read_byte(source.offset(i as isize)))
+        i = i + 1
+    }
+}

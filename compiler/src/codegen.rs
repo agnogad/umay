@@ -97,11 +97,30 @@ fn generate_one(
     layouts: &mut Layouts,
     symbols: &HashMap<FnId, String>,
 ) -> Result<String, String> {
+    // Whether a large aggregate comes back through a hidden pointer depends on
+    // its size, which is only known once layouts exist. Recording the decision
+    // on the body keeps the frame builder and instruction selector from each
+    // recomputing it, and lets the prologue agree with the callers.
+    let mut body = body.clone();
+    body.ret_is_sret = returns_through_pointer(&body, layouts);
+    let body = &body;
     let frame = frame::build_frame(body, layouts).map_err(|e| format!("frame layout failed: {e:?}"))?;
     let mut machine: MachineFunction =
         isel::select(body, frame, layouts, symbols).map_err(|e| format!("instruction selection: {e}"))?;
     let allocation = regalloc::allocate(&mut machine);
     Ok(crate::asm::print_function(&machine, allocation.spill_bytes, &allocation.used_callee_saved))
+}
+
+/// Whether `body` returns an aggregate that does not fit in the two registers
+/// the SysV ABI allows.
+///
+/// Sixteen bytes is the limit: two eightbytes. Anything larger is built in the
+/// caller's storage, whose address arrives in `rdi`.
+fn returns_through_pointer(body: &Body, layouts: &mut Layouts) -> bool {
+    if !layouts.is_aggregate(body.ret_ty) {
+        return false;
+    }
+    layouts.layout(body.ret_ty).map(|l| l.size > 16).unwrap_or(false)
 }
 
 /// Quotes a string for `.asciz`, escaping what GNU as treats specially.

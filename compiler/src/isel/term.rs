@@ -80,11 +80,27 @@ impl<'a, 't> Isel<'a, 't> {
             return Ok(());
         }
         let mem = Mem::stack(self.frame.slot(local).offset);
+        if let Some(pointer) = self.frame.sret {
+            // The caller reserved storage and passed its address in `rdi`; the
+            // prologue saved it. Copying the value there and returning the
+            // pointer in `rax` is the SysV convention for an aggregate that does
+            // not fit in two registers.
+            let size = self.layouts.layout(ty).map_err(|e| format!("{e:?}"))?.size;
+            let target = self.vreg();
+            out.push(Inst::Load {
+                kind: MoveKind::Move(RegWidth::W64),
+                src: Mem::stack(pointer.offset),
+                dst: MOperand::Reg(target),
+            });
+            self.copy_bytes_to_pointer(&mem, target, size, out)?;
+            out.push(Inst::Move {
+                kind: MoveKind::Move(RegWidth::W64),
+                src: MOperand::Reg(target),
+                dst: MOperand::Reg(Reg::Phys(0)),
+            });
+            return Ok(());
+        }
         if self.is_aggregate(ty) {
-            // A large value is returned through a hidden pointer that the caller
-            // passes; that mechanism is not implemented yet, so the value is
-            // copied into the register pair it fits in (16 bytes or less) and
-            // rejected otherwise.
             let size = self.layouts.layout(ty).map_err(|e| format!("{e:?}"))?.size;
             if size > 16 {
                 return Err(format!(
@@ -241,63 +257,127 @@ impl<'a, 't> Isel<'a, 't> {
         target: &BlockId,
         out: &mut Vec<Inst>,
     ) -> Result<(), String> {
-        let mut arg_regs = Vec::with_capacity(args.len());
-        for arg in args {
-            arg_regs.push(self.operand_to_reg(arg)?);
-        }
+        // A callee returning a large aggregate writes it into storage the caller
+        // provides and receives that storage's address in `rdi`. The decision is
+        // made from the destination's type, which is the callee's return type, so
+        // caller and callee agree without either consulting the other.
+        let sret = destination.filter(|dst| {
+            let ty = self.place_ty(dst);
+            self.layouts.is_aggregate(ty)
+                && self.layouts.layout(ty).map(|l| l.size > 16).unwrap_or(false)
+        });
+        let sret_ptr = match sret {
+            Some(dst) => {
+                let place = dst.clone();
+                let mem = self.place_addr(&place)?;
+                Some(self.mem_to_reg(&mem, RegWidth::W64)?)
+            }
+            None => None,
+        };
 
-        let stack_args = args.len().saturating_sub(ARG_REGS.len());
-        let stack_bytes = stack_args as u64 * 8;
-        let padding = if stack_bytes % 16 == 8 { 8 } else { 0 };
-        if padding > 0 {
-            out.push(Inst::Alu {
-                op: AluOp::Sub,
-                width: RegWidth::W64,
-                src: MOperand::Imm(8),
-                dst: MOperand::Reg(Reg::Phys(4)),
-            });
+        // Each argument is classified before anything is emitted, so the
+        // register file and the stack area can be planned in one go. An
+        // aggregate of sixteen bytes or less travels in registers, two
+        // eightbytes at a time; anything larger is copied to the stack, which is
+        // what the SysV ABI requires and what makes `push(self) -> Buf` correct.
+        let plan = self.plan_arguments(args, sret_ptr.is_some())?;
+
+        let mut arg_regs = Vec::with_capacity(plan.register_values.len() + 1);
+        if let Some(ptr) = sret_ptr {
+            arg_regs.push(ptr);
         }
-        for reg in arg_regs.iter().skip(ARG_REGS.len()).rev() {
-            out.push(Inst::Push(MOperand::Reg(*reg)));
-        }
-        // Move arguments into their ABI registers.
+        arg_regs.extend(plan.register_values.iter().copied());
+
+        // Build the outgoing area in a single allocation.
         //
-        // The values are read from registers that are themselves ABI registers,
-        // so a naive sequence overwrites an argument that has not been moved yet
-        // (`%rcx` holding argument 2 is clobbered by argument 4's move). Parking
-        // every value on the stack first makes the shuffle order irrelevant, and
-        // costs one store and load per argument, which the two-address x86 move
-        // makes unavoidable anyway.
+        // The area holds two things: the argument registers are parked at its
+        // bottom and then read back into their ABI registers (which makes the
+        // shuffle order irrelevant, because a value about to be moved into
+        // `%rsi` may currently live in `%rsi`), and above them sit the stack
+        // arguments the callee will read at `16(%rbp)` onwards. One `subq` keeps
+        // the whole area 16-byte aligned at the call.
+        let stack_bytes = plan.stack_bytes;
+        let stack_total = stack_bytes.div_ceil(16) * 16;
         let count = ARG_REGS.len().min(arg_regs.len());
-        if count > 0 {
-            let bytes = ((count as u64) * 8).div_ceil(16) * 16;
+        let park_bytes = if count > 0 { ((count as u64) * 8).div_ceil(16) * 16 } else { 0 };
+        let area = park_bytes + stack_total;
+        // Stack arguments occupy the bottom of the area, because the callee reads
+        // them upward from `16(%rbp)`; the register parking area sits directly
+        // above them.
+        let park_base = stack_total;
+        if area > 0 {
             out.push(Inst::Alu {
                 op: AluOp::Sub,
                 width: RegWidth::W64,
-                src: MOperand::Imm(bytes as i64),
+                src: MOperand::Imm(area as i64),
                 dst: MOperand::Reg(Reg::Phys(4)),
             });
-            // Park at `rsp`-relative slots, which cannot overlap the frame.
-            for (i, reg) in arg_regs.iter().take(count).enumerate() {
-                out.push(Inst::Store {
-                    kind: MoveKind::Move(RegWidth::W64),
-                    src: MOperand::Reg(*reg),
-                    dst: Mem { base: Some(Reg::Phys(4)), offset: (i as i64) * 8, index: None, symbol: None },
-                });
-            }
-            for (i, arg_reg) in ARG_REGS.iter().take(count).enumerate() {
-                out.push(Inst::Load {
-                    kind: MoveKind::Move(RegWidth::W64),
-                    src: Mem { base: Some(Reg::Phys(4)), offset: (i as i64) * 8, index: None, symbol: None },
-                    dst: MOperand::Reg(Reg::Phys(*arg_reg)),
-                });
-            }
-            out.push(Inst::Alu {
-                op: AluOp::Add,
-                width: RegWidth::W64,
-                src: MOperand::Imm(bytes as i64),
-                dst: MOperand::Reg(Reg::Phys(4)),
+        }
+        for (i, reg) in arg_regs.iter().take(count).enumerate() {
+            out.push(Inst::Store {
+                kind: MoveKind::Move(RegWidth::W64),
+                src: MOperand::Reg(*reg),
+                dst: Mem {
+                    base: Some(Reg::Phys(4)),
+                    offset: park_base as i64 + (i as i64) * 8,
+                    index: None,
+                    symbol: None,
+                },
             });
+        }
+        for (i, arg_reg) in ARG_REGS.iter().take(count).enumerate() {
+            out.push(Inst::Load {
+                kind: MoveKind::Move(RegWidth::W64),
+                src: Mem {
+                    base: Some(Reg::Phys(4)),
+                    offset: park_base as i64 + (i as i64) * 8,
+                    index: None,
+                    symbol: None,
+                },
+                dst: MOperand::Reg(Reg::Phys(*arg_reg)),
+            });
+        }
+        // Stack arguments are written above the parking area. The callee reads
+        // them upward from `16(%rbp)`, which is the bottom of this area, so the
+        // first byte of the first stack argument belongs at its lowest address.
+        for piece in &plan.stack_pieces {
+            let mut copied = 0u64;
+            while copied < piece.size {
+                // The last partial eightbyte is copied byte by byte so a short
+                // aggregate does not read past its own storage.
+                let width = if piece.size - copied >= 8 { RegWidth::W64 } else { RegWidth::W8 };
+                let dst = Mem {
+                    base: Some(Reg::Phys(4)),
+                    offset: piece.offset as i64 + copied as i64,
+                    index: None,
+                    symbol: None,
+                };
+                match &piece.source {
+                    StackSource::Mem(mem) => {
+                        let mut read = mem.clone();
+                        read.offset += copied as i64;
+                        let scratch = self.vreg();
+                        out.push(Inst::Load {
+                            kind: MoveKind::Move(width),
+                            src: read,
+                            dst: MOperand::Reg(scratch),
+                        });
+                        out.push(Inst::Store {
+                            kind: MoveKind::Move(width),
+                            src: MOperand::Reg(scratch),
+                            dst,
+                        });
+                    }
+                    StackSource::Reg(reg) => {
+                        out.push(Inst::Store {
+                            kind: MoveKind::Move(width),
+                            src: MOperand::Reg(*reg),
+                            dst,
+                        });
+                    }
+                }
+                copied += width.bytes();
+            }
         }
 
         // A call target names a symbol, not a block label. Using a memory
@@ -306,17 +386,22 @@ impl<'a, 't> Isel<'a, 't> {
         self.note_symbol(symbol);
         out.push(Inst::Call { target: MOperand::Mem(Mem::symbol(symbol)) });
 
-        if stack_bytes + padding > 0 {
+        if area > 0 {
             out.push(Inst::Alu {
                 op: AluOp::Add,
                 width: RegWidth::W64,
-                src: MOperand::Imm((stack_bytes + padding) as i64),
+                src: MOperand::Imm(area as i64),
                 dst: MOperand::Reg(Reg::Phys(4)),
             });
         }
 
+        // An sret call has already placed the value in the destination; copying
+        // `rax` into it again would overwrite the aggregate with the pointer that
+        // holds its address.
         if let Some(dst) = destination {
-            self.store_place_into(dst, MOperand::Reg(Reg::Phys(0)), out)?;
+            if sret.is_none() {
+                self.store_place_into(dst, MOperand::Reg(Reg::Phys(0)), out)?;
+            }
         }
         out.push(Inst::Jmp(self.block_labels[target.0 as usize]));
         Ok(())
@@ -324,7 +409,126 @@ impl<'a, 't> Isel<'a, 't> {
 
 }
 
+/// Where one argument of a call goes.
+pub(crate) struct ArgumentPlan {
+    /// Registers holding the register-passed values, in argument order.
+    pub register_values: Vec<Reg>,
+    /// Aggregates passed on the stack, with their byte size and the offset from
+    /// the bottom of the outgoing area where their first byte belongs.
+    pub stack_pieces: Vec<StackPiece>,
+    /// Total bytes the stack area must hold.
+    pub stack_bytes: u64,
+}
+
+/// One argument copied into the outgoing stack area.
+pub(crate) struct StackPiece {
+    /// Where the bytes come from. A register source is used for a literal, which
+    /// has no storage of its own.
+    pub source: StackSource,
+    pub size: u64,
+    pub offset: u64,
+}
+
+/// The origin of a stack argument's bytes.
+#[derive(Clone)]
+pub(crate) enum StackSource {
+    Mem(Mem),
+    Reg(Reg),
+}
+
 impl<'a, 't> Isel<'a, 't> {
+    /// Classifies a call's arguments into registers and stack slots.
+    ///
+    /// SysV AMD64 passes an aggregate of two eightbytes or less in registers and
+    /// anything larger on the stack. Getting this wrong is quiet: the callee
+    /// would read a slot the caller never filled and produce plausible garbage,
+    /// so the classification lives here, once, and both sides use its result.
+    pub(crate) fn plan_arguments(
+        &mut self,
+        args: &[Operand],
+        sret: bool,
+    ) -> Result<ArgumentPlan, String> {
+        let mut register_values: Vec<Reg> = Vec::new();
+        if sret {
+            // The hidden return pointer occupies `rdi`; the caller adds it
+            // before this runs, so it is signalled by starting the register list
+            // one short.
+        }
+        let mut stack_pieces = Vec::new();
+        let mut stack_bytes = 0u64;
+        let mut registers_used = usize::from(sret);
+        // Once an argument has been placed on the stack, every later one stays
+        // there: the callee reads stack arguments from a fixed position, so a
+        // register argument after a stack argument would shift every offset.
+        let mut spilled = false;
+        for arg in args {
+            let ty = self.operand_ty(arg);
+            if self.layouts.is_aggregate(ty) {
+                let size = self.layouts.layout(ty).map_err(|e| format!("{e:?}"))?.size;
+                let mem = match arg {
+                    Operand::Copy(p) | Operand::Move(p) => StackSource::Mem(self.place_addr(p)?),
+                    Operand::Constant(_) => {
+                        return Err("aggregate constant argument is not supported".into())
+                    }
+                };
+                let needed = size.div_ceil(8) as usize;
+                if !spilled && size <= 16 && registers_used + needed <= ARG_REGS.len() {
+                    let mem = match &mem {
+                        StackSource::Mem(m) => m.clone(),
+                        StackSource::Reg(_) => {
+                            return Err("aggregate in a register is not supported".into())
+                        }
+                    };
+                    // Two eightbytes at most: one register each. An aggregate of
+                    // eight bytes or less needs a single register, exactly like a
+                    // scalar, which is what the callee expects too.
+                    let pieces = size.div_ceil(8);
+                    for i in 0..pieces {
+                        let mut read = mem.clone();
+                        read.offset += (i * 8) as i64;
+                        let reg = self.vreg();
+                        // Each eightbyte is read at full width; the last one may
+                        // reach past the aggregate's end, which is harmless in a
+                        // register and never written back.
+                        self.emit(Inst::Load {
+                            kind: MoveKind::Move(RegWidth::W64),
+                            src: read,
+                            dst: MOperand::Reg(reg),
+                        });
+                        register_values.push(reg);
+                        registers_used += 1;
+                    }
+                } else {
+                    // Larger than two eightbytes: copied to the stack, aligned
+                    // to eight.
+                    stack_bytes = stack_bytes.div_ceil(8) * 8;
+                    stack_pieces.push(StackPiece { source: mem, size, offset: stack_bytes });
+                    stack_bytes += size;
+                    spilled = true;
+                }
+                continue;
+            }
+            if !spilled && registers_used < ARG_REGS.len() {
+                register_values.push(self.operand_to_reg(arg)?);
+                registers_used += 1;
+            } else {
+                // Past the register file every scalar is delivered on the stack.
+                let mem = match arg {
+                    Operand::Copy(p) | Operand::Move(p) => StackSource::Mem(self.place_addr(p)?),
+                    // A literal has no storage to copy from, so it is materialised
+                    // in a register and written from there.
+                    Operand::Constant(_) => StackSource::Reg(self.operand_to_reg(arg)?),
+                };
+                stack_bytes = stack_bytes.div_ceil(8) * 8;
+                stack_pieces.push(StackPiece { source: mem, size: 8, offset: stack_bytes });
+                stack_bytes += 8;
+                spilled = true;
+            }
+        }
+        let _ = registers_used;
+        Ok(ArgumentPlan { register_values, stack_pieces, stack_bytes })
+    }
+
     /// The label of the shared epilogue.
     ///
     /// Numbered past the block labels so it cannot collide with one.

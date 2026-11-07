@@ -319,12 +319,17 @@ impl<'a> Checker<'a> {
                 }
                 ast::Item::Fn(f) => {
                     self.check_fn_decl_shape(f);
-                    self.resolve_fn_signature(f, None);
+                    self.resolve_fn_signature(f, None, &[]);
                 }
                 ast::Item::Impl(block) => {
                     let self_ty_name = type_name_of(&block.self_ty);
+                    // A method of a generic type may name the block's parameters
+                    // in its own signature, so `impl<T> Vec<T> { fn new() -> Vec<T> }`
+                    // resolves `T` against the block, not against the method.
+                    let block_generics: Vec<String> =
+                        block.generics.iter().map(|g| g.name.clone()).collect();
                     for m in &block.methods {
-                        self.resolve_fn_signature(m, self_ty_name.as_deref());
+                        self.resolve_fn_signature(m, self_ty_name.as_deref(), &block_generics);
                     }
                 }
                 ast::Item::Mod(m) => {
@@ -337,8 +342,14 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn resolve_fn_signature(&mut self, f: &ast::FnDecl, receiver: Option<&str>) {
-        let generics: Vec<String> = f.generics.iter().map(|g| g.name.clone()).collect();
+    fn resolve_fn_signature(
+        &mut self,
+        f: &ast::FnDecl,
+        receiver: Option<&str>,
+        outer_generics: &[String],
+    ) {
+        let mut generics: Vec<String> = outer_generics.to_vec();
+        generics.extend(f.generics.iter().map(|g| g.name.clone()));
         let mut params = Vec::new();
         // `self` receiver becomes parameter 0.
         let mut has_self = false;
@@ -580,6 +591,13 @@ impl<'a> Checker<'a> {
             // `unsafe`.
             (TyKind::RawPtr(e1), TyKind::RawPtr(e2)) => self.types_compatible(e1, e2),
             (TyKind::RawPtr(e1), TyKind::RawPtrMut(e2)) => self.types_compatible(e1, e2),
+            // A `&str` may be passed where a `*const u8` is expected. A string
+            // literal is already a pointer to NUL-terminated bytes with the same
+            // layout, so `print("...")` needs no cast; requiring one would make
+            // the prelude's most common call the ugliest line in a program.
+            (TyKind::RawPtr(inner), TyKind::Ref(e)) if matches!(self.cx.kind(inner), TyKind::U8) => {
+                matches!(self.cx.kind(e), TyKind::Str)
+            }
             (TyKind::RefMut(e1), TyKind::RefMut(e2)) => self.types_compatible(e1, e2),
             (TyKind::Adt { def: d1, args: a1 }, TyKind::Adt { def: d2, args: a2 }) => {
                 d1 == d2

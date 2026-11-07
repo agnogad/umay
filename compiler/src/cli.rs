@@ -556,7 +556,7 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     // compiler.
     let runtime_asm = dist.join("umay_runtime.s");
     let runtime_obj = dist.join("umay_runtime.o");
-    let runtime = match umayc::codegen_source("umay_runtime", umayc::RUNTIME_SOURCE, opts.opt_level) {
+    let runtime = match umayc::codegen_source_without_prelude("umay_runtime", umayc::RUNTIME_SOURCE, opts.opt_level) {
         Ok(o) => o,
         Err((diags, map)) => {
             // A failure here is a compiler bug, not a problem with the user's

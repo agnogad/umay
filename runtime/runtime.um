@@ -44,15 +44,15 @@ const STDERR: i32 = 2
 // A null return from `malloc` means the program cannot continue, and carrying on
 // would mean writing through a null pointer. Every allocation goes through here
 // so that the check exists in exactly one place.
-pub fn alloc(count: usize) -> *mut u8 {
+pub fn umay_alloc(count: usize) -> *mut u8 {
     let ptr = malloc(count)
     if unsafe { ptr as usize } == 0 {
-        fail("umay: out of memory" as *const u8)
+        umay_fail("umay: out of memory" as *const u8)
     }
     return ptr
 }
 
-pub fn dealloc(ptr: *mut u8) {
+pub fn umay_dealloc(ptr: *mut u8) {
     free(ptr)
 }
 
@@ -64,12 +64,12 @@ pub fn dealloc(ptr: *mut u8) {
 // that writes through one yet, so writing goes through these two functions. They
 // exist so that the byte-at-a-time code in `byte_len` and the digit loop has a
 // single, checkable place to go through.
-pub fn read_byte(ptr: *const u8) -> u8 {
+pub fn umay_read_byte(ptr: *const u8) -> u8 {
     return unsafe { *ptr }
 }
 
 // Writes one byte. The caller owns `ptr` for the duration of the call.
-pub fn write_byte(ptr: *mut u8, value: u8) {
+pub fn umay_write_byte(ptr: *mut u8, value: u8) {
     unsafe { *ptr = value }
 }
 
@@ -90,7 +90,7 @@ pub fn write_byte(ptr: *mut u8, value: u8) {
 // `&str` is a NUL-terminated pointer, not a pointer-and-length pair, so the
 // length is a scan. This is the price of passing strings to C for free, and it
 // is paid once per print rather than once per string operation.
-pub fn byte_len(s: *const u8) -> usize {
+pub fn umay_byte_len(s: *const u8) -> usize {
     // `n` is declared at its final type rather than as a literal integer that is
     // converted on return: the literal would default to `i32`, and the conversion
     // back to `usize` would be a narrowing cast the compiler is right to warn
@@ -115,20 +115,20 @@ fn write_at(fd: i32, ptr: *const u8, count: usize) {
 }
 
 // Writes a byte string with no trailing newline.
-pub fn print(s: *const u8) {
-    write_at(STDOUT, s, byte_len(s))
+pub fn umay_print(s: *const u8) {
+    write_at(STDOUT, s, umay_byte_len(s))
 }
 
 // Writes a byte string followed by a newline.
-pub fn println(s: *const u8) {
-    write_at(STDOUT, s, byte_len(s))
+pub fn umay_println(s: *const u8) {
+    write_at(STDOUT, s, umay_byte_len(s))
     write_at(STDOUT, "\n" as *const u8, 1)
 }
 
 // Writes to standard error, for messages that must not be mixed into the
 // program's real output.
-pub fn eprintln(s: *const u8) {
-    write_at(STDERR, s, byte_len(s))
+pub fn umay_eprintln(s: *const u8) {
+    write_at(STDERR, s, umay_byte_len(s))
     write_at(STDERR, "\n" as *const u8, 1)
 }
 
@@ -139,7 +139,7 @@ pub fn eprintln(s: *const u8) {
 // The digits are produced from the least significant end into a local buffer and
 // written in one call. The widest value, `-9223372036854775808`, needs twenty
 // characters, so thirty-two bytes is enough.
-pub fn println_i64(value: i64) {
+pub fn umay_println_i64(value: i64) {
     let mut buf: [u8; 32] = [0u8; 32]
     // The digits are taken from an unsigned magnitude so that `i64::MIN`, whose
     // negation does not fit in an `i64`, is handled without a special case.
@@ -190,7 +190,7 @@ fn narrow_digit(d: i64) -> u8 {
 //
 // A failure cannot return: the program is in a state its checker did not prove
 // reachable, so continuing would mean running with a broken invariant.
-pub fn fail(message: *const u8) {
-    eprintln(message)
+pub fn umay_fail(message: *const u8) {
+    umay_eprintln(message)
     exit(101)
 }

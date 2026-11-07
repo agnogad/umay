@@ -75,6 +75,13 @@ pub struct Checker<'a> {
     /// Constants with resolved types and bodies, checked in a later pass so
     /// that they may refer to other constants.
     pub(crate) pending_consts: Vec<(ConstId, ast::ConstDecl)>,
+    /// Literal variables that met a concrete type, mapped to it.
+    ///
+    /// A `{integer}` starts with no width. The first concrete integer it meets
+    /// decides the width for good, and recording that here lets the final pass
+    /// rewrite every local and temporary that still names the variable, so
+    /// nothing keeps a 4-byte slot while being read as 8.
+    pub(crate) settled_vars: HashMap<crate::types::TyId, crate::types::TyId>,
     /// Kept for diagnostics that need to quote source text (Phase 3 will use
     /// it to render MIR annotations).
     #[allow(dead_code)]
@@ -82,6 +89,14 @@ pub struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
+    /// Records that a literal variable now stands for a concrete type.
+    pub(crate) fn settle_var(&mut self, var: crate::types::TyId, concrete: crate::types::TyId) {
+        if !self.cx.is_infer_var(var) || self.cx.is_infer_var(concrete) {
+            return;
+        }
+        self.settled_vars.insert(var, concrete);
+    }
+
     pub fn new(sources: &'a crate::source::SourceMap) -> Self {
         let mut checker = Checker {
             cx: TyCtxt::new(),
@@ -102,6 +117,7 @@ impl<'a> Checker<'a> {
             methods_of_type: HashMap::new(),
             traits: HashMap::new(),
             pending_consts: Vec::new(),
+            settled_vars: HashMap::new(),
             sources,
         };
         checker.install_prelude();
@@ -234,17 +250,9 @@ impl<'a> Checker<'a> {
             };
             self.items.declare_prelude(name.to_string(), entry);
         }
-        // Prelude functions.
-        let prelude_fns = ["print", "read_line", "len", "panic"];
-        for name in prelude_fns {
-            let entry = scope::ItemEntry {
-                res: crate::hir::Res::Fn(FnId(u32::MAX)),
-                kind: ItemKind::Fn,
-                span: Span::DUMMY,
-                arity: 1,
-            };
-            self.items.declare_prelude(name.to_string(), entry);
-        }
+        // Prelude functions are real UMAY functions, parsed from
+        // `stdlib/prelude.um` and prepended to every program, so they are
+        // declared by the normal item collection and need nothing here.
     }
 }
 

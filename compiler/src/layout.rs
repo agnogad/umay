@@ -101,6 +101,16 @@ impl<'a> Layouts<'a> {
     }
 
     /// The layout of a type, or the reason it has none.
+    /// Whether `ty` is an aggregate: a struct, enum, tuple or array.
+    pub fn is_aggregate(&self, ty: TyId) -> bool {
+        matches!(
+            self.types.kind(ty),
+            crate::types::TyKind::Adt { .. }
+                | crate::types::TyKind::Array { .. }
+                | crate::types::TyKind::Tuple(_)
+        )
+    }
+
     pub fn layout(&mut self, ty: TyId) -> Result<Layout, LayoutError> {
         if let Some(&l) = self.cache.get(&ty) {
             return Ok(l);

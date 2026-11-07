@@ -546,4 +546,22 @@ pub struct MachineFunction {
     pub block_count: u32,
     /// The width each incoming parameter is stored at.
     pub arg_widths: Vec<RegWidth>,
+    /// The frame slot holding the hidden return pointer, when this function
+    /// returns a large aggregate. Its arrival in `rdi` shifts every other
+    /// argument one register along.
+    pub sret_offset: Option<i64>,
+    /// How each incoming parameter is delivered.
+    pub arg_kinds: Vec<ArgKind>,
+}
+
+/// How one incoming parameter arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgKind {
+    /// One register, carrying a scalar.
+    Register,
+    /// Two registers, carrying an aggregate of up to sixteen bytes.
+    RegisterPair,
+    /// Copied into the caller's outgoing argument area at a fixed offset above
+    /// the return address.
+    Stack(u64),
 }

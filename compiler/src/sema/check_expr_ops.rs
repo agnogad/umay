@@ -211,16 +211,25 @@ impl FnChecker<'_, '_> {
 
     /// Makes integer/float literal variables adopt the other operand's type.
     pub(crate) fn unify_operands(&mut self, lt: TyId, rt: TyId, _span: crate::source::Span) -> (TyId, TyId) {
+        // A literal variable that meets a concrete type adopts it, and the
+        // adoption is remembered so that the *local* the literal came from keeps
+        // the same width. Without the record, `let i = 0` used as a `usize` would
+        // type the expression `usize` while the local stayed four bytes wide, and
+        // a 64-bit read would see its neighbours.
         if self.cx.cx.is_integer_var(lt) && !self.cx.cx.is_infer_var(rt) && self.cx.cx.is_integer(rt) {
+            self.cx.settle_var(lt, rt);
             return (rt, rt);
         }
         if self.cx.cx.is_integer_var(rt) && !self.cx.cx.is_infer_var(lt) && self.cx.cx.is_integer(lt) {
+            self.cx.settle_var(rt, lt);
             return (lt, lt);
         }
         if self.cx.cx.is_float_var(lt) && !self.cx.cx.is_infer_var(rt) && self.cx.cx.is_float(rt) {
+            self.cx.settle_var(lt, rt);
             return (rt, rt);
         }
         if self.cx.cx.is_float_var(rt) && !self.cx.cx.is_infer_var(lt) && self.cx.cx.is_float(lt) {
+            self.cx.settle_var(rt, lt);
             return (lt, lt);
         }
         // Two literal vars of the same kind unify with each other.

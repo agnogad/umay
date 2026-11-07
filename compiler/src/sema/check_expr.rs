@@ -92,6 +92,15 @@ impl<'c, 's> FnChecker<'c, 's> {
     }
 
     pub fn finish_locals(mut self) -> Vec<LocalInfo> {
+        // A literal variable that met a concrete type during checking takes that
+        // type, so a local initialised from a literal and later used where a
+        // concrete integer is expected keeps one width throughout.
+        let settled = self.cx.settled_vars.clone();
+        for l in self.locals.iter_mut() {
+            if let Some(&t) = settled.get(&l.ty) {
+                l.ty = t;
+            }
+        }
         // Apply literal defaults to locals that never got a concrete type.
         for (ty, _span) in std::mem::take(&mut self.pending_defaults) {
             if self.cx.cx.is_integer_var(ty) {

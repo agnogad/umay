@@ -248,11 +248,12 @@ fn an_unsupported_construct_is_reported_not_crashed() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
     let source = dir.join("main.um");
-    // Returning a large aggregate by value needs a hidden pointer, which the
-    // backend does not implement yet.
+    // Calling through a function value needs an indirect call, which the backend
+    // does not implement yet. The point of this test is that the gap produces a
+    // diagnostic rather than a crash or a wrong binary.
     std::fs::write(
         &source,
-        "struct Big { a: i64, b: i64, c: i64 }\nfn make() -> Big {\n    return Big { a: 1, b: 2, c: 3 }\n}\nfn main() -> i32 {\n    let b = make()\n    return 0\n}",
+        "fn twice(x: i64) -> i64 {\n    return x * 2\n}\nfn apply(f: fn(i64) -> i64, v: i64) -> i64 {\n    return f(v)\n}\nfn main() -> i32 {\n    return apply(twice, 3) as i32\n}",
     )
     .expect("write source");
     let output = Command::new(compiler())
@@ -292,4 +293,100 @@ fn assembly_is_generated_for_a_simple_program() {
     assert!(text.contains("ret"), "no return:\n{text}");
     assert!(text.contains(".text"), "no text section:\n{text}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate arguments and returns (SysV classification)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_large_aggregate_argument_is_passed_by_value() {
+    // Twenty-four bytes is more than two eightbytes, so the value travels in the
+    // caller's outgoing stack area. Reading any field wrong shows up in the sum.
+    expect_exit(
+        "agg_arg_stack",
+        "struct B { a: i64, b: i64, c: i64 }\n\
+         fn sum(x: B) -> i32 { return (x.a + x.b + x.c) as i32 }\n\
+         fn main() -> i32 { let v = B { a: 10, b: 20, c: 30 } return sum(v) }",
+        60,
+    );
+}
+
+#[test]
+fn a_sixteen_byte_aggregate_argument_uses_two_registers() {
+    expect_exit(
+        "agg_arg_pair",
+        "struct P { a: i64, b: i64 }\n\
+         fn sum(x: P) -> i32 { return (x.a + x.b) as i32 }\n\
+         fn main() -> i32 { return sum(P { a: 7, b: 9 }) }",
+        16,
+    );
+}
+
+#[test]
+fn an_eight_byte_aggregate_argument_uses_one_register() {
+    expect_exit(
+        "agg_arg_word",
+        "struct W { a: i64 }\n\
+         fn get(x: W) -> i32 { return x.a as i32 }\n\
+         fn main() -> i32 { return get(W { a: 33 }) }",
+        33,
+    );
+}
+
+#[test]
+fn an_aggregate_argument_survives_a_stack_passed_neighbour() {
+    // The aggregate takes the stack area, while the scalar that follows still
+    // arrives in a register. Mixing the two is where a classifier goes wrong.
+    expect_exit(
+        "agg_arg_mixed",
+        "struct B { a: i64, b: i64, c: i64 }\n\
+         fn mix(x: B, k: i64) -> i32 { return (x.a + x.b + x.c + k) as i32 }\n\
+         fn main() -> i32 { let v = B { a: 1, b: 2, c: 3 } return mix(v, 44) }",
+        50,
+    );
+}
+
+#[test]
+fn an_aggregate_argument_can_be_a_temporary() {
+    expect_exit(
+        "agg_arg_temp",
+        "struct B { a: i64, b: i64, c: i64 }\n\
+         fn sum(x: B) -> i32 { return (x.a + x.b + x.c) as i32 }\n\
+         fn main() -> i32 { return sum(B { a: 4, b: 5, c: 6 }) }",
+        15,
+    );
+}
+
+#[test]
+fn a_short_aggregate_tail_is_copied_completely() {
+    // Twelve bytes leaves the last eightbyte half used; copying only whole
+    // eightbytes would leave the tail holding whatever the stack held before.
+    expect_exit(
+        "agg_arg_twelve",
+        "struct T { a: i64, b: i32 }\n\
+         fn sum(x: T) -> i32 { return (x.a + x.b as i64) as i32 }\n\
+         fn main() -> i32 { return sum(T { a: 30, b: 12 }) }",
+        42,
+    );
+}
+
+#[test]
+fn an_aggregate_argument_is_not_shared_with_the_caller() {
+    // Passing by value must copy: mutating the parameter inside the callee must
+    // not change the caller's variable. Ownership means the caller cannot read
+    // `v` after passing it, so the check reads a *different* copy that was made
+    // first.
+    expect_exit(
+        "agg_arg_copy",
+        "struct B { a: i64, b: i64, c: i64 }\n\
+         fn touch(x: B) -> i32 { let mut y = x y.a = 99 return y.a as i32 }\n\
+         fn main() -> i32 {\n\
+             let first = B { a: 5, b: 6, c: 7 }\n\
+             let second = B { a: first.a, b: first.b, c: first.c }\n\
+             let changed = touch(first)\n\
+             return (second.a as i32) + changed\n\
+         }",
+        104,
+    );
 }

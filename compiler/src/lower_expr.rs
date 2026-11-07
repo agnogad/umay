@@ -229,20 +229,20 @@ impl Lowering<'_> {
                 Operand::Copy(tmp)
             }
             HirExprKind::Field { base, index, .. } => {
-                let place = self.lower_place(base).field(*index);
+                let place = self.place_through_refs(base, base.ty).field(*index);
                 let tmp = self.temp_place(e.ty);
                 self.assign(tmp.clone(), Rvalue::Use(Operand::Copy(place)), e.span);
                 Operand::Copy(tmp)
             }
             HirExprKind::TupleIndex { base, index } => {
-                let place = self.lower_place(base).field(*index);
+                let place = self.place_through_refs(base, base.ty).field(*index);
                 let tmp = self.temp_place(e.ty);
                 self.assign(tmp.clone(), Rvalue::Use(Operand::Copy(place)), e.span);
                 Operand::Copy(tmp)
             }
             HirExprKind::Index { base, index } => {
                 let idx = self.lower_expr(index);
-                let place = self.lower_place(base).index(idx);
+                let place = self.place_through_refs(base, base.ty).index(idx);
                 let tmp = self.temp_place(e.ty);
                 self.assign(tmp.clone(), Rvalue::Use(Operand::Copy(place)), e.span);
                 Operand::Copy(tmp)
@@ -357,14 +357,44 @@ impl Lowering<'_> {
     /// Reads through the place use `Copy`; the caller chooses `Move`. This
     /// split is what lets Phase 4 reason about moves without inspecting
     /// expression shapes.
+    /// Lowers `e` as a place, dereferencing through any references first.
+    ///
+    /// `s.field` where `s: &Struct` means `(*s).field`. The checker strips the
+    /// reference to find the field, so this is where the matching deref has to
+    /// appear; without it the projection is a field of a reference, which has no
+    /// layout.
+    fn place_through_refs(&mut self, e: &HirExpr, ty: TyId) -> Place {
+        let mut place = self.lower_place(e);
+        let mut ty = ty;
+        let mut guard = 0;
+        while guard < 8 {
+            guard += 1;
+            match self.types.kind(ty) {
+                TyKind::Ref(inner) | TyKind::RefMut(inner) => {
+                    ty = *inner;
+                    place = place.deref();
+                }
+                _ => break,
+            }
+        }
+        place
+    }
+
     pub(crate) fn lower_place(&mut self, e: &HirExpr) -> Place {
         match &e.kind {
             HirExprKind::Local(l) => self.place_of(*l),
-            HirExprKind::Field { base, index, .. } => self.lower_place(base).field(*index),
-            HirExprKind::TupleIndex { base, index } => self.lower_place(base).field(*index),
+            HirExprKind::Field { base, index, .. } => {
+                let p = self.place_through_refs(base, base.ty);
+                p.field(*index)
+            }
+            HirExprKind::TupleIndex { base, index } => {
+                let p = self.place_through_refs(base, base.ty);
+                p.field(*index)
+            }
             HirExprKind::Index { base, index } => {
                 let idx = self.lower_expr(index);
-                self.lower_place(base).index(idx)
+                let p = self.place_through_refs(base, base.ty);
+                p.index(idx)
             }
             HirExprKind::Deref(inner) => self.lower_place(inner).deref(),
             // Anything else is a value, not a place: materialise it into a

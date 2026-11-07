@@ -187,6 +187,57 @@ impl<'a, 't> Isel<'a, 't> {
         Ok(())
     }
 
+    /// Copies `size` bytes from `src` to the address in `dst_ptr`.
+    ///
+    /// Used when a value leaves the function through a caller-supplied pointer,
+    /// where the destination is an address in a register rather than a stack
+    /// slot this frame owns.
+    pub(crate) fn copy_bytes_to_pointer(
+        &mut self,
+        src: &Mem,
+        dst_ptr: Reg,
+        size: u64,
+        out: &mut Vec<Inst>,
+    ) -> Result<(), String> {
+        let scratch = self.vreg();
+        let mut offset = 0u64;
+        while offset + 8 <= size {
+            let mut s = src.clone();
+            s.offset += offset as i64;
+            let mut d = Mem::base(dst_ptr);
+            d.offset = offset as i64;
+            out.push(Inst::Load {
+                kind: MoveKind::Move(RegWidth::W64),
+                src: s,
+                dst: MOperand::Reg(scratch),
+            });
+            out.push(Inst::Store {
+                kind: MoveKind::Move(RegWidth::W64),
+                src: MOperand::Reg(scratch),
+                dst: d,
+            });
+            offset += 8;
+        }
+        while offset < size {
+            let mut s = src.clone();
+            s.offset += offset as i64;
+            let mut d = Mem::base(dst_ptr);
+            d.offset = offset as i64;
+            out.push(Inst::Load {
+                kind: MoveKind::Move(RegWidth::W8),
+                src: s,
+                dst: MOperand::Reg(scratch),
+            });
+            out.push(Inst::Store {
+                kind: MoveKind::Move(RegWidth::W8),
+                src: MOperand::Reg(scratch),
+                dst: d,
+            });
+            offset += 1;
+        }
+        Ok(())
+    }
+
     /// Selects a binary operation.
     fn binary(
         &mut self,
@@ -463,7 +514,7 @@ impl<'a, 't> Isel<'a, 't> {
     ///
     /// Bool and char constants carry no type id; their machine width is fixed,
     /// so `u8` and `u32` stand in for them rather than allocating a new type.
-    fn operand_ty(&mut self, op: &Operand) -> TyId {
+    pub(crate) fn operand_ty(&mut self, op: &Operand) -> TyId {
         match op {
             Operand::Copy(p) | Operand::Move(p) => self.place_ty(p),
             Operand::Constant(c) => match c {

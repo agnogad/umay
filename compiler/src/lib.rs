@@ -40,6 +40,7 @@ pub mod opt;
 pub mod ownership;
 pub mod mir_print;
 pub mod parser;
+pub mod prelude;
 pub mod sema;
 pub mod source;
 pub mod token;
@@ -108,8 +109,10 @@ pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
     if diagnostics.has_errors() {
         return (diagnostics, map);
     }
+    let (program, prelude_diagnostics) = prelude::with_prelude(out.program, &mut map);
+    append_all(&mut diagnostics, &prelude_diagnostics);
 
-    let mut sema = sema::analyze(&out.program, &map);
+    let mut sema = sema::analyze(&program, &map);
     append_all(&mut diagnostics, &sema.diagnostics);
     diagnostics.sort();
     if diagnostics.has_errors() {
@@ -166,7 +169,9 @@ pub fn lower_to_mir_opt(
     if diagnostics.has_errors() {
         return Err((diagnostics, map));
     }
-    let mut sema = sema::analyze(&out.program, &map);
+    let (program, prelude_diagnostics) = prelude::with_prelude(out.program, &mut map);
+    append_all(&mut diagnostics, &prelude_diagnostics);
+    let mut sema = sema::analyze(&program, &map);
     for d in sema.diagnostics.items() {
         let mut d = d.clone();
         if let Some(entry) = explain::lookup(d.code) {
@@ -264,6 +269,29 @@ pub fn codegen_source(
     text: &str,
     level: opt::OptLevel,
 ) -> Result<CodegenOutput, (Diagnostics, SourceMap)> {
+    codegen_source_impl(name, text, level, true)
+}
+
+/// Compiles a source text without the prelude.
+///
+/// The runtime is written in UMAY and needs the language, but it must not
+/// receive the prelude: the prelude binds the runtime's own symbols, and
+/// including it would declare `umay_alloc` twice — once as the definition being
+/// compiled and once as an `extern`.
+pub fn codegen_source_without_prelude(
+    name: &str,
+    text: &str,
+    level: opt::OptLevel,
+) -> Result<CodegenOutput, (Diagnostics, SourceMap)> {
+    codegen_source_impl(name, text, level, false)
+}
+
+fn codegen_source_impl(
+    name: &str,
+    text: &str,
+    level: opt::OptLevel,
+    with_prelude: bool,
+) -> Result<CodegenOutput, (Diagnostics, SourceMap)> {
     let mut map = SourceMap::new();
     let id = map.add(name, text);
     let out = parse_file(&map, id);
@@ -271,8 +299,15 @@ pub fn codegen_source(
     if diagnostics.has_errors() {
         return Err((diagnostics, map));
     }
+    let program = if with_prelude {
+        let (program, prelude_diagnostics) = prelude::with_prelude(out.program, &mut map);
+        append_all(&mut diagnostics, &prelude_diagnostics);
+        program
+    } else {
+        out.program
+    };
 
-    let mut sema = sema::analyze(&out.program, &map);
+    let mut sema = sema::analyze(&program, &map);
     append_all(&mut diagnostics, &sema.diagnostics);
     diagnostics.sort();
     if diagnostics.has_errors() {

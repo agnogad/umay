@@ -273,6 +273,7 @@ impl<'a> Lowering<'a> {
             blocks: self.blocks,
             entry: BlockId(0),
             span: self.span,
+            ret_is_sret: false,
         }
     }
 
@@ -295,6 +296,7 @@ impl<'a> Lowering<'a> {
             blocks: self.blocks,
             entry: BlockId(0),
             span: self.span,
+            ret_is_sret: false,
         }
     }
 }

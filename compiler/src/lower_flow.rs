@@ -161,7 +161,13 @@ impl Lowering<'_> {
         e: &HirExpr,
     ) -> Operand {
         // The receiver is passed as argument 0, matching the `self` parameter.
-        let recv = self.lower_expr(receiver);
+        //
+        // A `&self` or `&mut self` method takes the receiver by reference, and
+        // the checker accepts a plain `T` for it. That acceptance is only sound
+        // if the borrow is inserted here: passing the value by move would make
+        // the receiver unusable after any method call, so `s.len()` followed by
+        // `s.field` would report a use-after-move.
+        let recv = self.lower_receiver(receiver, method, e);
         let mut arg_ops = vec![recv];
         for a in args {
             arg_ops.push(self.lower_expr(a));
@@ -187,6 +193,35 @@ impl Lowering<'_> {
             Some(d) => Operand::Copy(d),
             None => Operand::Constant(Constant::Unit),
         }
+    }
+
+    /// Lowers a method receiver, adding the borrow the declaration calls for.
+    fn lower_receiver(&mut self, receiver: &HirExpr, method: FnId, e: &HirExpr) -> Operand {
+        let (by_ref, mutable) = match self.hir.fns.iter().find(|f| f.id == method) {
+            Some(f) => (f.self_by_ref, f.self_mutable),
+            None => return self.lower_expr(receiver),
+        };
+        if !by_ref {
+            return self.lower_expr(receiver);
+        }
+        // An expression that is already a reference of the right mutability is
+        // passed through unchanged.
+        let already = matches!(
+            (self.types.kind(receiver.ty), mutable),
+            (TyKind::Ref(_), _) | (TyKind::RefMut(_), true)
+        );
+        if already {
+            return self.lower_expr(receiver);
+        }
+        let place = self.lower_place(receiver);
+        let ty = if mutable {
+            self.types.ref_mut_to(receiver.ty)
+        } else {
+            self.types.ref_to(receiver.ty)
+        };
+        let tmp = self.temp_place(ty);
+        self.assign(tmp.clone(), Rvalue::Ref { mutable, place }, e.span);
+        Operand::Copy(tmp)
     }
 
     /// Built-in methods lower to calls of synthetic functions named
