@@ -15,11 +15,10 @@ use std::process::Command;
 ///
 /// Cargo sets `CARGO_BIN_EXE_<name>` for integration tests, which is the only
 /// portable way to find it: this toolchain writes build artifacts outside the
-/// crate directory.
+/// crate directory. It is substituted at compile time, not set in the
+/// environment of the running test.
 fn compiler() -> std::path::PathBuf {
-    std::env::var_os("CARGO_BIN_EXE_umay")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("umay"))
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_umay"))
 }
 
 /// True when the tools needed to build and link are present.
