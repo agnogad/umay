@@ -135,6 +135,9 @@ impl VariantFields {
 pub struct TraitInfo {
     pub name: String,
     pub span: Span,
+    /// The trait's own parameter names, in declaration order, so that a bound's
+    /// arguments can be paired with the types a method mentions.
+    pub generics: Vec<String>,
     pub methods: Vec<TraitMethodInfo>,
 }
 
@@ -294,6 +297,20 @@ pub enum HirExprKind {
     /// A method provided by the language on a built-in type, e.g. `str::len`.
     /// Lowered by the backend rather than declared in an `impl` block.
     BuiltinMethod { name: String, receiver: Box<HirExpr>, args: Vec<HirExpr> },
+    /// A call to a trait method on a generic parameter, e.g. `it.next()` where
+    /// `T: Counter`.
+    ///
+    /// The receiver's type is a parameter, so no `impl` block names it yet; only
+    /// the bound does. Monomorphisation knows the real type and rewrites this
+    /// into an ordinary `MethodCall`, which keeps dispatch static and means no
+    /// virtual table exists anywhere in the language.
+    TraitMethodCall {
+        receiver: Box<HirExpr>,
+        trait_name: String,
+        method: String,
+        method_span: crate::source::Span,
+        args: Vec<HirExpr>,
+    },
 
     // ---- control flow ----
     /// `if` with a `then` block and optional `else` expression.
@@ -549,6 +566,12 @@ fn rewrite_expr(e: &mut HirExpr, map: &std::collections::HashMap<TyId, TyId>) {
             rewrite_expr(rhs, map);
         }
         HirExprKind::Ref { place, .. } => rewrite_expr(place, map),
+        HirExprKind::TraitMethodCall { receiver, args, .. } => {
+            rewrite_expr(receiver, map);
+            for a in args {
+                rewrite_expr(a, map);
+            }
+        }
         HirExprKind::Cast { expr, to } => {
             rewrite_expr(expr, map);
             map_ty(to, map);

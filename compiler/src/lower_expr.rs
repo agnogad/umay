@@ -282,6 +282,16 @@ impl Lowering<'_> {
                 self.assign(tmp.clone(), Rvalue::Use(Operand::Copy(place)), e.span);
                 Operand::Copy(tmp)
             }
+            // Monomorphisation turns this into a `MethodCall` once the
+            // receiver's type is known. Reaching lowering unconverted means the
+            // type never became concrete, and there is no implementation to call.
+            HirExprKind::TraitMethodCall { trait_name, method, method_span, .. } => {
+                self.errors.push((
+                    format!("trait method `{trait_name}::{method}` has no implementation for the receiver's type"),
+                    *method_span,
+                ));
+                Operand::Constant(Constant::Unit)
+            }
             HirExprKind::MethodCall { receiver, method, args } => {
                 self.lower_method_call(receiver, *method, args, e)
             }

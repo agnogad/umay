@@ -468,6 +468,7 @@ impl Parser {
             let mut args = Vec::new();
             if self.at(&TokenKind::Lt) && self.looks_like_generic_args() {
                 self.advance();
+                self.split_closing_angles();
                 while !self.at(&TokenKind::Gt) && !self.at_eof() {
                     args.push(self.parse_type());
                     if !self.eat(&TokenKind::Comma) {

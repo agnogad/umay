@@ -1648,3 +1648,74 @@ fn a_malformed_request_line_is_reported_as_an_empty_target() {
         "1\n",
     );
 }
+
+#[test]
+fn a_trait_method_on_a_generic_parameter_resolves_to_the_impl() {
+    // `it.next()` on a `T: Iterator<i64>` has no `impl` to name at the call
+    // site: only the bound does. Monomorphisation cashes the bound in once the
+    // real type is known, so dispatch stays static.
+    expect_stdout(
+        "iterator_generic_bound",
+        "struct Countdown { left: i64 }\n\
+         impl Iterator<i64> for Countdown {\n\
+             fn next(&mut self) -> Option<i64> {\n\
+                 if self.left <= 0i64 { return Option::None }\n\
+                 let v = self.left\n\
+                 self.left = self.left - 1\n\
+                 return Option::Some(v)\n\
+             }\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let mut a = Countdown { left: 4i64 }\n\
+             println_i64(iterate_sum(&mut a, 10))\n\
+             let mut b = Countdown { left: 3i64 }\n\
+             println_i64(iterate_count(&mut b, 10) as i64)\n\
+             let mut c = Countdown { left: 3i64 }\n\
+             let items = iterate_collect(&mut c, 10)\n\
+             println_i64(items.len() as i64)\n\
+             println_i64(items.get(0))\n\
+             println_i64(items.get(2))\n\
+             return 0\n\
+         }",
+        "10\n3\n3\n3\n1\n",
+    );
+}
+
+#[test]
+fn two_nested_generic_lists_close_with_a_double_angle() {
+    // The lexer makes `>>` one token because that is a shift. Closing
+    // `Option<Vec<i64>>` and a bound like `T: Iterator<i64>` must split it.
+    expect_stdout(
+        "nested_generics_close",
+        "fn first_or_zero(v: &Vec<i64>) -> i64 {\n\
+             if v.len() == 0usize { return 0i64 }\n\
+             return v.get(0)\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let mut v: Vec<i64> = Vec::new()\n\
+             v = v.push(7i64)\n\
+             println_i64(first_or_zero(&v))\n\
+             let boxed: Option<Vec<i64>> = Option::Some(v)\n\
+             println_i64(if boxed.is_some() { 1 } else { 0 })\n\
+             return 0\n\
+         }",
+        "7\n1\n",
+    );
+}
+
+#[test]
+fn an_annotation_outranks_a_defaulted_literal_in_a_variant() {
+    // `Option::Some(1)` would default its payload to `i32`; the annotation says
+    // `i64`, and a literal has not decided its width yet, so the annotation wins.
+    expect_stdout(
+        "variant_literal_takes_annotation",
+        "fn main() -> i32 {\n\
+             let a: Option<i64> = Option::Some(1)\n\
+             println_i64(a.unwrap_or(0i64))\n\
+             let b: Option<i64> = Option::None\n\
+             println_i64(b.unwrap_or(9i64))\n\
+             return 0\n\
+         }",
+        "1\n9\n",
+    );
+}

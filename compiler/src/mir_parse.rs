@@ -367,11 +367,11 @@ fn parse_rvalue(s: &str, strings: &mut Vec<String>, n: usize) -> Result<Rvalue, 
         return Ok(Rvalue::PtrOffset { ptr: parts[0].clone(), count: parts[1].clone() });
     }
     if let Some(rest) = s.strip_prefix("discriminant(") {
-        let place = parse_place(rest.trim_end_matches(')'), strings, n)?;
+        let place = parse_place(rest.strip_suffix(')').unwrap_or(rest), strings, n)?;
         return Ok(Rvalue::Discriminant(place));
     }
     if let Some(rest) = s.strip_prefix("len(") {
-        let place = parse_place(rest.trim_end_matches(')'), strings, n)?;
+        let place = parse_place(rest.strip_suffix(')').unwrap_or(rest), strings, n)?;
         return Ok(Rvalue::Len(place));
     }
     if let Some(rest) = s.strip_prefix("&mut ") {

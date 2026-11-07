@@ -1,0 +1,99 @@
+// Pull-based iteration, and the adaptors that need no closure.
+//
+// `Iterator` is a trait rather than a built-in type, so a struct in ordinary
+// UMAY source is an iterator by writing `impl Iterator for It`. Dispatch happens
+// in monomorphisation: a call on a generic parameter is resolved to the `impl`
+// that the real type has, so there is no vtable anywhere in the language.
+//
+// The bound is what makes `it.next()` legal inside a generic function:
+//
+//     fn drain<T: Iterator<i64>>(it: &mut T) -> i64 { .. it.next() .. }
+
+// A source of items produced one at a time.
+trait Iterator<T> {
+    fn next(&mut self) -> Option<T>
+}
+
+impl<T> Option<T> {
+    // The item, allowing a fallback that is only built when there is none.
+    //
+    // The fallback is a function parameter rather than a closure argument
+    // because UMAY has no closures yet; `or_else(|| 0)` is written
+    // `or_else(fallback_zero)` with a small named function.
+    fn or_else(self, fallback: T) -> T {
+        return match self {
+            Option::Some(value) => value,
+            Option::None => fallback,
+        }
+    }
+}
+
+// Runs `it` to exhaustion, returning how many items it produced.
+//
+// `times` is a guard rather than part of the protocol: an infinite source is a
+// legal iterator, so a caller that wants *all* the items has to say how many it
+// will take.
+fn iterate_count<T: Iterator<i64>>(it: &mut T, times: usize) -> usize {
+    let mut seen: usize = 0
+    let mut i: usize = 0
+    while i < times {
+        match it.next() {
+            Option::Some(_) => seen = seen + 1,
+            Option::None => return seen,
+        }
+        i = i + 1
+    }
+    return seen
+}
+
+// Sums at most `times` items.
+fn iterate_sum<T: Iterator<i64>>(it: &mut T, times: usize) -> i64 {
+    let mut sum: i64 = 0
+    let mut i: usize = 0
+    while i < times {
+        match it.next() {
+            Option::Some(v) => sum = sum + v,
+            Option::None => return sum,
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+// Collects at most `times` items into a `Vec<i64>`.
+fn iterate_collect<T: Iterator<i64>>(it: &mut T, times: usize) -> Vec<i64> {
+    let mut out = Vec::new()
+    let mut i: usize = 0
+    while i < times {
+        match it.next() {
+            Option::Some(v) => out = out.push(v),
+            Option::None => return out,
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Sums at most `times` items and reports how many it consumed, in one pass.
+//
+// The count comes back as a second value in a `Vec` because a tuple return is
+// not dependable yet; index 0 is the sum, index 1 the count.
+fn iterate_sum_and_count<T: Iterator<i64>>(it: &mut T, times: usize) -> Vec<i64> {
+    let mut sum: i64 = 0
+    let mut seen: usize = 0
+    let mut i: usize = 0
+    while i < times {
+        let item = it.next()
+        if item.is_some() {
+            sum = sum + item.unwrap_or(0i64)
+            seen = seen + 1
+        } else {
+            i = times
+        }
+        i = i + 1
+    }
+    let mut out = Vec::new()
+    out = out.push(sum)
+    out = out.push(seen as i64)
+    return out
+}

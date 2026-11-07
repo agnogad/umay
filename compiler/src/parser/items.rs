@@ -272,6 +272,7 @@ impl Parser {
         if !self.eat(&TokenKind::Lt) {
             return out;
         }
+        self.split_closing_angles();
         while !self.at(&TokenKind::Gt) {
             if self.at_eof() {
                 break;
@@ -730,7 +731,8 @@ impl Parser {
             let mut args = Vec::new();
             if self.at(&TokenKind::Lt) {
                 self.advance();
-                while !self.at(&TokenKind::Gt) {
+                self.split_closing_angles();
+        while !self.at(&TokenKind::Gt) {
                     if self.at_eof() {
                         break;
                     }
@@ -767,7 +769,8 @@ impl Parser {
             let mut args = Vec::new();
             if self.at(&TokenKind::Lt) {
                 self.advance();
-                while !self.at(&TokenKind::Gt) {
+                self.split_closing_angles();
+        while !self.at(&TokenKind::Gt) {
                     if self.at_eof() {
                         break;
                     }

@@ -108,6 +108,7 @@ impl<'a> Checker<'a> {
                     self.hir.traits.push(TraitInfo {
                         name: t.name.clone(),
                         span: t.name_span,
+                        generics: t.generics.iter().map(|g| g.name.clone()).collect(),
                         methods: Vec::new(),
                     });
                 }
@@ -365,6 +366,22 @@ impl<'a> Checker<'a> {
     ) {
         let mut generics: Vec<String> = outer_generics.to_vec();
         generics.extend(f.generics.iter().map(|g| g.name.clone()));
+        // A bound is what lets a method be called on a parameter at all, so it
+        // is recorded where the parameter is declared rather than at the call.
+        let bound_scope: Vec<String> = generics.clone();
+        for g in &f.generics {
+            for bound in &g.bounds {
+                if let Some(seg) = bound.segments.last() {
+                    let name = seg.name.clone();
+                    let args: Vec<TyId> =
+                        seg.args.iter().map(|a| self.resolve_type(a, &bound_scope)).collect();
+                    let entry = crate::types::ParamBound { param: g.name.clone(), args, trait_name: name };
+                    if !self.cx.param_bounds.iter().any(|b| b.param == entry.param && b.trait_name == entry.trait_name) {
+                        self.cx.param_bounds.push(entry);
+                    }
+                }
+            }
+        }
         let mut params = Vec::new();
         // `self` receiver becomes parameter 0.
         let mut has_self = false;

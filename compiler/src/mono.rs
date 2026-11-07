@@ -62,6 +62,17 @@ pub struct Mono<'t> {
     impl_generics: HashMap<FnId, Vec<String>>,
     /// Next free function id.
     next_id: u32,
+    /// `(type name, method name)` to the function that implements it.
+    ///
+    /// Kept here so that a `TraitMethodCall` on a generic parameter can be
+    /// resolved once monomorphisation knows the parameter's real type: the trait
+    /// bound promised the method exists, and this is where it is found.
+    methods: HashMap<(String, String), FnId>,
+    /// Each struct or enum's name, keyed by definition id.
+    def_names: HashMap<crate::types::DefId, String>,
+    /// Trait method calls whose receiver never became a concrete type, as
+    /// `(trait, method, span)`. Reported rather than dropped.
+    pub unresolved_trait_calls: Vec<(String, String, crate::source::Span)>,
 }
 
 impl<'t> Mono<'t> {
@@ -102,7 +113,30 @@ impl<'t> Mono<'t> {
                 }
             }
         }
-        Mono { types, worklist: Vec::new(), produced: Default::default(), decl_generics, impl_generics, next_id }
+        let mut methods = HashMap::new();
+        for f in &hir.fns {
+            if let Some(owner) = &f.owner {
+                methods.insert((owner.clone(), f.name.clone()), f.id);
+            }
+        }
+        let mut def_names = HashMap::new();
+        for s in &hir.structs {
+            def_names.insert(s.def_id, s.name.clone());
+        }
+        for e in &hir.enums {
+            def_names.insert(e.def_id, e.name.clone());
+        }
+        Mono {
+            types,
+            worklist: Vec::new(),
+            produced: Default::default(),
+            decl_generics,
+            impl_generics,
+            next_id,
+            methods,
+            def_names,
+            unresolved_trait_calls: Vec::new(),
+        }
     }
 
     /// True when `f` needs an instantiation before it can be compiled.
@@ -140,14 +174,14 @@ impl<'t> Mono<'t> {
     fn resolve(&mut self, hir: &mut Hir) {
         let count = hir.fns.len();
         for i in 0..count {
-            let mut rw = Rewriter { mono: self, hir, collect: false };
+            let mut rw = Rewriter { mono: self, hir, collect: false, in_template: false };
             rw.rewrite_fn(i);
         }
     }
 
     /// Records the instances `hir.fns[index]` needs, without rewriting anything.
     fn collect_fn(&mut self, hir: &mut Hir, index: usize) {
-        let mut rw = Rewriter { mono: self, hir, collect: true };
+        let mut rw = Rewriter { mono: self, hir, collect: true, in_template: false };
         rw.rewrite_fn(index);
     }
 
@@ -161,11 +195,7 @@ impl<'t> Mono<'t> {
         let names = self.decl_generics.get(&callee)?;
         let mut subst: Vec<Option<TyId>> = vec![None; names.len()];
         for (p, a) in param_tys.iter().zip(arg_tys.iter()) {
-            let TyKind::Param { name } = self.types.kind(*p).clone() else { continue };
-            let Some(pos) = names.iter().position(|n| *n == name) else { continue };
-            if subst[pos].is_none() {
-                subst[pos] = Some(*a);
-            }
+            unify_param(self.types, *p, *a, &names, &mut subst);
         }
         subst.into_iter().collect()
     }
@@ -286,6 +316,52 @@ fn mangled(name: &str, args: &[u32]) -> String {
 }
 
 /// Strips every reference and pointer from `ty`.
+/// Fills `subst` in from one declared/actual type pair.
+///
+/// The walk goes through references, raw pointers and ADT arguments, because a
+/// parameter is rarely the bare parameter: `fn total<T>(it: &mut T, ..)` declares
+/// `&mut T`, and matching only the outermost `Param` would leave `T` unknown and
+/// instantiate it as nothing at all.
+fn unify_param(
+    types: &TyCtxt,
+    declared: TyId,
+    actual: TyId,
+    names: &[String],
+    subst: &mut [Option<TyId>],
+) {
+    match (types.kind(declared).clone(), types.kind(actual).clone()) {
+        (TyKind::Param { name }, _) => {
+            if let Some(pos) = names.iter().position(|n| *n == name) {
+                if subst[pos].is_none() {
+                    subst[pos] = Some(actual);
+                }
+            }
+        }
+        (TyKind::Ref(d), TyKind::Ref(a))
+        | (TyKind::RefMut(d), TyKind::RefMut(a))
+        | (TyKind::RawPtr(d), TyKind::RawPtr(a))
+        | (TyKind::RawPtrMut(d), TyKind::RawPtrMut(a))
+        | (TyKind::Slice(d), TyKind::Slice(a)) => unify_param(types, d, a, names, subst),
+        // A reference and a value of the same shape line up too: a call may pass
+        // `T` where `&T` is declared once auto-borrow has done its work.
+        (TyKind::Ref(d), _) | (TyKind::RefMut(d), _) => unify_param(types, d, actual, names, subst),
+        (TyKind::Adt { def: d1, args: d_args }, TyKind::Adt { def: d2, args: a_args }) if d1 == d2 => {
+            for (d, a) in d_args.iter().zip(a_args.iter()) {
+                unify_param(types, *d, *a, names, subst);
+            }
+        }
+        (TyKind::Array { elem: d, .. }, TyKind::Array { elem: a, .. }) => {
+            unify_param(types, d, a, names, subst)
+        }
+        (TyKind::Tuple(ds), TyKind::Tuple(as_)) => {
+            for (d, a) in ds.iter().zip(as_.iter()) {
+                unify_param(types, *d, *a, names, subst);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn peel_refs(types: &TyCtxt, ty: TyId) -> TyId {
     let mut cur = ty;
     loop {
@@ -304,16 +380,25 @@ struct Rewriter<'m, 't, 'h> {
     /// Phase one when true: record the instances a call site needs but leave the
     /// tree alone. Phase two when false: point the call site at its copy.
     collect: bool,
+    /// True while walking a generic template. Its body names parameters, so a
+    /// construct that needs a concrete type cannot be resolved here; the copies
+    /// are where it becomes resolvable, and they are walked separately.
+    in_template: bool,
 }
 
 impl<'m, 't, 'h> Rewriter<'m, 't, 'h> {
     /// Visits every expression in `hir.fns[index]`.
     fn rewrite_fn(&mut self, index: usize) {
+        let was_template = self.in_template;
+        if !self.hir.fns[index].generics.is_empty() {
+            self.in_template = true;
+        }
         let mut body = std::mem::take(&mut self.hir.fns[index].body);
         if let Some(body) = &mut body {
             self.rewrite_block(body);
         }
         self.hir.fns[index].body = body;
+        self.in_template = was_template;
     }
 
     fn rewrite_block(&mut self, block: &mut HirBlock) {
@@ -368,6 +453,41 @@ impl<'m, 't, 'h> Rewriter<'m, 't, 'h> {
                         if concrete != id {
                             callee.kind = HirExprKind::FnRef(concrete);
                         }
+                    }
+                }
+            }
+            HirExprKind::TraitMethodCall { receiver, trait_name, method, method_span, args } => {
+                self.rewrite_expr(receiver);
+                for a in args.iter_mut() {
+                    self.rewrite_expr(a);
+                }
+                // The receiver's type is concrete by now, so the bound can be
+                // cashed in: the trait promised the method, and the `impl` for the
+                // real type is the one that runs. Dispatch stays static.
+                let base = peel_refs(self.mono.types, receiver.ty);
+                let found = match self.mono.types.kind(base).clone() {
+                    TyKind::Adt { def, .. } => self
+                        .mono
+                        .def_names
+                        .get(&def)
+                        .and_then(|name| self.mono.methods.get(&(name.clone(), method.clone())).copied()),
+                    _ => None,
+                };
+                match found {
+                    Some(fn_id) => {
+                        e.kind = HirExprKind::MethodCall {
+                            receiver: Box::new((**receiver).clone()),
+                            method: fn_id,
+                            args: std::mem::take(args),
+                        };
+                    }
+                    None if self.in_template => {}
+                    None => {
+                        self.mono.unresolved_trait_calls.push((
+                            trait_name.clone(),
+                            method.clone(),
+                            *method_span,
+                        ));
                     }
                 }
             }
@@ -564,6 +684,12 @@ fn substitute_expr_types(types: &mut TyCtxt, e: &mut HirExpr, subst: &HashMap<St
         HirExprKind::PtrOffset { ptr, count } => {
             substitute_expr_types(types, ptr, subst);
             substitute_expr_types(types, count, subst);
+        }
+        HirExprKind::TraitMethodCall { receiver, args, .. } => {
+            substitute_expr_types(types, receiver, subst);
+            for a in args.iter_mut() {
+                substitute_expr_types(types, a, subst);
+            }
         }
         HirExprKind::Call { callee, args } => {
             substitute_expr_types(types, callee, subst);

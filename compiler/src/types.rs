@@ -94,11 +94,27 @@ pub enum TyKind {
 pub struct DefId(pub u32);
 
 /// Interner for types.
+/// One `T: Trait` bound, recorded so that a method called on `T` can be traced
+/// back to the trait that promises it.
+#[derive(Debug, Clone)]
+pub struct ParamBound {
+    pub param: String,
+    /// The trait's own type arguments, e.g. the `i64` in `T: Iterator<i64>`.
+    ///
+    /// A trait method's signature is written in terms of these, so without them
+    /// `next()` would return `Option<T>` where `Option<i64>` was meant.
+    pub args: Vec<TyId>,
+    pub trait_name: String,
+}
+
 pub struct TyCtxt {
     kinds: Vec<TyKind>,
     /// Deduplication table: a type's structure maps to its id.
     interned: HashMap<TyKind, TyId>,
     next_var: u32,
+    /// Every `T: Trait` bound seen in a declaration. A bound is not a type, so
+    /// it lives beside the type table rather than inside it; `.q`
+    pub param_bounds: Vec<ParamBound>,
 }
 
 impl Default for TyCtxt {
@@ -110,7 +126,7 @@ impl Default for TyCtxt {
 impl TyCtxt {
     /// Creates an interner pre-populated with every primitive type.
     pub fn new() -> Self {
-        let cx = TyCtxt { kinds: Vec::new(), interned: HashMap::new(), next_var: 0 };
+        let cx = TyCtxt { kinds: Vec::new(), interned: HashMap::new(), next_var: 0, param_bounds: Vec::new() };
         // The primitives are still interned normally; this just makes the
         // common handles cheap to obtain via the `prim` helpers.
         cx

@@ -39,9 +39,19 @@ pub struct Lowered {
 /// no size, so every body reaching this point is concrete. The instantiation
 /// appends copies to `hir`, which is why the HIR is taken by `&mut`.
 pub fn lower(hir: &mut Hir, types: &mut crate::types::TyCtxt) -> Lowered {
-    crate::mono::Mono::new(types, hir).run(hir);
+    let mut mono = crate::mono::Mono::new(types, hir);
+    mono.run(hir);
     let mut program = MirProgram::default();
     let mut errors: Vec<(String, Span)> = Vec::new();
+    // A trait method whose receiver never became concrete has no `impl` to run.
+    // Dropping it would leave the call out of the program entirely, so it is
+    // reported as a gap instead.
+    for (trait_name, method, span) in std::mem::take(&mut mono.unresolved_trait_calls) {
+        errors.push((
+            format!("trait method `{trait_name}::{method}` has no implementation for the receiver's type"),
+            span,
+        ));
+    }
     for f in hir.fns.iter() {
         // A generic declaration is a template, not a function: its body was
         // copied once per instantiation and no call can reach the original. It has

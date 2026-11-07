@@ -195,6 +195,8 @@ impl FnChecker<'_, '_> {
         // same way a struct literal does: `Option::Some(7)` is an `Option<i32>`.
         let mut inferred: std::collections::HashMap<String, crate::types::TyId> =
             std::collections::HashMap::new();
+        let mut literal_inferred: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         if !info.generics.is_empty() {
             let field_tys: Vec<crate::types::TyId> = match &variant.fields {
                 VariantFields::Tuple(tys) => tys.clone(),
@@ -214,6 +216,12 @@ impl FnChecker<'_, '_> {
                 } else if self.cx.cx.is_float_var(ty) {
                     ty = self.cx.cx.f64_ty();
                 }
+                // A bare literal is recorded but flagged so a hint can still
+                // overrule it: `Option::Some(1)` defaults to `i32`, and an
+                // annotation of `Option<i64>` is a better answer than the default.
+                if self.cx.cx.is_integer_var(a.ty) || self.cx.cx.is_float_var(a.ty) {
+                    literal_inferred.insert(name.clone());
+                }
                 inferred.entry(name).or_insert(ty);
             }
         }
@@ -232,12 +240,16 @@ impl FnChecker<'_, '_> {
         for (position, g) in info.generics.iter().enumerate() {
             // A parameter no payload mentions stays an error: guessing would pick
             // the wrong type silently, and an annotation is the way to say it.
-            match inferred.get(g).copied().or_else(|| {
-                // A hint only fills what inference left open, so a payload that
-                // names a different type is still an error rather than being
-                // silently overruled.
-                from_hint.get(position).copied()
-            }) {
+            let hinted = from_hint.get(position).copied();
+            let guess = inferred.get(g).copied();
+            // The annotation wins only over a defaulted literal; a payload with a
+            // concrete type is what the variant really is.
+            let chosen = match (hinted, guess) {
+                (Some(h), Some(_)) if literal_inferred.contains(g) => Some(h),
+                (_, Some(g0)) => Some(g0),
+                (h, None) => h,
+            };
+            match chosen {
                 Some(t) => ty_args.push(t),
                 None => {
                     self.push(
@@ -362,6 +374,54 @@ impl FnChecker<'_, '_> {
         }
 
         let recv_base = self.strip_refs(recv.ty);
+        // A method on a generic parameter has no `impl` block to name it: only
+        // `T: Counter` does. The call is recorded against the trait and resolved
+        // once monomorphisation knows what `T` is.
+        if let TyKind::Param { name } = self.cx.cx.kind(recv_base) {
+            let param = name.clone();
+            if let Some((trait_name, trait_args)) = self.bound_trait_of(&param, method) {
+                // The result type comes from the trait's own declaration, written
+                // in terms of the trait's parameters, so `T: Iterator<i64>` makes
+                // `next()` return `Option<i64>` rather than `Option<T>`.
+                let declared_ret = self
+                    .cx
+                    .hir
+                    .traits
+                    .iter()
+                    .find(|t| t.name == trait_name)
+                    .and_then(|t| t.methods.iter().find(|m| m.name == method))
+                    .map(|m| m.ret);
+                let ret = match declared_ret {
+                    Some(r) => {
+                        let names: Vec<String> = self
+                            .cx
+                            .hir
+                            .traits
+                            .iter()
+                            .find(|t| t.name == trait_name)
+                            .map(|t| t.generics.clone())
+                            .unwrap_or_default();
+                        let mut subst = std::collections::HashMap::new();
+                        for (n, t) in names.iter().zip(trait_args.iter()) {
+                            subst.insert(n.clone(), *t);
+                        }
+                        self.cx.cx.substitute(r, &subst)
+                    }
+                    None => self.cx.cx.error(),
+                };
+                return HirExpr {
+                    ty: ret,
+                    span,
+                    kind: HirExprKind::TraitMethodCall {
+                        receiver: Box::new(recv),
+                        trait_name,
+                        method: method.to_string(),
+                        method_span,
+                        args: arg_hirs,
+                    },
+                };
+            }
+        }
         let Some(type_name) = self.nominal_name(recv_base) else {
             if !self.cx.cx.is_error(recv.ty) {
                 let name = self.cx.ty_name(recv.ty);
@@ -537,6 +597,26 @@ impl FnChecker<'_, '_> {
     }
 
     /// The declared name of a struct or enum type.
+    /// The trait that gives the parameter `param` a method called `method`.
+    ///
+    /// A parameter may carry several bounds and a trait may declare several
+    /// methods, so the first `(bound, method)` pair that matches wins. When none
+    /// does, the caller falls through to its usual "no methods" diagnostic.
+    fn bound_trait_of(&self, param: &str, method: &str) -> Option<(String, Vec<TyId>)> {
+        for bound in &self.cx.cx.param_bounds {
+            if bound.param != param {
+                continue;
+            }
+            let Some(info) = self.cx.hir.traits.iter().find(|t| t.name == bound.trait_name) else {
+                continue;
+            };
+            if info.methods.iter().any(|m| m.name == method) {
+                return Some((bound.trait_name.clone(), bound.args.clone()));
+            }
+        }
+        return None;
+    }
+
     pub(crate) fn nominal_name(&self, ty: TyId) -> Option<String> {
         match self.cx.cx.kind(ty) {
             TyKind::Adt { def, .. } => Some(self.cx.hir.def_name(*def)),
@@ -803,6 +883,8 @@ impl FnChecker<'_, '_> {
         // which is what makes `Pair { a: 1, b: 2 }` one type and not two.
         let mut inferred: std::collections::HashMap<String, crate::types::TyId> =
             std::collections::HashMap::new();
+        let mut literal_inferred: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         if !info.generics.is_empty() {
             for f in fields {
                 let Some(value_ast) = &f.value else { continue };

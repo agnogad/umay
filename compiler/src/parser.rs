@@ -103,6 +103,28 @@ impl Parser {
         self.kind() == kind
     }
 
+    /// Splits a `>>` in two when a generic parameter list is being closed.
+    ///
+    /// The lexer makes `>>` one token because that is what a shift operator is,
+    /// and it cannot know that the same two characters also close two nested
+    /// generic lists: `Option<Vec<i64>>`. Before a `>` is consumed in a type or
+    /// generic-argument position, a `>>` is therefore taken apart, keeping the
+    /// second `>` as the next token.
+    fn split_closing_angles(&mut self) {
+        if !matches!(self.kind(), TokenKind::Shr) {
+            return;
+        }
+        let here = self.tokens[self.pos].clone();
+        let mut first = here.clone();
+        first.kind = TokenKind::Gt;
+        first.span = crate::source::Span::new(here.span.file, here.span.start, here.span.start + 1);
+        let mut second = here.clone();
+        second.kind = TokenKind::Gt;
+        second.span = crate::source::Span::new(here.span.file, here.span.start + 1, here.span.end);
+        self.tokens[self.pos] = first;
+        self.tokens.insert(self.pos + 1, second);
+    }
+
     fn at_keyword(&self, kw: Keyword) -> bool {
         matches!(self.kind(), TokenKind::Keyword(k) if *k == kw)
     }
@@ -163,6 +185,9 @@ impl Parser {
     }
 
     fn expect(&mut self, kind: TokenKind, code: &'static str, context: &str) -> Option<Span> {
+        if kind == TokenKind::Gt {
+            self.split_closing_angles();
+        }
         if self.at(&kind) {
             Some(self.advance().span)
         } else {
