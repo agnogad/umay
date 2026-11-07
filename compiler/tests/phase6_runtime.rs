@@ -2165,3 +2165,42 @@ fn main() -> i32 {
     assert_eq!(run.stdout, "42\n");
     assert_eq!(run.status, 0);
 }
+
+#[test]
+fn a_binding_of_a_two_parameter_result_calls_its_methods() {
+    // `pair` answers a `Pair<A, B>`. Settling `let p` to `Pair<i64, bool>` is one
+    // thing; the method call on it is another, because the method's instance is
+    // demanded only after the binding is settled. Nothing demanded it before, so
+    // the call site named a copy that did not exist and the link failed.
+    let run = build_and_run(
+        "two_param_methods",
+        r#"
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+impl<A, B> Pair<A, B> {
+    fn first(&self) -> A {
+        return self.a
+    }
+    fn second(&self) -> B {
+        return self.b
+    }
+}
+
+fn pair<A, B>(a: A, b: B) -> Pair<A, B> {
+    return Pair { a: a, b: b }
+}
+
+fn main() -> i32 {
+    let p = pair(7i64, true)
+    println_i64(p.first())
+    println_i64(if p.second() { 1 } else { 0 })
+    return 0
+}
+"#,
+    );
+    assert_eq!(run.stdout, "7\n1\n");
+    assert_eq!(run.status, 0);
+}

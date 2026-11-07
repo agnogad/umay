@@ -168,17 +168,36 @@ impl<'t> Mono<'t> {
         // practice one round is enough; the loop is here because a binding
         // settled by a later round would otherwise keep a stale call.
         let mut rounds = 0;
-        while self.settle_let_types(hir) {
-            rounds += 1;
-            if rounds > 8 {
-                break;
+        loop {
+            let settled = self.settle_let_types(hir);
+            // A settled binding makes a call site name an instance that no earlier
+            // pass could have seen: `let a = make(7i64)` settles to `B<i64>` only
+            // after `make`'s copy exists, so `a.get()` demands its method for the
+            // first time here. Demand before resolving again, or the call site is
+            // looked up in a table that has no entry for it.
+            let mut demanded = false;
+            {
+                let mut rw = Rewriter { mono: self, hir, collect: true, in_template: false };
+                for i in 0..rw.hir.fns.len() {
+                    rw.rewrite_fn(i);
+                }
+                demanded = !rw.mono.worklist.is_empty();
+            }
+            while let Some(instance) = self.worklist.pop() {
+                self.instantiate(hir, instance);
             }
             self.resolve(hir);
             // `resolve` walks every body again and records any instance it newly
-            // needs, so those copies have to be produced before the next round can
-            // point anything at them.
+            // needs, so those copies have to be produced too.
             while let Some(instance) = self.worklist.pop() {
                 self.instantiate(hir, instance);
+            }
+            if !settled && !demanded {
+                break;
+            }
+            rounds += 1;
+            if rounds > 8 {
+                break;
             }
         }
     }
@@ -349,11 +368,16 @@ impl<'t> Mono<'t> {
         if !self.is_generic(callee) {
             return Some(callee);
         }
-        // An argument that is still a parameter means this call was reached from
+        // An argument that *is* a parameter means this call was reached from
         // inside another generic body, not from code with a concrete type: it is
         // that template's own business and produces no instance. Recording it
         // would create a copy whose `T` is another `T`, which no caller can use.
-        if args.iter().any(|a| self.types.first_param(*a).is_some()) {
+        //
+        // The argument is asked about on its own, not through `first_param`: a
+        // `Pair<A, B>` built from two parameters is still the one instance `Pair`
+        // of them, and asking whether a parameter appears anywhere inside would
+        // refuse it along with the bare `T` this rule is about.
+        if args.iter().any(|a| matches!(self.types.kind(*a), TyKind::Param { .. })) {
             return None;
         }
         let instance = Instance::new(callee, args.to_vec());
@@ -633,6 +657,20 @@ impl<'m, 't, 'h> Rewriter<'m, 't, 'h> {
                 if let Some(concrete) = resolved {
                     if concrete != *method {
                         *method = concrete;
+                    }
+                }
+                // The call's own type is written in terms of the `impl`'s
+                // parameters: `fn second(&self) -> B` records a bare `B`, which
+                // the binding it initialises would then keep, and a parameter
+                // nothing resolved has no size. Substituting the instance's
+                // arguments is what turns it into the `bool` the copy answers.
+                if let Some(names) = self.mono.impl_generics.get(method).cloned() {
+                    if names.len() == instance_args.len() {
+                        let subst: std::collections::HashMap<String, TyId> = names
+                            .into_iter()
+                            .zip(instance_args.iter().copied())
+                            .collect();
+                        e.ty = self.mono.types.substitute(e.ty, &subst);
                     }
                 }
             }
@@ -1092,7 +1130,12 @@ fn settle_binding(types: &mut TyCtxt, ty: TyId, init: TyId, hint: Option<TyId>) 
         return ty;
     }
     // A parameter with no structure around it is the one `fn id<T>(v: T) -> T`
-    // answers with, and the value itself is the answer.
+    // answers with, and the value itself is the answer. A method that answers the
+    // parameter of its `impl` -- `fn second(&self) -> B` -- is the same case: the
+    // call's recorded type is the template's `B`, and the copy it resolved to
+    // answers a `bool`, because the `impl`'s arguments are what `B` stands for.
+    // The declared result type is no help there, so the resolved copy's own is
+    // asked instead.
     if matches!(types.kind(ty), TyKind::Param { .. }) && !mentions_unresolved_param(types, init) {
         return init;
     }

@@ -312,10 +312,10 @@ Measured against a working router probe, in the order the gaps bite:
   primitives, `String`, `Bytes`, `Vec<T: Send>`, `Option<T: Send>`.
 - [x] Turbofish (`f::<i64>(..)`, `B::<i64> { .. }`). An explicit argument list
   also outranks what a struct literal's fields would infer.
-- [ ] A generic function whose return type names its parameter *inside* another
-  type (`fn make<T>(v: T) -> B<T>`) cannot be bound with `let`: the binding keeps
-  a `B` with no argument, which has no size, so the function is `E3001`. Passing
-  the result straight through works.
+- [x] A generic function whose return type names its parameter *inside* another
+  type (`fn make<T>(v: T) -> B<T>`) can be bound with `let`. The binding takes
+  the initialiser's concrete type, and a method call on it adopts that type's
+  arguments, so `make(7i64).get()` and `let a = make(7i64)` both work.
 - [x] A function used as a value is an address. `f as *const u8` needs
   `unsafe`, and calling through a `*const fn(..)` is an indirect call. Both had
   to work for a thread's entry point to be passed at all; neither did, so a
