@@ -96,6 +96,14 @@ reads source text except the lexer. No stage after HIR depends on syntax shape.
 | `linker` | Assembly → executable via `as` and `cc` | implement a linker front-end |
 | `build` | Incremental driver, cache keys | create project-local targets |
 | `runtime` (Phase 6) | `runtime/runtime.um`, embedded with `include_str!` and compiled into every program | be written in anything but UMAY |
+| `prelude` (Phase 6) | `stdlib/prelude.um` and the library files after it, concatenated at compile time and parsed with every program | special-case a name the checker would not resolve itself |
+
+The prelude is not a list of compiler built-ins. Its items go through the same
+parser, the same checker and the same backend as user code, so a call to
+`println` is an ordinary call to an ordinary function that happens to be
+compiled in. `prelude::with_prelude` puts its items in front of the program's, and
+`codegen_source_without_prelude` compiles the runtime on its own so the runtime's
+own `extern fn` declarations are not defined twice.
 
 Dependency direction is strictly downward in this table. `diagnostics` is a leaf
 so that every phase can emit diagnostics without depending on higher phases.

@@ -25,35 +25,40 @@ fn main() {
 ## Status
 
 UMAY is under active development. This repository currently contains **Phases 0
-through 5** of the roadmap and the runtime half of Phase 6: a complete lexer,
-parser and semantic analyser with the AI-first diagnostics infrastructure, a full
-HIR → MIR lowering with explicit control flow and drop elaboration, an ownership
-and borrow checker running on that MIR, and a custom x86_64 backend.
+through 5** of the roadmap and both steps of Phase 6 as far as `String`: a
+complete lexer, parser and semantic analyser with the AI-first diagnostics
+infrastructure, a full HIR → MIR lowering with explicit control flow and drop
+elaboration, an ownership and borrow checker running on that MIR, and a custom
+x86_64 backend.
 `umay build` produces a working Linux executable, `umay run` builds and runs it,
 and `umay asm` prints the generated assembly. The MIR can be inspected with
 `umay mir <file>`.
 
-Every program is linked against a runtime written in UMAY itself, so programs can
-allocate, print and format integers rather than only returning an exit status:
+Every program is linked against a runtime written in UMAY itself, and the prelude
+and the first library types are UMAY source too, so a program can print, allocate
+and build strings without importing anything:
 
 ```umay
-extern fn println(s: *const u8) -> ()
-extern fn println_i64(v: i64) -> ()
-extern fn alloc(n: usize) -> *mut u8
-extern fn dealloc(p: *mut u8) -> ()
-
 fn main() -> i32 {
-    println("merhaba" as *const u8)
+    println("merhaba")
     println_i64(42)
-    let buf = alloc(64)
-    dealloc(buf)
+
+    let mut s = String::new()
+    let mut i = 0
+    while i < 5 {
+        s = s.push(65 + i as u8)
+        i = i + 1
+    }
+    println(s.as_ptr())
     return 0
 }
 ```
 
 The runtime is UMAY source compiled with each program, not a binary blob, and
 assumes only `malloc`, `free`, `write` and `exit` from C. See
-[ADR 0010](docs/adr/0010-runtime-in-umay.md).
+[ADR 0010](docs/adr/0010-runtime-in-umay.md). `String` lives in
+`stdlib/string.um` and is compiled into every program by the same path, which is
+why it is checked, borrowed and code-generated exactly like user code.
 
 The backend is UMAY's own — no LLVM, no Cranelift. It covers integer
 arithmetic, control flow, structs, function calls and recursion, and is
@@ -69,7 +74,7 @@ reported as `E3001` rather than miscompiled; see
 | 3 | HIR and MIR | **complete** |
 | 4 | Ownership and borrow checking | **complete** |
 | 5 | Custom x86_64 backend | **complete** |
-| 6 | Runtime and standard library | **runtime done, library in progress** |
+| 6 | Runtime and standard library | **runtime and `String` done, `Vec<T>` blocked on generics** |
 | 7 | AI developer experience | not started |
 | 8 | Build system and packages | not started |
 | 9 | Stabilization | not started |

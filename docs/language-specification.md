@@ -321,6 +321,51 @@ Rules enforced in Phase 2:
 - generic parameters must be declared before use,
 - `where` clauses exist syntactically; bounds checking lands with traits.
 
+### 8.4 The prelude and the standard library
+
+Names in the prelude are available in every program without an import. The
+prelude is UMAY source (`stdlib/prelude.um`) compiled with the program, not a set
+of compiler built-ins, so its functions are checked, borrowed and generated the
+same way as code you write.
+
+| Name | Signature | Meaning |
+|------|-----------|---------|
+| `print` | `fn print(s: *const u8)` | writes bytes, no newline |
+| `println` | `fn println(s: *const u8)` | writes bytes and a newline |
+| `eprintln` | `fn eprintln(s: *const u8)` | the same, to standard error |
+| `println_i64` | `fn println_i64(v: i64)` | writes a decimal integer and a newline |
+| `byte_len` | `fn byte_len(s: *const u8) -> usize` | bytes before the terminating zero |
+| `alloc` | `fn alloc(bytes: usize) -> *mut u8` | allocates, aborting if it cannot |
+| `dealloc` | `fn dealloc(ptr: *mut u8)` | releases an `alloc` block |
+| `read_byte` | `fn read_byte(ptr: *const u8) -> u8` | reads one byte |
+| `write_byte` | `fn write_byte(ptr: *mut u8, value: u8)` | writes one byte |
+| `panic` | `fn panic(message: *const u8)` | prints and exits with status 101 |
+
+A `&str` is accepted wherever `*const u8` is expected, so `println("text")` needs
+no cast.
+
+`String` (`stdlib/string.um`) is the first library type: an owned, growable
+sequence of bytes held as a pointer, a length and a capacity.
+
+| Method | Signature | Meaning |
+|--------|-----------|---------|
+| `new` | `fn new() -> String` | empty, owns nothing |
+| `from_str` | `fn from_str(text: *const u8) -> String` | copies the bytes of `text` |
+| `len` | `fn len(&self) -> usize` | bytes held |
+| `is_empty` | `fn is_empty(&self) -> bool` | `len() == 0` |
+| `as_ptr` | `fn as_ptr(&self) -> *const u8` | NUL-terminated bytes |
+| `push` | `fn push(self, byte: u8) -> String` | appends one byte |
+| `push_str` | `fn push_str(self, text: *const u8) -> String` | appends every byte of `text` |
+
+Methods that change a string take `self` by value and return the new value, so
+`let s = s.push(65)` is the way to grow one; the old value is moved and gone.
+Growth doubles, and a terminator is kept one past the last byte so the buffer can
+be handed to the printers directly. Lengths count bytes, never characters.
+
+`Vec<T>` is not available yet: generic instantiation is not implemented, so a
+generic struct cannot yet infer its arguments at a literal or return its
+parameter type from a method.
+
 ---
 
 ## 9. Memory model (summary)
