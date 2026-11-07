@@ -25,7 +25,7 @@ fn main() {
 ## Status
 
 UMAY is under active development. This repository currently contains **Phases 0
-through 5** of the roadmap and both steps of Phase 6 as far as `String`: a
+through 5** of the roadmap and Phase 6 as far as the file layer: a
 complete lexer, parser and semantic analyser with the AI-first diagnostics
 infrastructure, a full HIR → MIR lowering with explicit control flow and drop
 elaboration, an ownership and borrow checker running on that MIR, and a custom
@@ -36,7 +36,7 @@ and `umay asm` prints the generated assembly. The MIR can be inspected with
 
 Every program is linked against a runtime written in UMAY itself, and the prelude
 and the first library types are UMAY source too, so a program can print, allocate
-and build strings without importing anything:
+build strings and read and write files without importing anything:
 
 ```umay
 fn main() -> i32 {
@@ -50,12 +50,18 @@ fn main() -> i32 {
         i = i + 1
     }
     println(s.as_ptr())
+
+    let text = "merhaba, dosya\n"
+    if write_file_bytes("not.txt" as *const u8, text as *const u8, byte_len(text)) {
+        println_i64(file_size("not.txt" as *const u8))
+    }
     return 0
 }
 ```
 
 The runtime is UMAY source compiled with each program, not a binary blob, and
-assumes only `malloc`, `free`, `write` and `exit` from C. See
+assumes only the POSIX calls it declares itself — `malloc`, `free`, `write`,
+`exit`, `open`, `read`, `close`, `unlink`, `rename` and `mkdir`. See
 [ADR 0010](docs/adr/0010-runtime-in-umay.md). `String` lives in
 `stdlib/string.um` and is compiled into every program by the same path, which is
 why it is checked, borrowed and code-generated exactly like user code.

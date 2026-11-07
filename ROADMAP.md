@@ -245,10 +245,31 @@ resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
   receiver, which is how a constructor is written. A generic type's associated
   function takes its instance from the binding's annotation.
 
+- [x] `fs` in `stdlib/fs.um` — `File::open_read`, `create`, `append`, `read`,
+  `write`, `write_str`, `close`, `is_open`, `fd`; free functions
+  `read_file_bytes`, `write_file_bytes`, `file_size`, `file_exists`,
+  `remove_file`, `rename_path`, `create_dir`. A missing file yields a closed
+  `File` and a size of `-1` rather than an abort. A short write is retried until
+  the whole buffer is out or an error comes back.
 - [ ] `Option`, `Result`, `Iterator` basics.
-- [ ] `fs`: read, write, open, metadata.
 - [ ] `process`: exit codes, arguments.
 - [ ] `net`: TCP basics, only once the memory model is stable.
+
+Wiring up `fs` exposed three defects that had nothing to do with files:
+
+- A method's symbol was its bare name, so `File::read` took over the C function
+  `read` at link time and the first call to it crashed. A method's symbol now
+  carries its type's name, and the machine function takes that symbol instead of
+  the body's plain name.
+- Structs and enums drew `DefId`s from separate counters. With enough
+  declarations a struct and an enum shared an id, and since a size and a layout
+  are looked up by that id alone, `sizeof` and every aggregate copy then read the
+  wrong type — an `Option<i64>` came back as five bytes. Both draw from one
+  counter now.
+- `sizeof` of a generic enum left the type parameter unsubstituted and ignored
+  the tag, reporting `sizeof(Option<i64>)` as `5` instead of `16`.
+- A C variadic call now sets `%al` to the vector-register count, as the SysV ABI
+  requires; `open` was reading whatever happened to be in it.
 
 Writing `String` exposed three more backend miscompilations and two front-end
 gaps, all now fixed and covered by tests:
