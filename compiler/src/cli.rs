@@ -547,22 +547,32 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     // backend stops at text deliberately, so that it never has to encode a
     // relocation itself.
     let obj_path = dist.join(format!("{stem}.o"));
-    let status = std::process::Command::new("as")
-        .arg("--64")
-        .arg("-o")
-        .arg(&obj_path)
-        .arg(&asm_path)
-        .status();
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            eprintln!("umay: the assembler failed with {s}\n  generated assembly: {}", asm_path.display());
+    if let Err(code) = assemble(&asm_path, &obj_path) {
+        return code;
+    }
+
+    // The runtime is compiled the same way as the program: it is ordinary UMAY
+    // source, so there is no separate prebuilt library to keep in step with the
+    // compiler.
+    let runtime_asm = dist.join("umay_runtime.s");
+    let runtime_obj = dist.join("umay_runtime.o");
+    let runtime = match umayc::codegen_source("umay_runtime", umayc::RUNTIME_SOURCE, opts.opt_level) {
+        Ok(o) => o,
+        Err((diags, map)) => {
+            // A failure here is a compiler bug, not a problem with the user's
+            // program, so it says so instead of blaming the source.
+            let rendered = umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
+            eprint!("{rendered}");
+            eprintln!("umay: internal error: the runtime failed to compile");
             return exit::CODEGEN_ERROR;
         }
-        Err(e) => {
-            eprintln!("umay: cannot run `as`: {e}");
-            return exit::IO_ERROR;
-        }
+    };
+    if let Err(e) = std::fs::write(&runtime_asm, &runtime.assembly) {
+        eprintln!("umay: cannot write `{}`: {e}", runtime_asm.display());
+        return exit::IO_ERROR;
+    }
+    if let Err(code) = assemble(&runtime_asm, &runtime_obj) {
+        return code;
     }
 
     // Link with the C compiler driver, which knows where the C library and crt
@@ -571,6 +581,7 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         .arg("-o")
         .arg(&exe_path)
         .arg(&obj_path)
+        .arg(&runtime_obj)
         .arg("-no-pie")
         .status();
     match status {
@@ -642,6 +653,30 @@ fn cmd_asm(args: &[String]) -> u8 {
             let rendered = umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
             eprint!("{rendered}");
             exit::COMPILE_ERROR
+        }
+    }
+}
+
+/// Runs the assembler on one file, reporting a failure as an exit code.
+fn assemble(source: &Path, object: &Path) -> Result<(), u8> {
+    let status = std::process::Command::new("as")
+        .arg("--64")
+        .arg("-o")
+        .arg(object)
+        .arg(source)
+        .status();
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => {
+            eprintln!(
+                "umay: the assembler failed with {s}\n  generated assembly: {}",
+                source.display()
+            );
+            Err(exit::CODEGEN_ERROR)
+        }
+        Err(e) => {
+            eprintln!("umay: cannot run `as`: {e}");
+            Err(exit::IO_ERROR)
         }
     }
 }

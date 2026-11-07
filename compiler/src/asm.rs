@@ -14,9 +14,10 @@ use std::fmt::Write as _;
 /// Prints a whole function, including its prologue and epilogue.
 pub fn print_function(function: &MachineFunction, spill_bytes: u64, callee_saved: &[u8]) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "\n.globl {}", function.name);
-    let _ = writeln!(out, ".type {}, @function", function.name);
-    let _ = writeln!(out, "{}:", function.name);
+    let symbol = symbol_name(&function.name);
+    let _ = writeln!(out, "\n.globl {symbol}");
+    let _ = writeln!(out, ".type {symbol}, @function");
+    let _ = writeln!(out, "{symbol}:");
 
     // Prologue: establish the frame, then preserve the callee-saved registers
     // this function actually uses.
@@ -91,9 +92,9 @@ pub fn print_function(function: &MachineFunction, spill_bytes: u64, callee_saved
         for inst in &block.insts {
             // Labels are printed flush left; instructions indented.
             if let Inst::Label(label) = inst {
-                let _ = writeln!(out, ".L{}_{}:", function.name, label.0);
+                let _ = writeln!(out, ".L{}_{}:", symbol, label.0);
             } else {
-                let line = print_inst(inst, &function.name);
+                let line = print_inst(inst, &symbol);
                 if !line.is_empty() {
                     let _ = writeln!(out, "    {line}");
                 }
@@ -107,13 +108,13 @@ pub fn print_function(function: &MachineFunction, spill_bytes: u64, callee_saved
     // restores.
     // The epilogue label is numbered past every block label in the function, so
     // it cannot collide with one. See `Isel::epilogue_label`.
-    let _ = writeln!(out, ".L{}_{}:", function.name, function.block_count);
+    let _ = writeln!(out, ".L{}_{}:", symbol, function.block_count);
     for reg in callee_saved.iter().rev() {
         let _ = writeln!(out, "    popq %{}", register_name(*reg, RegWidth::W64));
     }
     let _ = writeln!(out, "    leave");
     let _ = writeln!(out, "    ret");
-    let _ = writeln!(out, ".size {}, .-{}", function.name, function.name);
+    let _ = writeln!(out, ".size {symbol}, .-{symbol}");
     out
 }
 
@@ -154,15 +155,31 @@ pub fn print_inst(inst: &Inst, function: &str) -> String {
         Inst::Pop(op) => format!("popq {}", op_str(op, RegWidth::W64)),
         Inst::Lea { src, dst } => format!("leaq {}, {}", mem_str(src, RegWidth::W64), op_str(dst, RegWidth::W64)),
         Inst::Load { kind, src, dst } => {
-            let width = match kind {
-                MoveKind::Move(w) | MoveKind::SignExtend { to: w, .. } | MoveKind::ZeroExtend { to: w, .. } => *w,
+            // An extending load names both widths, as in `movzbq`: source first.
+            // The register the value ends up in is the destination width; the
+            // width the memory is read at is the source width.
+            let (mnemonic, read, write) = match *kind {
+                // When no extension is needed the load is a plain move.
+                MoveKind::Move(w) => (format!("mov{}", w.suffix()), w, w),
+                MoveKind::SignExtend { from, to } if from == to => {
+                    (format!("mov{}", from.suffix()), from, to)
+                }
+                MoveKind::ZeroExtend { from, to } if from == to => {
+                    (format!("mov{}", from.suffix()), from, to)
+                }
+                // Writing a 32-bit register already clears the upper half, so
+                // `movl` is the zero-extending form for that case.
+                MoveKind::ZeroExtend { from: RegWidth::W32, to: RegWidth::W64 } => {
+                    ("movl".to_string(), RegWidth::W32, RegWidth::W32)
+                }
+                MoveKind::SignExtend { from, to } => {
+                    (format!("movs{}{}", from.suffix(), to.suffix()), from, to)
+                }
+                MoveKind::ZeroExtend { from, to } => {
+                    (format!("movz{}{}", from.suffix(), to.suffix()), from, to)
+                }
             };
-            let mnemonic = match kind {
-                MoveKind::Move(_) => format!("mov{}", width.suffix()),
-                MoveKind::SignExtend { .. } => format!("movs{}", width.suffix()),
-                MoveKind::ZeroExtend { .. } => format!("movz{}", width.suffix()),
-            };
-            format!("{mnemonic} {}, {}", mem_str(src, width), op_str(dst, width))
+            format!("{mnemonic} {}, {}", mem_str(src, read), op_str(dst, write))
         }
         Inst::Store { kind, src, dst } => {
             let width = match kind {
@@ -265,4 +282,27 @@ fn register_name_of(reg: Reg) -> String {
         Reg::Phys(code) => reg_name(code).to_string(),
         Reg::Virtual(v) => format!("!v{v}"),
     }
+}
+
+/// Turns a UMAY-level name into something the assembler accepts.
+///
+/// Ordinary function names are already valid, and keeping them unchanged means
+/// diagnostics, stack traces and the linker all agree. A constant body is named
+/// `const NAME` for the MIR printer's benefit, which is not a legal symbol, so
+/// the space becomes an underscore and the two words are joined.
+pub fn symbol_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 5);
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || (ch == '.' && i > 0) {
+            out.push(ch);
+        } else if ch == ' ' {
+            out.push('_');
+        } else {
+            out.push('_');
+        }
+    }
+    if out.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true) {
+        out.insert_str(0, "umay_");
+    }
+    out
 }

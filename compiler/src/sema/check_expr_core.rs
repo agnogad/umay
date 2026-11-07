@@ -16,7 +16,8 @@ impl FnChecker<'_, '_> {
             ast::ExprKind::IntLit { value, suffix } => self.check_int_lit(*value, *suffix, span),
             ast::ExprKind::FloatLit { value, suffix, .. } => self.check_float_lit(*value, *suffix, span),
             ast::ExprKind::StrLit(s) => {
-                let ty = self.cx.cx.str_();
+                // A string literal is a `&str`: borrowing a static buffer.
+                let ty = self.cx.cx.str_ref();
                 HirExpr { kind: HirExprKind::StrLit(s.clone()), ty, span }
             }
             ast::ExprKind::StrInterp(parts) => self.check_str_interp(parts, span),

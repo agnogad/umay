@@ -400,6 +400,10 @@ fn locals_in_rvalue(value: &Rvalue) -> Vec<LocalId> {
             scan(lhs, &mut out);
             scan(rhs, &mut out);
         }
+        Rvalue::PtrOffset { ptr, count } => {
+            scan(ptr, &mut out);
+            scan(count, &mut out);
+        }
         Rvalue::Unary { operand, .. } | Rvalue::Cast { operand, .. } | Rvalue::PtrToInt(operand) => {
             scan(operand, &mut out)
         }

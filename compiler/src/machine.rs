@@ -58,6 +58,15 @@ pub const ALLOCATABLE: [u8; 12] = [
 /// Registers a call may clobber, in SysV order.
 pub const CALLER_SAVED: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
 
+/// A register the allocator never hands out, for scratch use inside a single
+/// rewritten instruction.
+///
+/// It must not be allocatable: the rewrite that needs it runs *after*
+/// allocation, so if a value were already living there the scratch use would
+/// silently destroy it. `r11` is caller-saved and is not otherwise used, so
+/// clobbering it cannot surprise anything.
+pub const SCRATCH: u8 = 11;
+
 pub fn reg_name(code: u8) -> &'static str {
     match code {
         0 => "rax",
@@ -436,6 +445,31 @@ impl Inst {
             }
             Inst::Jmp(_) | Inst::Jcc { .. } | Inst::Ret | Inst::SignExtendAcc { .. } | Inst::Label(_)
             | Inst::Comment(_) => {}
+        }
+        out.retain(|r| r.is_virtual());
+        out
+    }
+
+    /// Every register this instruction reads as part of an address.
+    ///
+    /// These cannot be spilled: turning one into a stack slot would need an
+    /// extra load before the access, and the selector does not emit one.
+    pub fn address_registers(&self) -> Vec<Reg> {
+        let mut out = Vec::new();
+        let from_mem = |m: &Mem, out: &mut Vec<Reg>| {
+            if let Some(b) = m.base {
+                out.push(b);
+            }
+            if let Some((i, _)) = m.index {
+                out.push(i);
+            }
+        };
+        match self {
+            Inst::Move { dst: Operand::Mem(m), .. }
+            | Inst::Load { src: m, .. }
+            | Inst::Store { dst: m, .. }
+            | Inst::Lea { src: m, .. } => from_mem(m, &mut out),
+            _ => {}
         }
         out.retain(|r| r.is_virtual());
         out

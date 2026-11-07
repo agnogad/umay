@@ -268,6 +268,12 @@ fn substitute_constants(
         | Rvalue::Unary { operand: op, .. }
         | Rvalue::Cast { operand: op, .. }
         | Rvalue::PtrToInt(op) => sub(op, known),
+        // A pointer offset is not folded: its scaling depends on the pointee
+        // type, which this pass does not track.
+        Rvalue::PtrOffset { ptr, count } => {
+            sub(ptr, known);
+            sub(count, known);
+        }
         Rvalue::Binary { lhs, rhs, .. } => {
             sub(lhs, known);
             sub(rhs, known);
@@ -565,6 +571,10 @@ fn rewrite_operands(value: &mut Rvalue, resolved: &BTreeMap<LocalId, LocalId>) -
         | Rvalue::Unary { operand: op, .. }
         | Rvalue::Cast { operand: op, .. }
         | Rvalue::PtrToInt(op) => changed |= rewrite_operand(op, resolved),
+        Rvalue::PtrOffset { ptr, count } => {
+            changed |= rewrite_operand(ptr, resolved);
+            changed |= rewrite_operand(count, resolved);
+        }
         Rvalue::Binary { lhs, rhs, .. } => {
             changed |= rewrite_operand(lhs, resolved);
             changed |= rewrite_operand(rhs, resolved);
@@ -777,6 +787,10 @@ fn live_out_per_block(body: &Body, _types: &TyCtxt) -> Vec<BTreeSet<LocalId>> {
 fn rvalue_uses(value: &Rvalue) -> Vec<LocalId> {
     let mut out = Vec::new();
     match value {
+        Rvalue::PtrOffset { ptr, count } => {
+            out.extend(operand_uses(ptr));
+            out.extend(operand_uses(count));
+        }
         Rvalue::Use(op) | Rvalue::Unary { operand: op, .. } | Rvalue::Cast { operand: op, .. } | Rvalue::PtrToInt(op) => {
             out.extend(operand_uses(op))
         }
@@ -855,6 +869,10 @@ fn operands_of_block(block: &BasicBlock) -> Vec<&Operand> {
                 | Rvalue::Unary { operand: op, .. }
                 | Rvalue::Cast { operand: op, .. }
                 | Rvalue::PtrToInt(op) => out.push(op),
+                Rvalue::PtrOffset { ptr, count } => {
+                    out.push(ptr);
+                    out.push(count);
+                }
                 Rvalue::Binary { lhs, rhs, .. } => {
                     out.push(lhs);
                     out.push(rhs);

@@ -34,9 +34,16 @@ impl std::fmt::Display for CodegenError {
     }
 }
 
-/// Which functions each body belongs to, so a call target can be named.
-fn function_symbols(program: &MirProgram) -> HashMap<FnId, String> {
+/// Every function's assembly symbol, so a call target can be named.
+///
+/// This comes from the HIR rather than the MIR bodies because an `extern fn` has
+/// no body: it exists only as a declaration, and a call to it must name the
+/// symbol the C library provides (`puts`, `malloc`) rather than a placeholder.
+fn function_symbols(hir: &crate::hir::Hir, program: &MirProgram) -> HashMap<FnId, String> {
     let mut map = HashMap::new();
+    for f in &hir.fns {
+        map.insert(f.id, f.name.clone());
+    }
     for body in &program.bodies {
         if let Some(id) = body.fn_id {
             map.entry(id).or_insert_with(|| body.name.clone());
@@ -53,7 +60,7 @@ pub fn generate(
     types: &mut TyCtxt,
     hir: &crate::hir::Hir,
 ) -> Result<String, Vec<CodegenError>> {
-    let symbols = function_symbols(program);
+    let symbols = function_symbols(hir, program);
     let mut errors = Vec::new();
     let mut out = String::new();
     // Skip the prelude's own markers: they are bookkeeping for checking.

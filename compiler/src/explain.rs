@@ -163,6 +163,23 @@ pub static EXPLAIN: &[ExplainEntry] = &[
     e("E0191", "malformed module body", "An inline module body must be closed with `}`.", None),
     e("E0195", "expected a type alias name", "Type aliases are `type Name = Type`.", None),
     e("E0196", "type alias is missing `=`", "Type aliases are `type Name = Type`.", None),
+    e(
+        "E0197",
+        "an `extern fn` must not have a body",
+        "`extern fn` declares a symbol that already exists in another object or library. \
+         UMAY cannot compile a body for it, because the definition is not ours. \
+         Write the body as a normal function, or remove the body and let the \
+         definition come from the linked library.",
+        Some("extern fn puts(s: *const u8) -> i32"),
+    ),
+    e(
+        "E0198",
+        "a function without a body must be `extern`",
+        "A body is how UMAY produces code for a function. A function that has none is \
+         a declaration of something defined elsewhere, and that must be said \
+         explicitly by writing `extern` before `fn`.",
+        Some("extern fn puts(s: *const u8) -> i32"),
+    ),
     // ---- type syntax errors ----------------------------------------------
     e("E0220", "malformed array type", "Array types are `[T; N]` where `N` is a constant length.", Some("let buf: [u8; 64]")),
     e("E0221", "malformed slice type", "Slice types are `[T]` and almost always appear behind a reference: `&[T]`.", None),

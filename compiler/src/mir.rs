@@ -206,6 +206,11 @@ pub enum Rvalue {
     Len(Place),
     /// A raw pointer's address, for `as usize` on pointers.
     PtrToInt(Operand),
+    /// `ptr.offset(count)` — a pointer moved by whole elements.
+    ///
+    /// The count is in elements and the scaling by the pointee's size happens in
+    /// code generation, where the machine's addressing modes can do it for free.
+    PtrOffset { ptr: Operand, count: Operand },
 }
 
 #[derive(Debug, Clone, PartialEq)]

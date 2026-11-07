@@ -279,6 +279,10 @@ fn moves_in_rvalue(value: &Rvalue) -> Vec<MovePath> {
             push_move(lhs, &mut out);
             push_move(rhs, &mut out);
         }
+        Rvalue::PtrOffset { ptr, count } => {
+            push_move(ptr, &mut out);
+            push_move(count, &mut out);
+        }
         Rvalue::Unary { operand, .. } | Rvalue::Cast { operand, .. } | Rvalue::PtrToInt(operand) => {
             push_move(operand, &mut out)
         }
@@ -414,6 +418,10 @@ fn check_rvalue(
         Rvalue::Binary { lhs, rhs, .. } => {
             check_operand(lhs, state, body, types, span, diagnostics);
             check_operand(rhs, state, body, types, span, diagnostics);
+        }
+        Rvalue::PtrOffset { ptr, count } => {
+            check_operand(ptr, state, body, types, span, diagnostics);
+            check_operand(count, state, body, types, span, diagnostics);
         }
         Rvalue::Unary { operand, .. } | Rvalue::Cast { operand, .. } | Rvalue::PtrToInt(operand) => {
             check_operand(operand, state, body, types, span, diagnostics)

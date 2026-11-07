@@ -275,6 +275,13 @@ impl<'a, 't> Isel<'a, 't> {
     pub(crate) fn load_place_mem(&mut self, mem: &Mem, ty: TyId) -> Result<Reg, String> {
         let width = self.width(ty)?;
         let dst = self.vreg();
+        // The load happens at the value's own width. A narrower register write
+        // already clears the upper half, so a sub-word load is clean without an
+        // explicit extension. Sign or zero *extension* is a separate concern and
+        // belongs to `cast`, which knows both types: widening here would make
+        // every `i32` read out as a non-negative 64-bit value, so `-1i32` would
+        // come back as `4294967295` and any later sign-aware arithmetic would be
+        // wrong.
         self.emit(Inst::Load {
             kind: MoveKind::Move(width),
             src: mem.clone(),
@@ -303,6 +310,17 @@ impl<'a, 't> Isel<'a, 't> {
                 let mem = self.place_addr(place)?;
                 self.load_place_mem(&mem, ty)
             }
+            Operand::Constant(Constant::Str(id)) => {
+                // A `&str` is the address of a NUL-terminated buffer in
+                // `.rodata`. `lea` computes that address without reading memory.
+                let name = self.str_symbol(*id);
+                let dst = self.vreg();
+                self.emit(Inst::Lea {
+                    src: Mem::symbol(&name),
+                    dst: MOperand::Reg(dst),
+                });
+                Ok(dst)
+            }
             Operand::Constant(c) => {
                 let (value, ty) = constant_value(c)?;
                 let dst = self.vreg();
@@ -321,6 +339,11 @@ impl<'a, 't> Isel<'a, 't> {
     /// immediate, or directly a memory reference.
     pub(crate) fn operand(&mut self, op: &Operand) -> Result<MOperand, String> {
         match op {
+            Operand::Constant(Constant::Str(_)) => {
+                // A string is an address, so it needs a register even when an
+                // immediate would be accepted.
+                Ok(MOperand::Reg(self.operand_to_reg(op)?))
+            }
             Operand::Constant(c) => {
                 let (value, _) = constant_value(c)?;
                 Ok(MOperand::Imm(value))
@@ -351,6 +374,15 @@ impl<'a, 't> Isel<'a, 't> {
             };
         }
         ty
+    }
+
+    /// The assembly label of a string literal in the program's string table.
+    pub(crate) fn str_symbol(&mut self, id: StringId) -> String {
+        let name = format!(".Lstr_{}", id.0);
+        if !self.symbols.contains(&name) {
+            self.symbols.push(name.clone());
+        }
+        name
     }
 
     /// Stores `src` to a place, appending to `out` instead of the current block.

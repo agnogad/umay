@@ -40,9 +40,9 @@ pub fn lower(hir: &Hir, types: &mut crate::types::TyCtxt) -> Lowered {
     }
     // Constants are lowered into their own bodies so that the backend has one
     // uniform thing to compile.
-    for (index, c) in hir.consts.iter().enumerate() {
+    for c in hir.consts.iter() {
         let l = Lowering::new_const(hir, types, c, &mut program);
-        let mir = l.lower_const(index as u32);
+        let mir = l.lower_const(&c.value);
         program.bodies.push(mir);
     }
     Lowered { program }
@@ -276,13 +276,14 @@ impl<'a> Lowering<'a> {
         }
     }
 
-    fn lower_const(mut self, _index: u32) -> Body {
+    /// Lowers a constant's initialiser into its own body.
+    ///
+    /// A constant body takes no arguments and returns the value, so the backend
+    /// can treat it like any other function. Uses of the constant are calls to
+    /// it until a later pass inlines them.
+    fn lower_const(mut self, value: &HirExpr) -> Body {
         let start = self.current;
-        let out = self.lower_expr(&HirExpr {
-            kind: HirExprKind::Error,
-            ty: self.ret_ty,
-            span: self.span,
-        });
+        let out = self.lower_expr(value);
         self.assign(Place::local(self.ret_local), Rvalue::Use(out), self.span);
         self.terminate(Terminator::Return, start);
         Body {

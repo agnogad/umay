@@ -240,6 +240,13 @@ pub fn diagnostic_with_context(code: &'static str, span: source::Span, message: 
     d
 }
 
+/// The UMAY runtime, compiled with every program.
+///
+/// It is embedded in the binary rather than read from disk so that an installed
+/// compiler cannot be broken by a missing or edited runtime file: the runtime and
+/// the compiler that accepts it always ship together.
+pub const RUNTIME_SOURCE: &str = include_str!("../../runtime/runtime.um");
+
 /// Everything needed to generate code, or the diagnostics that prevent it.
 pub struct CodegenOutput {
     pub assembly: String,

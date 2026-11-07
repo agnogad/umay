@@ -185,6 +185,11 @@ fn print_rvalue(r: &Rvalue, types: &mut crate::types::TyCtxt, strings: &[String]
         Rvalue::Discriminant(p) => format!("discriminant({})", print_place(p)),
         Rvalue::Len(p) => format!("len({})", print_place(p)),
         Rvalue::PtrToInt(op) => format!("{} as ptr", print_operand(op, types, strings)),
+        Rvalue::PtrOffset { ptr, count } => format!(
+            "offset({}, {})",
+            print_operand(ptr, types, strings),
+            print_operand(count, types, strings)
+        ),
     }
 }
 

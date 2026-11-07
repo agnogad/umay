@@ -33,12 +33,33 @@ impl Parser {
             }
         }
         let pub_keyword = self.eat_keyword(Keyword::Pub);
+        // `extern fn name(...) -> T` declares a function implemented elsewhere.
+        // The keyword is required rather than inferred from a missing body, so
+        // that forgetting a body is reported instead of silently becoming a
+        // declaration of a symbol that does not exist.
+        let extern_span = if self.at_keyword(Keyword::Extern) {
+            let span = self.span();
+            self.advance();
+            Some(span)
+        } else {
+            None
+        };
+        let is_extern = extern_span.is_some();
 
         let item = match self.kind().clone() {
             TokenKind::Keyword(Keyword::Fn) => {
+                let fn_span = self.span();
                 self.advance();
-                let f = self.parse_fn_body(false)?;
+                let mut f = self.parse_fn_body(false)?;
+                f.is_extern = is_extern;
+                f.fn_span = fn_span;
+                f.extern_span = extern_span;
                 Item::Fn(f)
+            }
+            _ if is_extern => {
+                let span = self.span();
+                self.error("E0110", "`extern` must be followed by an `fn` declaration", span);
+                return None;
             }
             TokenKind::Keyword(Keyword::Struct) => {
                 self.advance();
@@ -212,6 +233,9 @@ impl Parser {
             ret,
             body,
             attrs: Vec::new(),
+            is_extern: false,
+            fn_span: name_span,
+            extern_span: None,
             span: name_span.to(end),
         })
     }
@@ -561,7 +585,22 @@ impl Parser {
             }
             TokenKind::Star => {
                 self.advance();
-                let mutable = self.eat_keyword(Keyword::Mut);
+                // `*mut T` and `*const T`. The qualifier is required: a bare `*T`
+                // would leave the pointer's mutability unstated, and the two forms
+                // print differently in diagnostics.
+                let mutable = if self.eat_keyword(Keyword::Mut) {
+                    true
+                } else if self.eat_keyword(Keyword::Const) {
+                    false
+                } else {
+                    let span = self.span();
+                    self.error(
+                        "E0224",
+                        "a raw pointer needs `mut` or `const`, as in `*mut u8`",
+                        span,
+                    );
+                    false
+                };
                 let inner = Box::new(self.parse_type());
                 let end = inner.span();
                 TypeExpr::Ptr { mutable, inner, span: start.to(end) }

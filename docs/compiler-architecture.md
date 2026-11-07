@@ -95,6 +95,7 @@ reads source text except the lexer. No stage after HIR depends on syntax shape.
 | `codegen` (Phase 5) | Driving the backend, one function at a time | be LLVM or Cranelift |
 | `linker` | Assembly → executable via `as` and `cc` | implement a linker front-end |
 | `build` | Incremental driver, cache keys | create project-local targets |
+| `runtime` (Phase 6) | `runtime/runtime.um`, embedded with `include_str!` and compiled into every program | be written in anything but UMAY |
 
 Dependency direction is strictly downward in this table. `diagnostics` is a leaf
 so that every phase can emit diagnostics without depending on higher phases.

@@ -318,6 +318,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 ast::Item::Fn(f) => {
+                    self.check_fn_decl_shape(f);
                     self.resolve_fn_signature(f, None);
                 }
                 ast::Item::Impl(block) => {
@@ -572,6 +573,13 @@ impl<'a> Checker<'a> {
             }
             (TyKind::Slice(e1), TyKind::Slice(e2)) => self.types_compatible(e1, e2),
             (TyKind::Ref(e1), TyKind::Ref(e2)) => self.types_compatible(e1, e2),
+            // A `*mut T` may be passed where a `*const T` is expected. Both are
+            // one address with the same layout, and the callee only gains the
+            // promise not to write, so no conversion is needed at the call; this
+            // is the same reasoning that lets the `as` cast work without
+            // `unsafe`.
+            (TyKind::RawPtr(e1), TyKind::RawPtr(e2)) => self.types_compatible(e1, e2),
+            (TyKind::RawPtr(e1), TyKind::RawPtrMut(e2)) => self.types_compatible(e1, e2),
             (TyKind::RefMut(e1), TyKind::RefMut(e2)) => self.types_compatible(e1, e2),
             (TyKind::Adt { def: d1, args: a1 }, TyKind::Adt { def: d2, args: a2 }) => {
                 d1 == d2
@@ -597,6 +605,37 @@ impl<'a> Checker<'a> {
     pub(crate) fn check_bodies(&mut self, program: &ast::Program) {
         let items = program.items.clone();
         self.check_bodies_in(&items);
+    }
+
+    /// Checks that a declaration's body and `extern` marker agree.
+    ///
+    /// A function with no body and no `extern` is almost always a forgotten body,
+    /// so it is reported rather than silently treated as a declaration of a
+    /// symbol that does not exist.
+    fn check_fn_decl_shape(&mut self, f: &ast::FnDecl) {
+        match (f.body.is_some(), f.is_extern) {
+            (true, true) => {
+                self.push(
+                    Diagnostic::error("E0197", format!("`extern fn {}` must not have a body", f.name))
+                        .at(f.name_span)
+                        .with_cause("an `extern` declaration promises the function exists elsewhere")
+                        .with_suggestion(Suggestion::new(
+                            "remove `extern`",
+                            f.extern_span.unwrap_or(f.fn_span),
+                            String::new(),
+                        )),
+                );
+            }
+            (false, false) => {
+                self.push(
+                    Diagnostic::error("E0198", format!("function `{}` has no body", f.name))
+                        .at(f.name_span)
+                        .with_cause("a function that is only meant to be called must be declared `extern`")
+                        .with_suggestion(Suggestion::new("insert `extern`", f.fn_span, "extern fn")),
+                );
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn check_bodies_in(&mut self, items: &[ast::Item]) {

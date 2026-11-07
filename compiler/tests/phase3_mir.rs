@@ -366,7 +366,10 @@ fn copy_types_are_never_dropped() {
 
 #[test]
 fn owned_types_are_dropped() {
-    let text = mir("fn f() { let s = \"hello\" }");
+    // A user struct owns its fields, so a `let` binding of one is dropped.
+    // This used to use a string literal, but a `&str` is a single pointer and
+    // therefore `Copy`, so nothing would be dropped.
+    let text = mir("struct P { x: i32 }\nfn f() { let p = P { x: 1 } }");
     assert_contains(body_of(&text, "f"), "drop(");
 }
 
@@ -387,14 +390,15 @@ fn f() { let p = P { x: 1 }  take(p) }
 #[test]
 fn early_return_drops_what_it_skips() {
     let src = r#"
+struct P { x: i32 }
 fn f(c: bool) {
-    let s = "owned"
+    let p = P { x: 1 }
     if c { return }
 }
 "#;
     let text = mir(src);
     let body = body_of(&text, "f");
-    // Each exit path drops `s` exactly once: the early `return` and the
+    // Each exit path drops `p` exactly once: the early `return` and the
     // implicit fall-off-the-end. The counts are per path, so two drop
     // instructions are expected, each in a different path's blocks.
     let drops = body

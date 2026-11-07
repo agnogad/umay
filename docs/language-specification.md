@@ -112,15 +112,26 @@ item     ::= attribute* 'pub'? ( fn_decl | struct_decl | enum_decl
 ### 4.1 Functions
 
 ```text
-fn_decl ::= 'fn' identifier generic_params? '(' param_list ')' ('->' type)? (block | ';')
+fn_decl ::= 'extern'? 'fn' identifier generic_params? '(' param_list ')' ('->' type)? (block | ';')
 param    ::= (identifier | '_') ':' type
 self_param ::= 'self' | '&' 'self' | '&' 'mut' 'self'
 ```
 
 - Parameter types are mandatory (§ type system: inference does not cross
   function boundaries).
-- A body is required for concrete functions; `;` declares an external
-  signature (used by `unsafe extern` bindings in later phases).
+- A body is required unless the function is `extern`. An `extern fn` binds the C
+  symbol of that exact name and has no body; a function without a body and
+  without `extern` is `E0113`, and an `extern fn` with a body is `E0112`.
+  `extern` carries no `unsafe`: the operations that make a call dangerous are the
+  ones written in `unsafe` blocks, and a declaration does not perform any.
+
+```umay
+extern fn malloc(size: usize) -> *mut u8
+extern fn write(fd: i32, buf: *const u8, count: usize) -> isize
+```
+
+`extern` is how the runtime reaches the operating system; the runtime itself is
+UMAY source (see [ADR 0010](adr/0010-runtime-in-umay.md)).
 
 ### 4.2 Structs
 
@@ -295,9 +306,17 @@ Composite types: `struct`, `enum`, tuples `(T1, T2)`, arrays `[T; N]`, slices
 function types `fn(A) -> B`, `impl Trait`, `dyn Trait`, `Option<T>`,
 `Result<T, E>`.
 
+A string literal has type `&str`: a pointer to NUL-terminated bytes. Strings are
+not pointer-and-length pairs, which is what lets one be handed to a C function
+without a conversion (see [ADR 0010](adr/0010-runtime-in-umay.md)).
+
 Rules enforced in Phase 2:
 - no implicit numeric conversion; `as` is explicit and checked,
 - no silent truncation,
+- pointer casts that are legal: `&str` and `&[u8; N]` to `*const u8`, pointer to
+  integer and integer to pointer (in `unsafe`), and `*mut T` to `*const T`.
+  A `*mut T` also satisfies a `*const T` parameter without a cast, because both
+  are the same address with the same layout,
 - `match` and `if let` are exhaustiveness-checked,
 - generic parameters must be declared before use,
 - `where` clauses exist syntactically; bounds checking lands with traits.

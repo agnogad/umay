@@ -63,9 +63,16 @@ pub fn build_frame(body: &Body, layouts: &mut Layouts) -> Result<Frame, LayoutEr
         };
         let size = layout.size;
         let align = layout.align();
-        // Reserve space, then align the slot itself.
-        offset += size as i64;
-        offset = round_up(offset, align as i64);
+        // The slot's start must be aligned, so the *current* offset is aligned up
+        // first and only then advanced by the size. Advancing before aligning
+        // gives the same result for power-of-two sizes, but a zero-sized local
+        // would then share an offset with the local before it, and writing
+        // through it would overwrite that local's first byte.
+        let start = round_up(offset, align.max(1) as i64);
+        // A zero-sized local is given a real byte so that distinct locals never
+        // share an address.
+        let reserved = size.max(1);
+        offset = start + reserved as i64;
         slots.push(Slot { offset: -offset, ty: local.ty, size, align });
     }
     // The frame as a whole is kept 16-byte aligned so that calls can reuse the

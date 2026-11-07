@@ -66,17 +66,21 @@ fn main() {
 }
 
 #[test]
-fn use_after_move_of_string_is_rejected() {
-    err(
+fn reusing_a_str_literal_is_not_a_move() {
+    // `&str` is a single pointer, so it is `Copy`: passing one along does not
+    // take ownership of anything. This used to be a move test when a string
+    // literal had the unsized type `str`, which was wrong; the literal is now
+    // `&str`, matching how the specification says `str` is used.
+    ok(
         r#"
-fn take(s: str) { }
+fn take(s: &str) { }
 fn main() {
     let s = "text"
     take(s)
     let t = s
+    take(t)
 }
 "#,
-        "E0201",
     );
 }
 
@@ -274,7 +278,7 @@ fn main() {
 #[test]
 fn raw_pointer_deref_outside_unsafe_is_rejected() {
     err(
-        "fn main() { let p: *i32 = 0\n let v = *p }",
+        "fn main() { let p: *const i32 = unsafe { 0 as *const i32 }\n let v = *p }",
         "E0211",
     );
 }

@@ -172,6 +172,14 @@ non-determinism, that is documented rather than hidden.
 Exit codes: `0` ok, `1` compile error, `2` usage, `3` I/O, `4` not implemented,
 `5` code generation failed.
 
+`umay build` emits three objects into `dist/` and links them: the program,
+`umay_runtime.o`, and nothing else. The runtime is UMAY source
+(`runtime/runtime.um`, embedded in the compiler with `include_str!`) compiled by
+the same backend, so a program's binary is entirely UMAY apart from the C
+functions it binds (`malloc`, `free`, `write`, `exit`). Its assembly and object
+are kept next to the executable so a runtime problem is inspectable with the same
+tools as a program problem. See [ADR 0010](adr/0010-runtime-in-umay.md).
+
 ## 9. Package manager (`upm`)
 
 Deferred to Phase 8. Design position:

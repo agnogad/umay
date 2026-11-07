@@ -25,12 +25,35 @@ fn main() {
 ## Status
 
 UMAY is under active development. This repository currently contains **Phases 0
-through 5** of the roadmap: a complete lexer, parser and semantic analyser with
-the AI-first diagnostics infrastructure, a full HIR → MIR lowering with explicit
-control flow and drop elaboration, an ownership and borrow checker running on
-that MIR, and a custom x86_64 backend. `umay build` produces a working Linux
-executable, `umay run` builds and runs it, and `umay asm` prints the generated
-assembly. The MIR can be inspected with `umay mir <file>`.
+through 5** of the roadmap and the runtime half of Phase 6: a complete lexer,
+parser and semantic analyser with the AI-first diagnostics infrastructure, a full
+HIR → MIR lowering with explicit control flow and drop elaboration, an ownership
+and borrow checker running on that MIR, and a custom x86_64 backend.
+`umay build` produces a working Linux executable, `umay run` builds and runs it,
+and `umay asm` prints the generated assembly. The MIR can be inspected with
+`umay mir <file>`.
+
+Every program is linked against a runtime written in UMAY itself, so programs can
+allocate, print and format integers rather than only returning an exit status:
+
+```umay
+extern fn println(s: *const u8) -> ()
+extern fn println_i64(v: i64) -> ()
+extern fn alloc(n: usize) -> *mut u8
+extern fn dealloc(p: *mut u8) -> ()
+
+fn main() -> i32 {
+    println("merhaba" as *const u8)
+    println_i64(42)
+    let buf = alloc(64)
+    dealloc(buf)
+    return 0
+}
+```
+
+The runtime is UMAY source compiled with each program, not a binary blob, and
+assumes only `malloc`, `free`, `write` and `exit` from C. See
+[ADR 0010](docs/adr/0010-runtime-in-umay.md).
 
 The backend is UMAY's own — no LLVM, no Cranelift. It covers integer
 arithmetic, control flow, structs, function calls and recursion, and is
@@ -46,7 +69,7 @@ reported as `E3001` rather than miscompiled; see
 | 3 | HIR and MIR | **complete** |
 | 4 | Ownership and borrow checking | **complete** |
 | 5 | Custom x86_64 backend | **complete** |
-| 6 | Runtime and standard library | not started |
+| 6 | Runtime and standard library | **runtime done, library in progress** |
 | 7 | AI developer experience | not started |
 | 8 | Build system and packages | not started |
 | 9 | Stabilization | not started |

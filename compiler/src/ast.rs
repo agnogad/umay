@@ -51,6 +51,10 @@ impl Item {
 pub struct FnDecl {
     pub name: String,
     pub name_span: Span,
+    /// Span of the `fn` keyword, used when a fix inserts a keyword before it.
+    pub fn_span: Span,
+    /// Span of the `extern` keyword when present, so a fix can remove it.
+    pub extern_span: Option<Span>,
     pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
     /// `self` receiver, if this is a method.
@@ -58,11 +62,15 @@ pub struct FnDecl {
     pub ret: Option<TypeExpr>,
     pub body: Option<Block>,
     pub attrs: Vec<Attribute>,
+    /// Whether this is an `extern fn` declaration, which is a promise that the
+    /// symbol exists elsewhere and is written to the C calling convention.
+    pub is_extern: bool,
     pub span: Span,
 }
 
 impl FnDecl {
-    pub fn is_extern(&self) -> bool {
+    /// True when the function has no body, so it can only be called.
+    pub fn is_declaration(&self) -> bool {
         self.body.is_none()
     }
 }

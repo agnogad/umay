@@ -1,0 +1,196 @@
+// UMAY runtime: the smallest layer that lets a program talk to the outside
+// world.
+//
+// This file is ordinary UMAY source, compiled with every program rather than
+// shipped as a binary blob, so a bug in it is a bug the compiler's own tools can
+// find and a reader can follow.
+//
+// Only three C functions are assumed: `malloc`, `free` and `write`. Everything
+// else — length, printing, integer formatting — is UMAY code. Keeping the C
+// surface this small means every line that could be wrong is a line that can be
+// read.
+//
+// There is no global state here on purpose: the language has no mutable
+// statics yet, so the runtime must not need any. That is why output goes
+// straight to file descriptors instead of through buffered C streams, which
+// would have to be cached between calls.
+
+// ---------------------------------------------------------------------------
+// C bindings
+// ---------------------------------------------------------------------------
+
+// `malloc(size)` returns a pointer to `size` uninitialised bytes, or null when
+// the request cannot be met.
+extern fn malloc(size: usize) -> *mut u8
+
+// `free(ptr)` releases a block obtained from `malloc`.
+extern fn free(ptr: *mut u8) -> ()
+
+// `write(fd, buf, count)` writes `count` bytes and returns how many were
+// written, or -1.
+extern fn write(fd: i32, buf: *const u8, count: usize) -> isize
+
+// `exit(code)` terminates the process.
+extern fn exit(code: i32) -> ()
+
+// The standard file descriptors.
+const STDOUT: i32 = 1
+const STDERR: i32 = 2
+
+// --- allocation -------------------------------------------------------------
+
+// Allocates `count` bytes, aborting rather than returning null.
+//
+// A null return from `malloc` means the program cannot continue, and carrying on
+// would mean writing through a null pointer. Every allocation goes through here
+// so that the check exists in exactly one place.
+pub fn alloc(count: usize) -> *mut u8 {
+    let ptr = malloc(count)
+    if unsafe { ptr as usize } == 0 {
+        fail("umay: out of memory" as *const u8)
+    }
+    return ptr
+}
+
+pub fn dealloc(ptr: *mut u8) {
+    free(ptr)
+}
+
+// --- raw memory -------------------------------------------------------------
+
+// Reads one byte.
+//
+// The language has `*` for reading through a pointer, but no expression form
+// that writes through one yet, so writing goes through these two functions. They
+// exist so that the byte-at-a-time code in `byte_len` and the digit loop has a
+// single, checkable place to go through.
+pub fn read_byte(ptr: *const u8) -> u8 {
+    return unsafe { *ptr }
+}
+
+// Writes one byte. The caller owns `ptr` for the duration of the call.
+pub fn write_byte(ptr: *mut u8, value: u8) {
+    unsafe { *ptr = value }
+}
+
+// --- byte strings -----------------------------------------------------------
+
+// The number of bytes before the terminating zero.
+//
+// Three casts in this file are narrowing and the compiler warns about all three
+// (W0102): `usize` to `isize` for `offset`, and `i64` to `u8` in
+// `narrow_digit`. Each is exact by construction and cannot be proved so from the
+// types, which is precisely what the warning says. They are listed here rather
+// than silenced so that a reader can check the reasoning:
+//
+//   * `offset` takes `isize` because a negative offset must be expressible, and a
+//     string is never longer than `isize::MAX`.
+//   * `narrow_digit` is only ever called with `-(n % 10)`, which is in `0..=9`.
+//
+// `&str` is a NUL-terminated pointer, not a pointer-and-length pair, so the
+// length is a scan. This is the price of passing strings to C for free, and it
+// is paid once per print rather than once per string operation.
+pub fn byte_len(s: *const u8) -> usize {
+    // `n` is declared at its final type rather than as a literal integer that is
+    // converted on return: the literal would default to `i32`, and the conversion
+    // back to `usize` would be a narrowing cast the compiler is right to warn
+    // about.
+    let mut n: usize = 0
+    while unsafe { *s.offset(n as isize) } != 0u8 {
+        n = n + 1
+    }
+    return n
+}
+
+// --- output -----------------------------------------------------------------
+
+fn write_at(fd: i32, ptr: *const u8, count: usize) {
+    if count == 0 {
+        return
+    }
+    // The result is the number of bytes written; the runtime treats a short
+    // write as final rather than retrying, which is good enough for a stream
+    // that is normally a terminal or a file.
+    let _ = write(fd, ptr, count)
+}
+
+// Writes a byte string with no trailing newline.
+pub fn print(s: *const u8) {
+    write_at(STDOUT, s, byte_len(s))
+}
+
+// Writes a byte string followed by a newline.
+pub fn println(s: *const u8) {
+    write_at(STDOUT, s, byte_len(s))
+    write_at(STDOUT, "\n" as *const u8, 1)
+}
+
+// Writes to standard error, for messages that must not be mixed into the
+// program's real output.
+pub fn eprintln(s: *const u8) {
+    write_at(STDERR, s, byte_len(s))
+    write_at(STDERR, "\n" as *const u8, 1)
+}
+
+// --- integers ---------------------------------------------------------------
+
+// Writes a signed 64-bit integer in decimal, followed by a newline.
+//
+// The digits are produced from the least significant end into a local buffer and
+// written in one call. The widest value, `-9223372036854775808`, needs twenty
+// characters, so thirty-two bytes is enough.
+pub fn println_i64(value: i64) {
+    let mut buf: [u8; 32] = [0u8; 32]
+    // The digits are taken from an unsigned magnitude so that `i64::MIN`, whose
+    // negation does not fit in an `i64`, is handled without a special case.
+    let negative = value < 0
+    // The magnitude is built digit by digit from the signed value, so nothing is
+    // ever reinterpreted between signed and unsigned. Dividing on the negative
+    // side keeps `i64::MIN` in range: its magnitude does not fit in an `i64`, but
+    // its digits do.
+    let mut signed = value
+    let mut pos = 32usize
+    if signed == 0 {
+        pos = pos - 1
+        buf[pos] = 48u8
+    } else {
+        while signed != 0 {
+            // `%` and `/` keep the sign of the dividend, so `-(signed % 10)` is
+            // always a digit in 0..=9.
+            let digit = if negative { -(signed % 10) } else { signed % 10 }
+            pos = pos - 1
+            buf[pos] = 48u8 + narrow_digit(digit)
+            signed = signed / 10
+        }
+        if negative {
+            pos = pos - 1
+            buf[pos] = 45u8
+        }
+    }
+    // Only the digits from `pos` to the end were written; the bytes before it are
+    // untouched padding.
+    let start = ((&buf) as *const u8).offset(pos as isize)
+    write_at(STDOUT, start, 32 - pos)
+    write_at(STDOUT, "\n" as *const u8, 1)
+}
+
+// A digit is in 0..=9, so narrowing it is exact. The cast is written once here
+// rather than at each call site, so there is one place to check.
+//
+// The compiler warns about this cast (W0102) because it cannot prove the range
+// from the expression alone. The warning is correct in general and expected
+// here: this function's only caller passes `-(n % 10)`.
+fn narrow_digit(d: i64) -> u8 {
+    return d as u8
+}
+
+// --- failures ---------------------------------------------------------------
+
+// Prints a message to standard error and terminates the process.
+//
+// A failure cannot return: the program is in a state its checker did not prove
+// reachable, so continuing would mean running with a broken invariant.
+pub fn fail(message: *const u8) {
+    eprintln(message)
+    exit(101)
+}

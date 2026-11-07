@@ -201,6 +201,12 @@ impl FnChecker<'_, '_> {
         let recv = self.check_expr(receiver);
         let arg_hirs: Vec<HirExpr> = args.iter().map(|a| self.check_expr(a)).collect();
 
+        // Raw pointer intrinsics. A raw pointer has no nominal type to hang
+        // methods on, so `offset` is recognised by the receiver's type.
+        if matches!(self.cx.cx.kind(recv.ty), TyKind::RawPtr(_) | TyKind::RawPtrMut(_)) {
+            return self.check_raw_ptr_method(recv, method, method_span, &arg_hirs, span);
+        }
+
         let recv_base = self.strip_refs(recv.ty);
         let Some(type_name) = self.nominal_name(recv_base) else {
             if !self.cx.cx.is_error(recv.ty) {
@@ -813,5 +819,68 @@ impl FnChecker<'_, '_> {
             return self.cx.cx.primitive("f64").unwrap();
         }
         ty
+    }
+}
+
+impl FnChecker<'_, '_> {
+    /// Handles the intrinsics available on a raw pointer.
+    ///
+    /// `offset(n)` moves the pointer by `n` elements of the pointee type. The
+    /// multiplication by the element size happens in code generation, so the
+    /// count stays in elements and never in bytes.
+    fn check_raw_ptr_method(
+        &mut self,
+        recv: HirExpr,
+        method: &str,
+        method_span: crate::source::Span,
+        args: &[HirExpr],
+        span: crate::source::Span,
+    ) -> HirExpr {
+        let ptr_ty = recv.ty;
+        match method {
+            "offset" => {
+                if args.len() != 1 {
+                    self.push(
+                        Diagnostic::error(
+                            "E1004",
+                            format!("`offset` takes 1 argument, found {}", args.len()),
+                        )
+                        .at(method_span)
+                        .with_cause("`ptr.offset(n)` moves a raw pointer by `n` elements"),
+                    );
+                    return self.error_hir(span);
+                }
+                let count = &args[0];
+                if !self.cx.cx.is_integer(count.ty) && !self.cx.cx.is_integer_var(count.ty) {
+                    let name = self.cx.ty_name(count.ty);
+                    self.push(
+                        Diagnostic::error(
+                            "E1001",
+                            format!("`offset` expects an integer count, found `{name}`"),
+                        )
+                        .at(count.span)
+                        .with_cause("the offset counts elements, so it must be an integer"),
+                    );
+                    return self.error_hir(span);
+                }
+                HirExpr {
+                    kind: HirExprKind::PtrOffset {
+                        ptr: Box::new(recv),
+                        count: Box::new(count.clone()),
+                    },
+                    ty: ptr_ty,
+                    span,
+                }
+            }
+            other => {
+                let name = self.cx.ty_name(ptr_ty);
+                self.push(
+                    Diagnostic::error("E1014", format!("`{name}` has no method `{other}`"))
+                        .at(method_span)
+                        .with_cause("raw pointers only provide `offset`"),
+                );
+                self.error_hir(span)
+            }
+        }
     }
 }

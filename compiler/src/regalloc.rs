@@ -48,6 +48,10 @@ struct Interval {
     /// Physical registers this interval must not be placed in, because its live
     /// range crosses a call that clobbers them.
     excluded: BTreeSet<u8>,
+    /// Set when the value is used as an address. A spilled base register would
+    /// need an extra load before every access that uses it, and the selector
+    /// never emits one, so these intervals must get a real register.
+    address: bool,
 }
 
 /// Allocates registers for `function`.
@@ -65,12 +69,19 @@ pub fn allocate(function: &mut MachineFunction) -> Allocation {
     let mut max_vreg = 0u32;
     // Points at which a call appears, so live ranges that span one are found.
     let mut call_points: Vec<usize> = Vec::new();
+    // Virtual registers used as a base or index, which cannot be spilled.
+    let mut address_regs: BTreeSet<u32> = BTreeSet::new();
 
     for block in &function.blocks {
         for inst in &block.insts {
             point += 1;
             if matches!(inst, Inst::Call { .. }) {
                 call_points.push(point);
+            }
+            for reg in inst.address_registers() {
+                if let Reg::Virtual(v) = reg {
+                    address_regs.insert(v);
+                }
             }
             for reg in inst.reads().into_iter().chain(inst.writes()) {
                 if let Reg::Virtual(v) = reg {
@@ -92,7 +103,7 @@ pub fn allocate(function: &mut MachineFunction) -> Allocation {
                 excluded.insert(r);
             }
         }
-        intervals.push(Interval { vreg: v, start, end, excluded });
+        intervals.push(Interval { vreg: v, start, end, excluded, address: address_regs.contains(&v) });
     }
     intervals.sort_by_key(|i| (i.start, i.vreg));
 
@@ -129,14 +140,24 @@ pub fn allocate(function: &mut MachineFunction) -> Allocation {
         }
 
         // No register is free. If an active interval ends later than this one,
-        // evict it and take its register; otherwise spill this interval.
+        // evict it and take its register; otherwise spill this interval. An
+        // address interval may take a later-ending register even if that means
+        // evicting it, because it cannot be spilled at all; an ordinary interval
+        // may not evict an address one.
         let evictable = active
             .iter()
             .enumerate()
-            .filter(|(_, (_, v, reg))| !interval.excluded.contains(reg) && *v != interval.vreg)
+            .filter(|(_, (_, v, reg))| {
+                !interval.excluded.contains(reg)
+                    && *v != interval.vreg
+                    && (!address_regs.contains(v) || interval.address)
+            })
             .max_by_key(|(_, (end, _, _))| *end);
         match evictable {
-            Some((index, (end, victim, reg))) if *end > interval.end && !interval.excluded.contains(reg) => {
+            Some((index, (end, victim, reg)))
+                if (*end > interval.end || interval.address)
+                    && !interval.excluded.contains(reg) =>
+            {
                 let _ = (end, victim);
                 let (_, victim_vreg, reg) = active.remove(index);
                 spilled.push(victim_vreg);
@@ -188,7 +209,7 @@ fn rewrite_registers(function: &mut MachineFunction, allocation: &Allocation) {
             // it into a scratch register first.
             if let Inst::Store { kind: MoveKind::Move(w), src: MOperand::Mem(m), dst } = &inst {
                 let width = *w;
-                let scratch = Reg::Phys(0); // rax, never live across a single store
+                let scratch = Reg::Phys(crate::machine::SCRATCH);
                 let source = m.clone();
                 let target = dst.clone();
                 out.push(Inst::Load {
@@ -205,7 +226,7 @@ fn rewrite_registers(function: &mut MachineFunction, allocation: &Allocation) {
             }
             if let Inst::Move { kind: MoveKind::Move(w), src: MOperand::Mem(_), dst: MOperand::Mem(_) } = &inst {
                 let width = *w;
-                let scratch = Reg::Phys(0); // rax, never live across a single move
+                let scratch = Reg::Phys(crate::machine::SCRATCH);
                 let (src, dst) = match &inst {
                     Inst::Move { src, dst, .. } => (src.clone(), dst.clone()),
                     _ => unreachable!(),
@@ -332,6 +353,11 @@ fn rewrite_inst(inst: &mut Inst, allocation: &Allocation) {
             }
         }
         Inst::Store { src, dst, .. } => {
+            // The source may itself be a memory operand when the value was
+            // spilled, in which case its base is an address too.
+            if let MOperand::Mem(m) = src {
+                fix_mem(m, allocation);
+            }
             if let MOperand::Reg(r) = src {
                 *src = resolve(*r, width, allocation);
             }

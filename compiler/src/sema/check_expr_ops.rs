@@ -365,7 +365,25 @@ impl FnChecker<'_, '_> {
             || (matches!(self.cx.cx.kind(from_concrete), TyKind::Char) && self.cx.cx.is_integer(to))
             || (matches!(self.cx.cx.kind(to), TyKind::Char) && false)
             || (matches!(self.cx.cx.kind(from_concrete), TyKind::Bool) && self.cx.cx.is_integer(to))
-            || is_pointer_like(&self.cx.cx, from_concrete) && self.cx.cx.is_integer(to) && self.unsafe_depth > 0;
+            || (is_pointer_like(&self.cx.cx, from_concrete)
+                && self.cx.cx.is_integer(to)
+                && self.unsafe_depth > 0)
+            // `&str` is a NUL-terminated byte pointer, so viewing it as one is
+            // a real conversion rather than a reinterpretation.
+            || (is_str_ref(&self.cx.cx, from_concrete) && is_byte_ptr(&self.cx.cx, to))
+            // An integer may be turned into a pointer, which is how a null or a
+            // known address is written. Like the reverse, it needs `unsafe`.
+            || (is_pointer_like(&self.cx.cx, to)
+                && self.cx.cx.is_integer(from_concrete)
+                && self.unsafe_depth > 0)
+            // A reference to a contiguous buffer may be viewed as a pointer to
+            // its first byte, which is how a byte array is handed to C.
+            || (is_byte_ptr(&self.cx.cx, to) && is_buffer_ref(&self.cx.cx, from_concrete))
+            // Raw pointers interconvert freely: `*mut T` to `*const T` is a
+            // permission change, not a layout change, and C APIs are the usual
+            // reason to need it. No `unsafe` here, because the cast itself cannot
+            // break any rule the pointer already had.
+            || (is_raw_ptr(&self.cx.cx, from_concrete) && is_raw_ptr(&self.cx.cx, to));
         if !allowed {
             let f = self.cx.ty_name(from_concrete);
             let t = self.cx.ty_name(to);
@@ -390,7 +408,12 @@ impl FnChecker<'_, '_> {
         if let (Some((fmin, fmax)), Some((tmin, tmax))) =
             (self.cx.cx.int_bounds(from_concrete), self.cx.cx.int_bounds(to))
         {
-            if (tmin > fmin || tmax < fmax) && from_concrete != to {
+            // Only a destination that cannot hold every source value is a
+            // narrowing cast. An unsigned destination has a higher maximum but a
+            // lower minimum, so both ends are compared separately; this is what
+            // keeps `i64 as u64` — a same-width reinterpretation — quiet.
+            let loses_values = fmin < tmin || fmax > tmax;
+            if loses_values && from_concrete != to {
                 let f = self.cx.ty_name(from_concrete);
                 let t = self.cx.ty_name(to);
                 self.push(
@@ -409,6 +432,40 @@ impl FnChecker<'_, '_> {
 
 fn is_pointer_like(types: &crate::types::TyCtxt, ty: TyId) -> bool {
     matches!(types.kind(ty), TyKind::RawPtr(_) | TyKind::RawPtrMut(_) | TyKind::Ref(_) | TyKind::RefMut(_))
+}
+
+/// True for `&str`, which the backend represents as a NUL-terminated byte
+/// pointer.
+fn is_str_ref(types: &crate::types::TyCtxt, ty: TyId) -> bool {
+    match types.kind(ty) {
+        TyKind::Ref(inner) | TyKind::RefMut(inner) => matches!(types.kind(*inner), TyKind::Str),
+        _ => false,
+    }
+}
+
+/// True for a reference to an array of bytes or any sized element type.
+///
+/// UMAY's guarantee that array elements are contiguous is what makes viewing
+/// the buffer as raw bytes meaningful.
+fn is_buffer_ref(types: &crate::types::TyCtxt, ty: TyId) -> bool {
+    match types.kind(ty) {
+        TyKind::Ref(inner) | TyKind::RefMut(inner) => matches!(types.kind(*inner), TyKind::Array { .. }),
+        _ => false,
+    }
+}
+
+/// True for `*const u8` and `*mut u8`.
+/// Whether `ty` is a raw pointer of either mutability.
+fn is_raw_ptr(types: &crate::types::TyCtxt, ty: TyId) -> bool {
+    matches!(types.kind(ty), TyKind::RawPtr(_) | TyKind::RawPtrMut(_))
+}
+
+fn is_byte_ptr(types: &crate::types::TyCtxt, ty: TyId) -> bool {
+    let inner = match types.kind(ty) {
+        TyKind::RawPtr(inner) | TyKind::RawPtrMut(inner) => *inner,
+        _ => return false,
+    };
+    matches!(types.kind(inner), TyKind::U8)
 }
 
 /// The span of the `let` keyword for a binding; approximates by walking back.

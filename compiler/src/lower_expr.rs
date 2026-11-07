@@ -109,7 +109,19 @@ impl Lowering<'_> {
                     Operand::Move(place)
                 }
             }
-            HirExprKind::ConstRef(id) => Operand::Constant(Constant::Const(*id)),
+            HirExprKind::ConstRef(id) => {
+                // A constant is pasted at its use site rather than called: its
+                // initialiser is already checked, and inlining means a constant
+                // can appear anywhere an expression can, including a condition
+                // or a length.
+                match self.hir.consts.get(id.0 as usize) {
+                    Some(c) => {
+                        let value = c.value.clone();
+                        self.lower_expr(&value)
+                    }
+                    None => Operand::Constant(Constant::Unit),
+                }
+            }
             HirExprKind::FnRef(id) => Operand::Constant(Constant::Fn(*id)),
             HirExprKind::UnitVariant { def, index } => {
                 Operand::Constant(Constant::UnitVariant { def: *def, index: *index })
@@ -129,12 +141,33 @@ impl Lowering<'_> {
                 self.assign(tmp.clone(), Rvalue::Ref { mutable: *mutable, place: p }, e.span);
                 Operand::Copy(tmp)
             }
-            HirExprKind::Deref(inner) => self.lower_expr(inner),
+            HirExprKind::Deref(_) => {
+                // Reading through a pointer is a load from the dereferenced
+                // place. Lowering away the `*` would compare or copy the address
+                // instead of the value it points at.
+                let place = self.lower_place(e);
+                if self.types.is_copy(e.ty) {
+                    Operand::Copy(place)
+                } else {
+                    Operand::Move(place)
+                }
+            }
             HirExprKind::Move(inner) => {
                 let place = self.lower_place(inner);
                 // Moving out invalidates the source, so its drop flag is cleared.
                 self.emit(Statement::SetDropFlag { local: place.local, value: false });
                 Operand::Move(place)
+            }
+            HirExprKind::PtrOffset { ptr, count } => {
+                let base = self.lower_expr(ptr);
+                let delta = self.lower_expr(count);
+                let out = self.temp_place(e.ty);
+                self.assign(
+                    out.clone(),
+                    Rvalue::PtrOffset { ptr: base, count: delta },
+                    e.span,
+                );
+                Operand::Copy(out)
             }
             HirExprKind::Cast { expr, to } => {
                 let op = self.lower_expr(expr);

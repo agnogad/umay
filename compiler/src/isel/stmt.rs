@@ -64,6 +64,70 @@ impl<'a, 't> Isel<'a, 't> {
                 let reg = self.operand_to_reg(op)?;
                 self.store_place(place, MOperand::Reg(reg))
             }
+            Rvalue::PtrOffset { ptr, count } => {
+                // `lea base + count * elem_size` computes the address in one
+                // instruction. The element size must be 1, 2, 4 or 8 to be an
+                // addressing-mode scale; anything else is multiplied first.
+                let base = self.operand_to_reg(ptr)?;
+                let elem = match self.types().kind_owned(ty) {
+                    TyKind::RawPtr(inner) | TyKind::RawPtrMut(inner) => inner,
+                    other => return Err(format!("offset of non-pointer {other:?}")),
+                };
+                let elem_size = self.layouts.layout(elem).map_err(|e| format!("{e:?}"))?.size;
+                let index = match count {
+                    Operand::Constant(c) => {
+                        let (value, _) = crate::isel::constant_value(c)?;
+                        MOperand::Imm(value * elem_size as i64)
+                    }
+                    _ => MOperand::Reg(self.operand_to_reg(count)?),
+                };
+                let dst = self.vreg();
+                match index {
+                    MOperand::Imm(byte_offset) => {
+                        self.emit(Inst::Lea {
+                            src: Mem { base: Some(base), offset: byte_offset, index: None, symbol: None },
+                            dst: MOperand::Reg(dst),
+                        });
+                    }
+                    MOperand::Reg(index_reg) => {
+                        // Addressing modes scale by 1, 2, 4 or 8 only. A larger
+                        // element needs an explicit multiply first.
+                        if matches!(elem_size, 1 | 2 | 4 | 8) {
+                            self.emit(Inst::Lea {
+                                src: Mem {
+                                    base: Some(base),
+                                    offset: 0,
+                                    index: Some((index_reg, crate::isel::scale_for(elem_size))),
+                                    symbol: None,
+                                },
+                                dst: MOperand::Reg(dst),
+                            });
+                        } else {
+                            self.emit(Inst::Alu {
+                                op: AluOp::Imul,
+                                width: RegWidth::W64,
+                                src: MOperand::Imm(elem_size as i64),
+                                dst: MOperand::Reg(index_reg),
+                            });
+                            self.emit(Inst::Lea {
+                                src: Mem {
+                                    base: Some(base),
+                                    offset: 0,
+                                    index: Some((index_reg, 0)),
+                                    symbol: None,
+                                },
+                                dst: MOperand::Reg(dst),
+                            });
+                        }
+                    }
+                    MOperand::Mem(_) | MOperand::Label(_) => {
+                        // `index` is built above as an immediate or a register,
+                        // so neither of these can occur.
+                        return Err("pointer offset with a non-scalar count".into());
+                    }
+                }
+                self.store_place(place, MOperand::Reg(dst))
+            }
             Rvalue::Repeat { operand, count } => {
                 // `[v; n]` writes `v` into each element in turn.
                 let elem_ty = match self.types().kind_owned(ty) {
@@ -132,8 +196,12 @@ impl<'a, 't> Isel<'a, 't> {
         rhs: &Operand,
         ty: TyId,
     ) -> Result<(), String> {
-        let width = self.binop_width(op, ty)?;
-        let signed = self.types().is_signed(ty);
+        let width = self.binop_width(op, ty, lhs)?;
+        // Signedness comes from the operands, not the result: a comparison of two
+        // `i64`s produces a `bool`, and reading signedness from `bool` selects the
+        // unsigned condition codes, making every negative number compare as huge.
+        let operand_ty = self.operand_ty(lhs);
+        let signed = self.types().is_signed(operand_ty);
 
         // Comparisons produce a bool and are handled separately.
         if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
@@ -218,9 +286,15 @@ impl<'a, 't> Isel<'a, 't> {
     ///
     /// Arithmetic is done at the type's own width so that wrapping matches the
     /// language definition; comparing at 64 bits would hide overflow.
-    fn binop_width(&mut self, op: BinOp, ty: TyId) -> Result<RegWidth, String> {
+    /// The width a binary operation is performed at.
+    ///
+    /// For a comparison this is the width of the *operands*, not of the result:
+    /// comparing two `i64`s must compare eight bytes even though the answer is a
+    /// single `bool`. Getting this wrong silently compares only the low byte.
+    fn binop_width(&mut self, op: BinOp, ty: TyId, lhs: &Operand) -> Result<RegWidth, String> {
         if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
-            return self.width(ty);
+            let operand_ty = self.operand_ty(lhs);
+            return self.width(operand_ty);
         }
         self.width(ty)
     }
@@ -358,7 +432,13 @@ impl<'a, 't> Isel<'a, 't> {
     /// Selects a numeric cast.
     fn cast(&mut self, dst: &Place, operand: &Operand, to: TyId) -> Result<(), String> {
         let from = self.operand_ty(operand);
-        let from_width = self.width(from)?;
+        // A string literal becomes an address, which is a full word regardless of
+        // what `operand_ty` reports for a constant.
+        let from_width = if matches!(operand, Operand::Constant(Constant::Str(_))) {
+            RegWidth::W64
+        } else {
+            self.width(from)?
+        };
         let to_width = self.width(to)?;
         let src = self.operand_to_reg(operand)?;
         let result = self.vreg();
@@ -389,6 +469,10 @@ impl<'a, 't> Isel<'a, 't> {
             Operand::Constant(c) => match c {
                 Constant::Int { ty, .. } | Constant::Uint { ty, .. } | Constant::Float { ty, .. } => *ty,
                 Constant::Bool(_) | Constant::Char(_) | Constant::Unit => self.width_probe_ty(c),
+                // A string literal becomes the address of its bytes, so it is a
+                // pointer for width purposes; treating it as `()` would truncate
+                // the address to a byte when it is cast.
+                Constant::Str(_) => self.types().cached_usize(),
                 _ => self.types().cached_unit(),
             },
         }

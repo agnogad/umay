@@ -187,17 +187,50 @@ programs and checks their exit codes.
 
 ---
 
-## Phase 6 — Runtime and Standard Library · planned
+## Phase 6 — Runtime and Standard Library · in progress
 
-- Allocation (`alloc`/`dealloc`), `String`, `Vec<T>`, `HashMap`.
+### Step 1 — the runtime · done
+
+- [x] `extern fn` in the language, so a C symbol can be declared and checked:
+  `E0112` when an `extern fn` has a body, `E0113` when a function has no body and
+  is not `extern`, both with a fix that can be applied mechanically.
+- [x] `*const T` / `*mut T` with `as` casts between them, `*mut T` accepted where
+  `*const T` is expected, `&str` and `&[u8; N]` castable to `*const u8`, and
+  `.offset(n)` for pointer arithmetic.
+- [x] `runtime/runtime.um`, embedded with `include_str!` and compiled into every
+  program: `alloc`, `dealloc`, `read_byte`, `write_byte`, `byte_len`, `print`,
+  `println`, `eprintln`, `println_i64`, `fail`.
+- [x] The C surface is `malloc`, `free`, `write`, `exit` and nothing else.
+- [x] `umay build` emits `dist/umay_runtime.s`/`.o` and links them with the
+  program. See [ADR 0010](docs/adr/0010-runtime-in-umay.md).
+- [x] String literals are `&str`, a NUL-terminated byte pointer, so passing one
+  to C costs nothing.
+
+Writing the runtime in UMAY exposed seven backend miscompilations, each now
+covered by a test: a dropped dereference, a zero-sized local sharing an offset,
+signedness read from a comparison's result type, every load widening to 64 bits,
+`%rax` used as scratch while it held an address, a spilled address never
+resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
+
+### Step 2 — a real standard library · planned
+
+- `String` and `Vec<T>` as UMAY source over `alloc`, with `impl` blocks.
+- Prelude `print`/`println`/`len`/`panic` mapping onto the runtime instead of the
+  placeholder `FnId(u32::MAX)`.
 - `Option`, `Result`, `Iterator` basics.
-- I/O: stdout/stderr/`print`/`println`, buffered readers.
 - `fs`: read, write, open, metadata.
 - `process`: exit codes, arguments.
-- `net`: TCP basics (only after the memory model is stable).
+- `net`: TCP basics, only once the memory model is stable.
 
 Exit criteria: a non-trivial CLI program can be written and built with only the
 standard library.
+
+Known gaps this step depends on, none of which are covered yet:
+
+- Field-wise drop order is not checked (`E0208`/`E0209` are not enforced).
+- An assignment through a computed pointer, `*(p.offset(n)) = v`, is rejected;
+  only a write through a named pointer works, which is why `write_byte` exists.
+- `&mut T` does not coerce to `&T` (`E1001`).
 
 ---
 

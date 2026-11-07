@@ -251,6 +251,12 @@ pub enum HirExprKind {
     Move(Box<HirExpr>),
     /// `expr as Ty`
     Cast { expr: Box<HirExpr>, to: TyId },
+    /// `ptr.offset(n)` — moves a raw pointer by `n` elements of its pointee.
+    ///
+    /// This is an intrinsic rather than a method on a type, because a raw pointer
+    /// has no type of its own to hang methods on, and because the scaling by the
+    /// pointee's size is a machine concern rather than a library one.
+    PtrOffset { ptr: Box<HirExpr>, count: Box<HirExpr> },
 
     // ---- calls & projections ----
     Call { callee: Box<HirExpr>, args: Vec<HirExpr> },
@@ -537,6 +543,10 @@ fn rewrite_expr(e: &mut HirExpr, map: &std::collections::HashMap<TyId, TyId>) {
         HirExprKind::Cast { expr, to } => {
             rewrite_expr(expr, map);
             map_ty(to, map);
+        }
+        HirExprKind::PtrOffset { ptr, count } => {
+            rewrite_expr(ptr, map);
+            rewrite_expr(count, map);
         }
         HirExprKind::Call { callee, args } => {
             rewrite_expr(callee, map);

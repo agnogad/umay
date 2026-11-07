@@ -461,7 +461,7 @@ fn main() { let _ = add(1) }
 #[test]
 fn call_argument_type_mismatch_is_rejected() {
     err("
-fn take(s: str) {}
+fn take(s: &str) {}
 fn main() { take(1) }
 ", "E1001");
 }
@@ -709,12 +709,12 @@ fn mutable_borrow_of_immutable_binding_is_rejected() {
 
 #[test]
 fn raw_pointer_deref_outside_unsafe_is_e0211() {
-    err("fn main() { let p: *i32 = 0\n let _ = *p }", "E0211");
+    err("fn main() { let p: *const i32 = unsafe { 0 as *const i32 }\n let _ = *p }", "E0211");
 }
 
 #[test]
 fn raw_pointer_deref_inside_unsafe_is_ok() {
-    ok("fn main() { let p: *i32 = 0\n let v = unsafe { *p }\n let _ = v }");
+    ok("fn main() { let p: *const i32 = unsafe { 0 as *const i32 }\n let v = unsafe { *p }\n let _ = v }");
 }
 
 // ---------------------------------------------------------------------------

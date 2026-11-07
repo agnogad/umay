@@ -212,6 +212,7 @@ pub enum Keyword {
     Move,
     Ref,
     Dyn,
+    Extern,
 }
 
 impl Keyword {
@@ -251,6 +252,7 @@ impl Keyword {
             Keyword::Move => "move",
             Keyword::Ref => "ref",
             Keyword::Dyn => "dyn",
+            Keyword::Extern => "extern",
         }
     }
 
@@ -290,6 +292,7 @@ impl Keyword {
             "move" => Keyword::Move,
             "ref" => Keyword::Ref,
             "dyn" => Keyword::Dyn,
+            "extern" => Keyword::Extern,
             _ => return None,
         })
     }

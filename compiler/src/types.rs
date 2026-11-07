@@ -158,6 +158,16 @@ impl TyCtxt {
     pub fn str_(&mut self) -> TyId {
         self.intern(TyKind::Str)
     }
+    /// `&str`, the type of a string literal.
+    ///
+    /// A bare `str` is unsized and cannot be a value or a parameter type; the
+    /// specification says it is used behind a reference, so literals produce
+    /// `&str` directly.
+    pub fn str_ref(&mut self) -> TyId {
+        let inner = self.intern(TyKind::Str);
+        self.intern(TyKind::Ref(inner))
+    }
+
     pub fn string(&mut self) -> TyId {
         self.intern(TyKind::String)
     }
@@ -209,6 +219,19 @@ impl TyCtxt {
     /// The `u32` type, for a context that cannot intern.
     pub fn cached_u32(&self) -> TyId {
         self.find(&TyKind::U32).expect("u32 is interned by the front end")
+    }
+
+    /// A pointer-width integer type, for a context that cannot intern.
+    ///
+    /// Any integer of pointer width will do, since the only property the caller
+    /// needs is the machine width. `usize` is preferred because it is the type
+    /// the language uses for addresses, but a program that never mentions it
+    /// will not have it interned.
+    pub fn cached_usize(&self) -> TyId {
+        self.find(&TyKind::Usize)
+            .or_else(|| self.find(&TyKind::U64))
+            .or_else(|| self.find(&TyKind::I64))
+            .unwrap_or_else(|| self.cached_unit())
     }
 
     /// The unit type, for a context that cannot intern.
