@@ -312,8 +312,14 @@ Measured against a working router probe, in the order the gaps bite:
   primitives, `String`, `Bytes`, `Vec<T: Send>`, `Option<T: Send>`. **Nothing
   checks them yet**: the check needs a generic spawn whose type arguments are
   nameable, and that needs turbofish, which the parser does not accept.
-- [ ] Turbofish (`thread_spawn::<Job, i64>(..)`), a function pointer that can be
-  cast to `*const u8`, and then the `Send` check itself.
+- [x] Turbofish (`f::<i64>(..)`, `B::<i64> { .. }`). An explicit argument list
+  also outranks what a struct literal's fields would infer.
+- [ ] A generic function whose return type names its parameter *inside* another
+  type (`fn make<T>(v: T) -> B<T>`) cannot be bound with `let`: the binding keeps
+  a `B` with no argument, which has no size, so the function is `E3001`. Passing
+  the result straight through works.
+- [ ] A function pointer that can be cast to `*const u8`, and then the `Send`
+  check itself.
 
 Wiring up `fs` and `process` exposed four defects that had nothing to do with
 either:

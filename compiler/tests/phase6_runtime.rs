@@ -2018,3 +2018,20 @@ fn main() -> i32 {
 "##;
     expect_stdout("bounds_do_not_leak", source, "6\n1\n");
 }
+
+#[test]
+fn turbofish_names_the_type_arguments_of_a_call() {
+    // `::<..>` is what makes a generic call's type arguments explicit when nothing
+    // else in the call says them.
+    let source = r##"
+fn make<T>(value: T) -> T { return value }
+fn main() -> i32 {
+    println_i64(make::<i64>(7i64))
+    let mut v: Vec<i64> = Vec::new()
+    v = v.push(make::<i64>(3i64))
+    println_i64(v.len as i64)
+    return 0
+}
+"##;
+    expect_stdout("turbofish", source, "7\n1\n");
+}

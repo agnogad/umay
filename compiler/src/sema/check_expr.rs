@@ -917,7 +917,7 @@ fn describe_res_for_error(res: Res) -> &'static str {
 
 /// True when `ty` is or contains an `Error` standing in for an uninferrable
 /// generic parameter.
-fn mentions_unresolved_param(types: &crate::types::TyCtxt, ty: crate::types::TyId) -> bool {
+pub(crate) fn mentions_unresolved_param(types: &crate::types::TyCtxt, ty: crate::types::TyId) -> bool {
     if types.is_error(ty) {
         return false;
     }

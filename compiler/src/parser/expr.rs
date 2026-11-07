@@ -466,7 +466,14 @@ impl Parser {
                 _ => break,
             };
             let mut args = Vec::new();
-            if self.at(&TokenKind::Lt) && self.looks_like_generic_args() {
+            // `Path::<T>` names the type arguments of a call explicitly. The `::`
+            // is what makes the `<` unambiguous, so the lookahead heuristic is not
+            // needed and the turbofish is accepted on its own.
+            let turbofish = self.at(&TokenKind::ColonColon) && *self.nth_kind(1) == TokenKind::Lt;
+            if turbofish {
+                self.advance();
+            }
+            if self.at(&TokenKind::Lt) && (turbofish || self.looks_like_generic_args()) {
                 self.advance();
                 self.split_closing_angles();
                 while !self.at(&TokenKind::Gt) && !self.at_eof() {
@@ -478,7 +485,9 @@ impl Parser {
                 self.expect(TokenKind::Gt, "E0330", "generic arguments");
             }
             segments.push(PathSegment { name, span: sp, args });
-            if !self.eat(&TokenKind::ColonColon) {
+            // A turbofish used up the `::` that would otherwise join the next
+            // segment, so the path ends here unless the next token is another.
+            if turbofish || !self.eat(&TokenKind::ColonColon) {
                 break;
             }
         }

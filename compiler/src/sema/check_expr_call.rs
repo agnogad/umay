@@ -895,6 +895,18 @@ impl FnChecker<'_, '_> {
         let mut literal_inferred: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         if !info.generics.is_empty() {
+            // An explicit argument written with `::<..>` outranks anything the
+            // fields suggest: the caller said what the type is.
+            let explicit: Vec<TyId> = path
+                .segments
+                .last()
+                .map(|seg| seg.args.iter().map(|a| self.cx.resolve_type(a, &[])).collect())
+                .unwrap_or_default();
+            if explicit.len() == info.generics.len() {
+                for (name, ty) in info.generics.iter().zip(explicit.iter()) {
+                    inferred.insert(name.clone(), *ty);
+                }
+            }
             for f in fields {
                 let Some(value_ast) = &f.value else { continue };
                 let Some(field) = info.fields.iter().find(|sf| sf.name == f.name) else { continue };

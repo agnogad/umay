@@ -157,6 +157,30 @@ impl<'t> Mono<'t> {
         }
         self.discover(hir);
         self.resolve(hir);
+        self.settle_let_types(hir);
+    }
+
+    /// Gives every `let` binding the type its initialiser finally has.
+    ///
+    /// A binding's type is the initialiser's, decided before monomorphisation. A
+    /// call like `let c = make(7i64)` is written `B<T>` there because `make` is
+    /// generic, and the call site is what fills `T` in. The local table kept the
+    /// `B<T>`, and a type parameter nothing resolved has no size, so the function
+    /// could not be laid out. This runs after instantiation has settled.
+    fn settle_let_types(&mut self, hir: &mut Hir) {
+        for f in hir.fns.iter_mut() {
+            let mut fixes: Vec<(usize, TyId)> = Vec::new();
+            if let Some(body) = &f.body {
+                collect_let_fixes(body, &mut fixes);
+            }
+            for (local, ty) in fixes {
+                if let Some(info) = f.locals.get_mut(local) {
+                    if crate::sema::mentions_unresolved_param(self.types, info.ty) {
+                        info.ty = ty;
+                    }
+                }
+            }
+        }
     }
 
     /// Phase one: walks every body and produces the copies call sites need.
@@ -452,6 +476,21 @@ impl<'m, 't, 'h> Rewriter<'m, 't, 'h> {
                     if let Some(concrete) = resolved {
                         if concrete != id {
                             callee.kind = HirExprKind::FnRef(concrete);
+                        }
+                    }
+                    // The call's own type is written in terms of the callee's
+                    // parameters -- `fn make<T>(v: T) -> B<T>` has `B<T>` here --
+                    // so it has to be instantiated too. Leaving it alone made the
+                    // result keep a bare `T`, and a `B<T>` whose `T` was never
+                    // filled in has no size, so the function could not be lowered.
+                    if let Some(names) = self.mono.decl_generics.get(&id) {
+                        if names.len() == instance_args.len() {
+                            let subst: std::collections::HashMap<String, TyId> = names
+                                .iter()
+                                .cloned()
+                                .zip(instance_args.iter().copied())
+                                .collect();
+                            e.ty = self.mono.types.substitute(e.ty, &subst);
                         }
                     }
                 }
@@ -828,4 +867,30 @@ fn substitute_pattern_types(types: &mut TyCtxt, p: &mut HirPattern, subst: &Hash
 #[allow(dead_code)]
 pub fn synthetic() -> Span {
     Span::DUMMY
+}
+
+/// Pairs every `let` binding with the type its initialiser now has, when the
+/// binding's type still names a parameter.
+fn collect_let_fixes(block: &HirBlock, out: &mut Vec<(usize, TyId)>) {
+    for stmt in &block.stmts {
+        match &stmt.kind {
+            HirStmtKind::Let { bindings, init, .. } => {
+                if let Some(init) = init {
+                    if let Some(b) = bindings.first() {
+                        out.push((b.0 as usize, init.ty));
+                    }
+                }
+            }
+            HirStmtKind::Expr(e) => collect_let_fixes_expr(e, out),
+        }
+    }
+    if let Some(tail) = &block.tail {
+        collect_let_fixes_expr(tail, out);
+    }
+}
+
+fn collect_let_fixes_expr(e: &HirExpr, out: &mut Vec<(usize, TyId)>) {
+    for child in crate::hir::child_exprs(e) {
+        collect_let_fixes_expr(child, out);
+    }
 }

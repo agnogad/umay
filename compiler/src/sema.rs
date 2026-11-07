@@ -24,6 +24,7 @@ mod exhaustive;
 mod scope;
 
 pub use exhaustive::{ExhaustivenessReport, Gap};
+pub(crate) use check_expr::mentions_unresolved_param;
 
 use std::collections::HashMap;
 
