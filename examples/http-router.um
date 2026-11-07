@@ -1,0 +1,105 @@
+extern fn socket(d: i32, k: i32, p: i32) -> i32
+extern fn bind(fd: i32, a: *const u8, l: i32) -> i32
+extern fn listen(fd: i32, b: i32) -> i32
+extern fn accept(fd: i32, a: *mut u8, l: *mut i32) -> i32
+extern fn read(fd: i32, b: *mut u8, n: usize) -> i64
+extern fn write(fd: i32, b: *const u8, n: usize) -> i64
+extern fn close(fd: i32) -> i32
+extern fn strlen(s: *const u8) -> usize
+
+struct Route { path: *const u8, body: *const u8 }
+
+fn sockaddr(port: u16) -> *mut u8 {
+    let p = alloc(16)
+    unsafe {
+        let mut i: usize = 0
+        while i < 16 { write_byte((p as usize + i) as *mut u8, 0u8); i = i + 1 }
+        write_u16(p, 2u16)
+        write_u16((p as usize + 2) as *mut u8, (port / 256u16) + (port % 256u16) * 256u16)
+    }
+    return p
+}
+
+fn request_path(buf: *mut u8) -> *mut u8 {
+    let out = alloc(128)
+    unsafe {
+        let mut i: usize = 0
+        while read_byte((buf as usize + i) as *const u8) != 32u8 { i = i + 1 }
+        i = i + 1
+        let mut j: usize = 0
+        while true {
+            let c = read_byte((buf as usize + i) as *const u8)
+            if c == 32u8 || c == 0u8 { break }
+            write_byte((out as usize + j) as *mut u8, c)
+            i = i + 1
+            j = j + 1
+        }
+        write_byte((out as usize + j) as *mut u8, 0u8)
+    }
+    return out
+}
+
+// Walk the route table as a slice: the cast gives a pointer to its first
+// element, and sizeof(Route) steps to the next.
+fn route_body(table: *const Route, count: usize, path: *const u8) -> *const u8 {
+    let want = unsafe { path as &str }
+    let mut i: usize = 0
+    while i < count {
+        let r = unsafe { (table as usize + i * sizeof(Route)) as *const Route }
+        let have = unsafe { (*r).path as &str }
+        if have == want { return unsafe { (*r).body } }
+        i = i + 1
+    }
+    return unsafe { 0 as *const u8 }
+}
+
+fn send(fd: i32, status: *const u8, body: *const u8) {
+    write(fd, status as *const u8, strlen(status))
+    let body_len = strlen(body)
+    write(fd, "Content-Length: " as *const u8, 16)
+    let digits = alloc(24)
+    let mut n = body_len
+    unsafe {
+        let mut d: usize = 0
+        if n == 0 { write_byte(digits, 48u8); d = 1 }
+        while n > 0 { write_byte((digits as usize + d) as *mut u8, (48u8 + (n % 10) as u8)); n = n / 10; d = d + 1 }
+        while d > 0 { d = d - 1; write(fd, (digits as usize + d) as *const u8, 1) }
+    }
+    write(fd, "\r\nConnection: close\r\n\r\n" as *const u8, 25)
+    write(fd, body, body_len)
+    dealloc(digits)
+}
+
+fn main() -> i32 {
+    let routes = [
+        Route { path: "/" as *const u8, body: "home page" as *const u8 },
+        Route { path: "/about" as *const u8, body: "about us" as *const u8 },
+        Route { path: "/api/health" as *const u8, body: "ok-true" as *const u8 },
+    ]
+    let table = routes as *const Route
+    let server = socket(2, 1, 0)
+    bind(server, sockaddr(8080u16) as *const u8, 16)
+    listen(server, 4)
+    println("listening")
+    let ok = "HTTP/1.1 200 OK\r\n"
+    let nf = "HTTP/1.1 404 Not Found\r\n"
+    let mut served = 0
+    while served < 4 {
+        let conn = accept(server, unsafe { 0 as *mut u8 }, unsafe { 0 as *mut i32 })
+        let buf = alloc(2048)
+        read(conn, buf, 2048)
+        let path = request_path(buf)
+        let body = route_body(table, 3, path)
+        if unsafe { body as usize } == 0 {
+            send(conn, nf, "not found")
+        } else {
+            send(conn, ok, body)
+        }
+        close(conn)
+        dealloc(buf)
+        dealloc(path)
+        served = served + 1
+    }
+    close(server)
+    return 0
+}

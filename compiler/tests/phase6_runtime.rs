@@ -1386,3 +1386,63 @@ fn a_byte_pointer_round_trips_through_a_string() {
     );
 }
 
+
+#[test]
+fn two_strings_are_equal_when_their_bytes_are() {
+    // `str` is a pointer, so `==` must compare bytes: comparing addresses
+    // would call two equal strings different.
+    expect_stdout(
+        "str_content_equality",
+        "fn copy_of(text: &str) -> &str {\n\
+             let buf = alloc(16)\n\
+             unsafe {\n\
+                 let n = byte_len(text)\n\
+                 let mut i: usize = 0\n\
+                 while i < n {\n\
+                     write_byte((buf as usize + i) as *mut u8, read_byte((text as *const u8 as usize + i) as *const u8))\n\
+                     i = i + 1\n\
+                 }\n\
+                 write_byte((buf as usize + n) as *mut u8, 0u8)\n\
+                 return buf as *const u8 as &str\n\
+             }\n\
+             return text\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let a = \"/about\"\n\
+             let b = copy_of(a)\n\
+             println_i64(if a == b { 1 } else { 0 })\n\
+             println_i64(if a == \"/other\" { 1 } else { 0 })\n\
+             println_i64(if a != \"/other\" { 1 } else { 0 })\n\
+             return 0\n\
+         }",
+        "1\n0\n1\n",
+    );
+}
+
+#[test]
+fn a_route_table_walks_by_pointer_arithmetic() {
+    expect_stdout(
+        "route_table_walk",
+        "struct Route { path: *const u8, body: *const u8 }\n\
+         fn lookup(table: *const Route, count: usize, want: *const u8) -> *const u8 {\n\
+             let key = unsafe { want as &str }\n\
+             let mut i: usize = 0\n\
+             while i < count {\n\
+                 let r = unsafe { (table as usize + i * sizeof(Route)) as *const Route }\n\
+                 if unsafe { (*r).path as &str } == key { return unsafe { (*r).body } }\n\
+                 i = i + 1\n\
+             }\n\
+             return unsafe { 0 as *const u8 }\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let routes = [\n\
+                 Route { path: \"/\" as *const u8, body: \"home\" as *const u8 },\n\
+                 Route { path: \"/about\" as *const u8, body: \"about us\" as *const u8 },\n\
+             ]\n\
+             let table = routes as *const Route\n\
+             println(unsafe { lookup(table, 2, \"/about\" as *const u8) as &str })\n\
+             return 0\n\
+         }",
+        "about us\n",
+    );
+}

@@ -379,3 +379,26 @@ pub fn umay_fail(message: *const u8) {
     umay_eprintln(message)
     exit(101)
 }
+
+// True when two NUL-terminated byte strings hold the same bytes.
+//
+// `str` is a pointer, so comparing two of them with `==` would compare
+// addresses and call two equal strings different. This is the comparison the
+// language promises, and it is what `==` on a `str` lowers to.
+pub fn umay_str_eq(a: *const u8, b: *const u8) -> bool {
+    unsafe {
+        let mut i: usize = 0
+        while true {
+            let left = umay_read_byte((a as usize + i) as *const u8)
+            let right = umay_read_byte((b as usize + i) as *const u8)
+            if left != right {
+                return false
+            }
+            if left == 0u8 {
+                return true
+            }
+            i = i + 1
+        }
+    }
+    return false
+}

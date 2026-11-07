@@ -193,6 +193,18 @@ impl Lowering<'_> {
                 Operand::Copy(out)
             }
             HirExprKind::Cast { expr, to } => {
+                // An array cast to a pointer takes the array's *address*, not its
+                // value: the value is the whole array and cannot live in a
+                // register, so a plain cast would read the first field and call
+                // that the pointer.
+                if matches!(self.types.kind(expr.ty), TyKind::Array { .. })
+                    && matches!(self.types.kind(*to), TyKind::RawPtr(_) | TyKind::RawPtrMut(_))
+                {
+                    let place = self.lower_place(expr);
+                    let tmp = self.temp_place(*to);
+                    self.assign(tmp.clone(), Rvalue::Ref { mutable: false, place }, e.span);
+                    return Operand::Copy(tmp);
+                }
                 let op = self.lower_expr(expr);
                 let tmp = self.temp_place(*to);
                 self.assign(tmp.clone(), Rvalue::Cast { operand: op, to: *to }, e.span);

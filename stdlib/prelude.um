@@ -44,6 +44,7 @@ extern fn umay_errno() -> i32
 extern fn umay_exit(code: i32) -> ()
 extern fn umay_read_u16(ptr: *const u8) -> u16
 extern fn umay_write_u16(ptr: *mut u8, value: u16) -> ()
+extern fn umay_str_eq(a: *const u8, b: *const u8) -> bool
 extern fn umay_read_u32(ptr: *const u8) -> u32
 extern fn umay_write_u32(ptr: *mut u8, value: u32) -> ()
 

@@ -284,10 +284,12 @@ Measured against a working router probe, in the order the gaps bite:
 - [x] `str`/`*const u8` bridging. `&str` to a byte pointer needs nothing special
   (it already is one); the reverse needs `unsafe`, because nothing checks that
   the bytes are NUL-terminated UTF-8.
-- [ ] Array pointer arithmetic with `sizeof` in a loop (`(p as usize + i *
-  sizeof(Route)) as *const Route`) still crashes when the resulting pointer is
-  read through a helper function. Worked around in probes by walking a
-  `HashMap` of paths instead.
+- [x] Array pointer arithmetic with `sizeof` in a loop. It was not the
+  arithmetic: lowering a array-to-pointer cast read the array's first field and
+  called that the pointer, so the base address was a string literal.
+- [x] `==` and `!=` on `str` compare bytes, not addresses. `str` is a pointer,
+  so the pointer comparison called two equal strings different, which is what
+  made every routed request answer 404.
 - [ ] A byte-slice type that carries its length, so a request body is one value
   instead of a pointer plus a manual length.
 - [ ] Header parsing and a request/response type — library work, not language

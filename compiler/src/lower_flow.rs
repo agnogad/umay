@@ -45,6 +45,12 @@ impl Lowering<'_> {
             HirBinaryOp::Or => return self.lower_short_circuit(false, lhs, rhs, e),
             _ => {}
         }
+        // Two `str` values are pointers, so `==` on them has to compare the
+        // bytes they point at. Comparing the pointers would call two equal
+        // strings different, which is never what a caller means.
+        if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) && self.is_str(lhs.ty) {
+            return self.lower_str_compare(op, lhs, rhs, e);
+        }
         let l = self.lower_expr(lhs);
         let r = self.lower_expr(rhs);
         let tmp = self.temp_place(e.ty);
@@ -53,6 +59,65 @@ impl Lowering<'_> {
             Rvalue::Binary { op: convert_binop(op), lhs: l, rhs: r },
             e.span,
         );
+        Operand::Copy(tmp)
+    }
+
+    /// True for `str` and `&str`, whose `==` means "the same bytes".
+    fn is_str(&mut self, ty: crate::types::TyId) -> bool {
+        match self.types.kind(ty) {
+            TyKind::Str => true,
+            TyKind::Ref(inner) | TyKind::RefMut(inner) => matches!(self.types.kind(*inner), TyKind::Str),
+            _ => false,
+        }
+    }
+
+    /// Lowers `a == b` on `str` to a call to the runtime's byte comparison.
+    fn lower_str_compare(
+        &mut self,
+        op: HirBinaryOp,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+        e: &HirExpr,
+    ) -> Operand {
+        let Some(fn_id) = self.hir.fns.iter().find(|f| f.name == "umay_str_eq").map(|f| f.id) else {
+            // The runtime is always in the prelude, so this cannot happen; fall
+            // back to the pointer comparison rather than emitting nothing.
+            let l = self.lower_expr(lhs);
+            let r = self.lower_expr(rhs);
+            let tmp = self.temp_place(e.ty);
+            self.assign(tmp.clone(), Rvalue::Binary { op: convert_binop(op), lhs: l, rhs: r }, e.span);
+            return Operand::Copy(tmp);
+        };
+        let mut a = self.lower_expr(lhs);
+        let mut b = self.lower_expr(rhs);
+        // The runtime takes `*const u8`; a `&str` is the same word.
+        if let TyKind::Ref(_) | TyKind::RefMut(_) = self.types.kind(lhs.ty) {
+            a = self.reinterpret_str(a, lhs);
+        }
+        if let TyKind::Ref(_) | TyKind::RefMut(_) = self.types.kind(rhs.ty) {
+            b = self.reinterpret_str(b, rhs);
+        }
+        let bool_ty = self.types.bool_ty();
+        let callee = Operand::Constant(Constant::Fn(fn_id));
+        let dest = self.temp_place(bool_ty);
+        let next = self.new_block();
+        self.terminate(
+            Terminator::Call { callee, args: vec![a, b], destination: Some(dest.clone()), target: next, unwind: Vec::new(), span: e.span },
+            next,
+        );
+        if op == HirBinaryOp::Ne {
+            let out = self.temp_place(e.ty);
+            self.assign(out.clone(), Rvalue::Unary { op: crate::mir::UnOp::Not, operand: Operand::Copy(dest) }, e.span);
+            return Operand::Copy(out);
+        }
+        Operand::Copy(dest)
+    }
+
+    fn reinterpret_str(&mut self, op: Operand, from: &HirExpr) -> Operand {
+        let u8_ty = self.types.u8_ty();
+        let to = self.types.raw_ptr(u8_ty);
+        let tmp = self.temp_place(to);
+        self.assign(tmp.clone(), Rvalue::Cast { operand: op, to }, from.span);
         Operand::Copy(tmp)
     }
 
@@ -129,7 +194,28 @@ impl Lowering<'_> {
 
     pub(crate) fn lower_call(&mut self, callee: &HirExpr, args: &[HirExpr], e: &HirExpr) -> Operand {
         let callee_op = self.lower_expr(callee);
-        let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+        // A bare literal argument takes its parameter's width. Without this the
+        // literal keeps the default `i32`, but the selector moves an unresolved
+        // literal a whole word, so the upper half of the register handed to the
+        // callee is not the sign extension the ABI promises -- a `16` passed as
+        // an `i32` length arrived with junk above it.
+        let params: Option<Vec<crate::types::TyId>> = match self.types.kind(callee.ty) {
+            TyKind::FnPtr { params, .. } => Some(params.clone()),
+            _ => None,
+        };
+        let mut arg_ops: Vec<Operand> = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let op = self.lower_expr(a);
+            let want = params.as_ref().and_then(|p| p.get(i)).copied();
+            match want {
+                Some(w) if self.types.is_integer_var(a.ty) && self.types.is_integer(w) => {
+                    let tmp = self.temp_place(w);
+                    self.assign(tmp.clone(), Rvalue::Cast { operand: op, to: w }, a.span);
+                    arg_ops.push(Operand::Copy(tmp));
+                }
+                _ => arg_ops.push(op),
+            }
+        }
         let dest = if matches!(self.types.kind(e.ty), TyKind::Unit) {
             None
         } else {
