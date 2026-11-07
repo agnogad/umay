@@ -109,6 +109,7 @@ impl<'a> Checker<'a> {
                         name: t.name.clone(),
                         span: t.name_span,
                         generics: t.generics.iter().map(|g| g.name.clone()).collect(),
+                        impls: Vec::new(),
                         methods: Vec::new(),
                     });
                 }
@@ -229,6 +230,29 @@ impl<'a> Checker<'a> {
         let Some(self_ty_name) = type_name_of(&block.self_ty) else {
             return;
         };
+        // `impl Trait for Type` says the type carries the trait. A marker trait
+        // has no methods to record it by, so the block itself is the evidence,
+        // and a call that demands the marker reads this list.
+        if let Some(trait_name) = block.trait_path.as_ref().and_then(|p| p.segments.last()) {
+            let params: Vec<String> = block.generics.iter().map(|g| g.name.clone()).collect();
+            let bounded_all = !params.is_empty()
+                && params.iter().all(|p| {
+                    block
+                        .generics
+                        .iter()
+                        .find(|g| &g.name == p)
+                        .map(|g| g.bounds.iter().any(|b| b.segments.last().map(|s| s.name == trait_name.name).unwrap_or(false)))
+                        .unwrap_or(false)
+                });
+            if let Some(info) = self.hir.traits.iter_mut().find(|t| t.name == trait_name.name) {
+                info.impls.push(crate::hir::TraitImplInfo {
+                    type_name: self_ty_name.clone(),
+                    generics: params,
+                    bounded_all,
+                    span: block.span,
+                });
+            }
+        }
         for method in &block.methods {
             let id = FnId(self.hir.fns.len() as u32);
             self.methods.insert((self_ty_name.clone(), method.name.clone()), id);

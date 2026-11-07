@@ -36,6 +36,15 @@ impl FnChecker<'_, '_> {
             }
         }
 
+        // `thread_spawn<A, R>(work, arg)` hands a value to another thread. The
+        // markers say which values may cross and nothing else checks them, so the
+        // demand is made where the crossing happens.
+        if let ast::ExprKind::Path(path) = &callee.kind {
+            if path.segments.len() == 1 && path.segments[0].name == "thread_spawn" {
+                return self.check_thread_spawn(path, args, span, hint);
+            }
+        }
+
         let callee_hir = self.check_expr(callee);
         let arg_hirs: Vec<HirExpr> = args.iter().map(|a| self.check_expr(a)).collect();
 
@@ -1284,6 +1293,171 @@ impl FnChecker<'_, '_> {
     /// `offset(n)` moves the pointer by `n` elements of the pointee type. The
     /// multiplication by the element size happens in code generation, so the
     /// count stays in elements and never in bytes.
+    /// `thread_spawn<A, R>(work, arg)`: moves `arg` to a thread and returns a
+    /// handle whose join answers `R`.
+    ///
+    /// The type arguments are written because nothing else in the call names them:
+    /// `A` is the value crossing the boundary and `R` is what the thread answers.
+    /// Requiring them is what makes the `Send` check possible at all -- by the
+    /// time the argument reaches the thread it would otherwise be a `*mut u8`,
+    /// with the type already gone.
+    fn check_thread_spawn(
+        &mut self,
+        path: &ast::Path,
+        args: &[ast::Expr],
+        span: crate::source::Span,
+        hint: Option<crate::types::TyId>,
+    ) -> HirExpr {
+        let mut ty_args: Vec<TyId> = path.segments[0]
+            .args
+            .iter()
+            .map(|a| {
+                let generics = self.generics.clone();
+                self.cx.resolve_type(a, &generics)
+            })
+            .collect();
+        if ty_args.len() != 2 {
+            self.push(
+                Diagnostic::error(
+                    "E1004",
+                    format!(
+                        "`thread_spawn` takes 2 type arguments, found {}",
+                        ty_args.len()
+                    ),
+                )
+                .at(path.span)
+                .with_cause("the value crossing the boundary and the result are both unnameable otherwise")
+                .with_suggestion(Suggestion::new(
+                    "write both type arguments",
+                    path.span,
+                    "thread_spawn::<A, R>(..)",
+                )),
+            );
+            return self.error_hir(span);
+        }
+        let result_ty = ty_args.pop().unwrap_or_else(|| self.cx.cx.error());
+        let value_ty = ty_args.pop().unwrap_or_else(|| self.cx.cx.error());
+        let arg_hirs: Vec<HirExpr> = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                // The first argument is the value; the rest belong to the callee
+                // and are checked by its own signature.
+                let expected = if i == 1 { Some(value_ty) } else { None };
+                self.check_expr_hinted(a, expected)
+            })
+            .collect();
+        if arg_hirs.len() != 2 {
+            self.push(
+                Diagnostic::error(
+                    "E1004",
+                    format!(
+                        "`thread_spawn` takes 2 arguments, but {} were supplied",
+                        arg_hirs.len()
+                    ),
+                )
+                .at(span)
+                .with_cause("a spawn takes the work to run and the value it is given"),
+            );
+            return self.error_hir(span);
+        }
+        // The value crossing the boundary is the one the marker governs.
+        self.require_send(value_ty, arg_hirs[1].span, "the value handed to `thread_spawn`");
+        let callee = HirExpr {
+            kind: HirExprKind::NamedFn("umay_thread_spawn".to_string()),
+            ty: self.cx.cx.fn_ptr(Vec::new(), result_ty),
+            span: path.span,
+        };
+        HirExpr {
+            kind: HirExprKind::Call { callee: Box::new(callee), args: arg_hirs },
+            ty: result_ty,
+            span,
+        }
+    }
+
+    /// Reports `E1016` unless `ty` carries the `Send` marker.
+    ///
+    /// The answer is read from the `impl Send for ..` blocks the standard library
+    /// and the program write, never inferred: a guess here would be a memory bug
+    /// introduced by the compiler rather than prevented by it.
+    pub(crate) fn require_send(&mut self, ty: TyId, span: crate::source::Span, what: &str) {
+        if self.cx.cx.is_error(ty) || self.cx.cx.is_infer_var(ty) {
+            return;
+        }
+        if self.is_send(ty) {
+            return;
+        }
+        let name = self.cx.ty_name(ty);
+        let mut d = Diagnostic::error("E1016", format!("`{name}` does not implement `Send`"))
+            .at(span)
+            .with_cause(format!("{what} is moved to another thread, and the marker says whether it may be"))
+            .with_explanation(
+                "Ownership and borrows are statements about one thread; a value that moves \
+                 to another escapes them, so the language asks the type to say it is safe. \
+                 Writing `impl Send for Type {}` is how a type answers yes, and nothing is \
+                 inferred: forgetting the `impl` is an error, which is the safe direction.",
+            );
+        if let Some(ty_name) = self.nominal_name(ty) {
+            d = d.with_suggestion(Suggestion::new(
+                format!("add `impl Send for {ty_name} {{}}`"),
+                span,
+                format!("impl Send for {ty_name} {{}}"),
+            ));
+        }
+        self.push(d);
+    }
+
+    /// True when `ty` carries the `Send` marker.
+    pub(crate) fn is_send(&mut self, ty: TyId) -> bool {
+        if self.cx.cx.is_error(ty) {
+            return true;
+        }
+        // A parameter carries whatever its bound promised.
+        if let TyKind::Param { name } = self.cx.cx.kind(ty).clone() {
+            return self
+                .cx
+                .cx
+                .param_bounds
+                .iter()
+                .any(|b| b.param == name && b.trait_name == "Send");
+        }
+        let Some(impls) = self
+            .cx
+            .hir
+            .traits
+            .iter()
+            .find(|t| t.name == "Send")
+            .map(|t| t.impls.clone())
+        else {
+            return false;
+        };
+        match self.cx.cx.kind(ty).clone() {
+            TyKind::Adt { def, args } => {
+                let name = self.cx.hir.def_name(def);
+                let Some(info) = impls.iter().find(|i| i.type_name == name) else {
+                    return false;
+                };
+                // `impl<T: Send> Send for Vec<T>` promises nothing until every
+                // argument is itself `Send`.
+                if info.bounded_all {
+                    return args.iter().all(|a| self.is_send(*a));
+                }
+                true
+            }
+            TyKind::Ref(_) | TyKind::RawPtr(_) | TyKind::RawPtrMut(_) => {
+                // A shared borrow travels with the thread that owns the value, and
+                // the raw forms carry no guarantee at all. `Sync` is the marker for
+                // a shared borrow and nothing reads it yet, so both are refused
+                // rather than assumed.
+                false
+            }
+            _ => {
+                let name = self.cx.ty_name(ty);
+                impls.iter().any(|i| i.type_name == name)
+            }
+        }
+    }
+
     fn check_raw_ptr_method(
         &mut self,
         recv: HirExpr,

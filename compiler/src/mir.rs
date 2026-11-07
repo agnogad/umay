@@ -187,6 +187,12 @@ pub enum Constant {
     Unit,
     /// A function pointer.
     Fn(FnId),
+    /// A call to a library function whose symbol is known by name.
+    ///
+    /// A language-level construct that lowers to a call needs a callee, and a
+    /// construct has no `FnId` of its own. Naming the symbol is enough for the
+    /// backend, which resolves a named callee to a direct call anyway.
+    NamedFn(String),
     /// A constant, referenced by id so that its initialiser is not duplicated.
     Const(ConstId),
     /// A unit-only enum variant, e.g. `Color::Red`. The variant index is the

@@ -49,6 +49,10 @@ pub const PRELUDE_SOURCE: &str = concat!(
     include_str!("../../stdlib/json.um"),
     "\n",
     include_str!("../../stdlib/net.um"),
+    "\n",
+    // The thread layer is last because it is the one that declares the markers
+    // the others' `impl`s are written against.
+    include_str!("../../stdlib/thread.um"),
 );
 
 /// The name the prelude's file is registered under in the source map.

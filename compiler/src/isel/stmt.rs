@@ -489,13 +489,28 @@ impl<'a, 't> Isel<'a, 't> {
     fn cast(&mut self, dst: &Place, operand: &Operand, to: TyId) -> Result<(), String> {
         let from = self.operand_ty(operand);
         // A string literal becomes an address, which is a full word regardless of
-        // what `operand_ty` reports for a constant.
-        let from_width = if matches!(operand, Operand::Constant(Constant::Str(_))) {
+        // what `operand_ty` reports for a constant. A function used as a value is
+        // an address too, and reading it at its result type's width truncated it
+        // to a byte.
+        let from_width = if matches!(
+            operand,
+            Operand::Constant(Constant::Str(_)) | Operand::Constant(Constant::Fn(_))
+        ) {
             RegWidth::W64
         } else {
             self.width(from)?
         };
-        let to_width = self.width(to)?;
+        // A cast to a pointer or function pointer is a cast to an address, so the
+        // target is a word even when the destination type is a byte.
+        let to_width = if matches!(
+            self.types().kind(to),
+            TyKind::RawPtr(_) | TyKind::RawPtrMut(_) | TyKind::FnPtr { .. } | TyKind::Ref(_)
+                | TyKind::RefMut(_) | TyKind::Str
+        ) {
+            RegWidth::W64
+        } else {
+            self.width(to)?
+        };
         let src = self.operand_to_reg(operand)?;
         let result = self.vreg();
         let signed = self.types().is_signed(from);

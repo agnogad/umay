@@ -135,10 +135,30 @@ impl VariantFields {
 pub struct TraitInfo {
     pub name: String,
     pub span: Span,
+    /// The `impl Trait for Type` blocks written for this trait.
+    ///
+    /// A marker trait like `Send` has no methods, so nothing else records that a
+    /// type carries it: a call that demands the marker has to read this list.
+    /// The arguments are the parameter names of a generic `impl`, empty for the
+    /// common case, and `bounded_all` says whether every parameter must itself
+    /// carry the marker (`impl<T: Send> Send for Vec<T>`).
+    pub impls: Vec<TraitImplInfo>,
     /// The trait's own parameter names, in declaration order, so that a bound's
     /// arguments can be paired with the types a method mentions.
     pub generics: Vec<String>,
     pub methods: Vec<TraitMethodInfo>,
+}
+
+/// One `impl Trait for Type` block.
+#[derive(Debug, Clone)]
+pub struct TraitImplInfo {
+    /// The implemented type's name, as written.
+    pub type_name: String,
+    /// The parameter names the `impl` block declared, in order.
+    pub generics: Vec<String>,
+    /// True when every one of those parameters carries the same trait.
+    pub bounded_all: bool,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -258,6 +278,9 @@ pub enum HirExprKind {
     // ---- names ----
     Local(LocalId),
     FnRef(FnId),
+    /// A library function named by its symbol, for a construct that lowers to a
+    /// call but has no declaration to point at.
+    NamedFn(String),
     ConstRef(ConstId),
     /// Unit variant used as a value: `Status::Active`
     UnitVariant { def: DefId, index: u32 },
@@ -599,6 +622,7 @@ fn rewrite_expr(e: &mut HirExpr, map: &std::collections::HashMap<TyId, TyId>) {
         | HirExprKind::BoolLit(_)
         | HirExprKind::Local(_)
         | HirExprKind::FnRef(_)
+        | HirExprKind::NamedFn(_)
         | HirExprKind::ConstRef(_)
         | HirExprKind::UnitVariant { .. }
         | HirExprKind::Continue

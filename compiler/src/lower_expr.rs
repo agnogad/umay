@@ -160,6 +160,7 @@ impl Lowering<'_> {
                 }
             }
             HirExprKind::FnRef(id) => Operand::Constant(Constant::Fn(*id)),
+            HirExprKind::NamedFn(name) => Operand::Constant(Constant::NamedFn(name.clone())),
             HirExprKind::UnitVariant { def, index } => {
                 // A fieldless variant is still a value with a tag: build it as an
                 // aggregate so the backend writes that tag like any other variant.

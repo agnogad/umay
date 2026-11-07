@@ -1988,9 +1988,9 @@ fn two_generic_parameters_named_t_do_not_share_a_bound() {
     // `Iterator` bound, and `sum + v` inside the iterator helper was then rejected
     // with "`+` is not defined for `T`".
     let source = r##"
-trait Send {}
-trait Sync {}
-impl Send for i64 {}
+trait Shippable {}
+trait Shareable {}
+impl Shippable for i64 {}
 trait Agent { fn step(&mut self) -> i64 }
 struct Worker { at: i64 }
 impl Agent for Worker {
@@ -2008,7 +2008,7 @@ fn drive<T: Agent>(it: &mut T, times: usize) -> i64 {
     }
     return sum
 }
-fn needs_send<T: Send>(x: &T) -> bool { return true }
+fn needs_send<T: Shippable>(x: &T) -> bool { return true }
 fn main() -> i32 {
     let mut w = Worker { at: 0i64 }
     println_i64(drive(&mut w, 3usize))
@@ -2084,4 +2084,84 @@ fn main() -> i32 {
 }
 "##;
     expect_stdout("generic_binding_param", source, "7\n41\n");
+}
+
+// ---------------------------------------------------------------------------
+// Send, and the checked fan-out
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_value_that_cannot_cross_is_refused_before_it_is_spawned() {
+    let source = r#"
+struct NotSend {
+    n: i64,
+}
+
+fn work(v: usize) -> usize {
+    return v
+}
+
+fn main() -> i32 {
+    let job = NotSend { n: 1i64 }
+    let answer: usize = thread_spawn::<NotSend, usize>(unsafe { work as *const u8 }, job)
+    return answer as i32
+}
+"#;
+    build_fails_with("send_rejected", source, "E1016");
+}
+
+#[test]
+fn a_value_that_may_cross_is_run_and_its_answer_returned() {
+    if !toolchain_available() {
+        return;
+    }
+    let run = build_and_run(
+        "send_spawns",
+        r#"
+struct Job {
+    n: usize,
+}
+
+impl Send for Job {}
+
+fn work(v: usize) -> usize {
+    return v * 2usize
+}
+
+fn main() -> i32 {
+    let job = Job { n: 21usize }
+    let answer: usize = thread_spawn::<Job, usize>(unsafe { work as *const u8 }, job.n)
+    println_i64(answer as i64)
+    return 0
+}
+"#,
+    );
+    assert_eq!(run.stdout, "42\n");
+    assert_eq!(run.status, 0);
+}
+
+#[test]
+fn a_function_used_as_a_value_is_its_address() {
+    if !toolchain_available() {
+        return;
+    }
+    let run = build_and_run(
+        "fn_value",
+        r#"
+fn twice(v: usize) -> usize {
+    return v * 2usize
+}
+
+fn main() -> i32 {
+    unsafe {
+        let entry = twice as *const u8
+        let f = entry as *const fn(usize) -> usize
+        println_i64((*f)(21usize) as i64)
+    }
+    return 0
+}
+"#,
+    );
+    assert_eq!(run.stdout, "42\n");
+    assert_eq!(run.status, 0);
 }

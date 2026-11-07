@@ -434,7 +434,13 @@ impl FnChecker<'_, '_> {
             // An array may be viewed as a pointer to its first element, which is
             // how a static table of routes or a byte buffer reaches an API that
             // takes a pointer.
-            || (is_raw_ptr(&self.cx.cx, to) && is_array_of(&self.cx.cx, from_concrete, to));
+            || (is_raw_ptr(&self.cx.cx, to) && is_array_of(&self.cx.cx, from_concrete, to))
+            // A function may be viewed as a byte pointer, which is how its address
+            // is handed to a C function that will call it. Nothing checks that the
+            // signature at the other end matches, so it needs `unsafe`.
+            || (is_byte_ptr(&self.cx.cx, to)
+                && matches!(self.cx.cx.kind(from_concrete), TyKind::FnPtr { .. })
+                && self.unsafe_depth > 0);
         if !allowed {
             let f = self.cx.ty_name(from_concrete);
             let t = self.cx.ty_name(to);

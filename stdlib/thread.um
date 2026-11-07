@@ -60,7 +60,93 @@ struct Thread {
     joined: bool,
 }
 
+// Runs `work(value)` in a child process and returns the answer it left behind.
+//
+// The child is a `spawn`ed process rather than a thread: it gets its own copy of
+// memory, so there is no shared mutable cell and nothing to lock. The value is
+// carried in an argument and the answer comes back through a pipe, which is what
+// makes both cross the boundary without a shared address.
+//
+// `A` and `R` are written by the caller because nothing else names them: by the
+// time the value reaches the child it would be bytes. Naming them is what lets
+// the language check that `A` may cross at all -- that is what `Send` is for.
+//
+// The answer must fit in eight bytes. A larger one is refused at compile time by
+// `sizeof`, rather than being truncated to something that compiles.
+fn thread_spawn<A: Send, R>(work: *const u8, value: A) -> R {
+    if sizeof(R) > 8usize {
+        panic("thread_spawn: the answer must fit in eight bytes")
+    }
+    let pipe = alloc(8)
+    if umay_pipe(pipe) != 0 {
+        dealloc(pipe)
+        panic("thread_spawn: cannot create the result channel")
+    }
+    let read_end = read_u32(pipe) as i32
+    let write_end = read_u32(pipe.offset(4)) as i32
+    let pid = spawn()
+    if is_child(pid) {
+        umay_close(read_end)
+        let answer = call_one(work, value)
+        let out = alloc(8)
+        write_i64(out, answer as i64)
+        umay_write(write_end, out, 8usize)
+        dealloc(out)
+        umay_close(write_end)
+        exit(0)
+    }
+    umay_close(write_end)
+    let gathered = alloc(8)
+    let got = umay_read(read_end, gathered, 8usize)
+    umay_close(read_end)
+    dealloc(pipe)
+    let status = alloc(4)
+    umay_waitpid(pid, status as *mut i32, 0)
+    dealloc(status)
+    if got != 8isize {
+        dealloc(gathered)
+        panic("thread_spawn: the child left no answer")
+    }
+    let answer = read_i64(gathered)
+    dealloc(gathered)
+    return from_usize::<R>(answer as usize)
+}
+
+// Reads an `R` back out of the eight bytes the child left.
+//
+// A cast cannot produce an arbitrary type, so the bytes are handed over by
+// address and read as the caller's type. The size check above is what makes this
+// sound: anything larger would be read past the end of the channel.
+fn from_usize<R>(bits: usize) -> R {
+    let cell = alloc(sizeof(R))
+    unsafe {
+        let mut start = 0 as usize
+        while start < sizeof(R) {
+            write_byte(cell.offset(start as isize), read_byte((bits + start) as *const u8))
+            start = start + 1 as usize
+        }
+        let out = *(cell as *const R)
+        dealloc(cell)
+        return out
+    }
+}
+
+// Calls a function that takes one `usize` and returns a `usize`.
+//
+// A function value cannot be cast to a byte pointer yet, so the entry arrives as
+// one and is called through this one place, where the cast is written once.
+fn call_one(work: *const u8, value: usize) -> usize {
+    unsafe {
+        let f = work as *const fn(usize) -> usize
+        return (*f)(value)
+    }
+}
+
 // Starts a thread that runs `entry(arg)`.
+//
+// This is the unchecked form: the value is already a raw pointer, so its type is
+// gone and nothing can say whether it may cross. `thread_spawn` above is the
+// checked one and is the one to prefer.
 //
 // Reading the result is the price of a raw pointer: `arg` is an address the caller
 // allocated, and the thread frees it only if the caller says so. That contract is
@@ -72,12 +158,12 @@ struct Thread {
 // needs turbofish to name the result type -- not yet supported. So `Send` is
 // declared and implemented, and checked by nothing, which is what this comment
 // says rather than what the marker's presence might suggest.
-fn thread_spawn(entry: *const u8, arg: *mut u8) -> Thread {
+fn thread_start(entry: *const u8, arg: *mut u8) -> Thread {
     let handle = alloc(8)
-    let ok = unsafe { umay_c_pthread_create(handle, 0 as *const u8, entry, arg) }
+    let ok = unsafe { umay_c_pthread_create(handle, 0usize as *const u8, entry, arg) }
     if ok != 0 {
         dealloc(handle)
-        return Thread { handle: 0 as *mut u8, joined: false }
+        return Thread { handle: unsafe { 0usize as *mut u8 }, joined: false }
     }
     return Thread { handle: handle, joined: false }
 }
@@ -89,11 +175,11 @@ fn thread_failed(t: &Thread) -> bool {
 
 // Waits for the thread to finish.
 fn thread_join(t: &mut Thread) -> bool {
-    if t.joined || thread_failed(t) {
+    if t.joined || unsafe { t.handle as usize } == 0usize {
         return false
     }
     let result = alloc(8)
-    let ok = unsafe { umay_c_pthread_join(t.handle, result) }
+    let ok = unsafe { umay_c_pthread_join(t.handle, result as *mut *mut u8) }
     dealloc(result)
     t.joined = true
     return ok == 0

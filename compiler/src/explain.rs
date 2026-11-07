@@ -345,6 +345,15 @@ pub static EXPLAIN: &[ExplainEntry] = &[
          a type that can carry that failure, otherwise the early return would have nowhere to go.",
         Some("fn parse(s: str) -> Option<i32> {\n    let n = read_number(s)?\n    Some(n)\n}"),
     ),
+    e(
+        "E1016",
+        "type does not implement `Send`",
+        "A value is being moved to another thread, and its type has not said it may be. Ownership \
+         and borrows are statements about one thread; a value that moves to another escapes them, \
+         so the language asks the type to answer. Nothing is inferred: `impl Send for Type {}` is \
+         the answer, and forgetting it is an error rather than a silent unsafe move.",
+        Some("impl Send for Job {}\nlet t = thread_spawn::<Job, i64>(work, job)"),
+    ),
     // ---- ownership and borrowing ------------------------------------------
     e(
         "E0201",

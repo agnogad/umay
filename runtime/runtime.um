@@ -40,6 +40,7 @@ extern fn "lseek" umay_c_lseek(fd: i32, offset: i64, whence: i32) -> i64
 
 // `getenv(name)` returns the value of an environment variable, or 0.
 extern fn "getenv" umay_c_getenv(name: *const u8) -> *const u8
+extern fn "pipe" umay_c_pipe(fds: *mut u8) -> i32
 
 // `errno` is a macro over a function on glibc, so it cannot be declared directly.
 // This accessor is the portable spelling: glibc exports `__errno_location`, a
@@ -419,7 +420,87 @@ pub fn umay_fork() -> i32 {
     return umay_c_fork()
 }
 
+// Runs `work(value)` in a child process and returns what it answered.
+//
+// This is the checked fan-out's other half: the front end has already refused an
+// `A` that does not carry `Send`, so by the time the call arrives the value is
+// known to be safe to move. The child writes its answer to a pipe and the parent
+// waits for it, which is the whole of the hand-off.
+//
+// Everything is eight bytes wide: `A` and `R` are checked against each other's
+// size by the caller, and a wider type is refused rather than truncated.
+pub fn umay_thread_spawn(work: *const u8, value: usize) -> usize {
+    let pipe = umay_c_malloc(8)
+    if umay_pipe(pipe) != 0 {
+        umay_c_free(pipe)
+        return 0
+    }
+    let read_end = umay_read_u32(pipe) as i32
+    let write_end = umay_read_u32(pipe.offset(4)) as i32
+    let pid = umay_c_fork()
+    if pid == 0 {
+        umay_c_close(read_end)
+        let entry = work as *const fn(usize) -> usize
+        let answer = unsafe { (*entry)(value) }
+        let out = umay_c_malloc(8)
+        umay_c_write_i64(out, answer as i64)
+        umay_c_write(write_end, out, 8)
+        umay_c_free(out)
+        umay_c_close(write_end)
+        umay_c_exit(0)
+    }
+    umay_c_close(write_end)
+    let gathered = umay_c_malloc(8)
+    let got = umay_c_read(read_end, gathered, 8)
+    umay_c_close(read_end)
+    umay_c_free(pipe)
+    let status = umay_c_malloc(4)
+    umay_c_waitpid(pid, status as *mut i32, 0)
+    umay_c_free(status)
+    if got != 8 {
+        umay_c_free(gathered)
+        return 0
+    }
+    let answer = umay_read_i64(gathered) as usize
+    umay_c_free(gathered)
+    return answer
+}
+
+// Writes an `i64` to a raw address, for the thread hand-off.
+fn umay_c_write_i64(ptr: *mut u8, value: i64) {
+    umay_write_i64(ptr, value)
+}
+
+// Creates a pipe and writes its two descriptors into `fds`: the reading end
+// first, then the writing end. Returns 0, or -1 when the system refuses.
+pub fn umay_pipe(fds: *mut u8) -> i32 {
+    return umay_c_pipe(fds)
+}
+
 // Waits for any child to finish and returns its id, or `-1`.
 pub fn umay_waitpid(pid: i32, status: *mut i32, options: i32) -> i32 {
     return umay_c_waitpid(pid, status, options)
+}
+
+// Waits for `pid` to finish and returns the exit status it left.
+//
+// `waitpid` reports the status in a packed word -- the exit code is its second
+// byte -- so a caller who wants the number the child returned goes through here
+// rather than guessing at the packing.
+pub fn umay_wait_exit(pid: i32) -> i32 {
+    let status = umay_c_malloc(4)
+    let got = umay_c_waitpid(pid, status as *mut i32, 0)
+    if got < 0 {
+        umay_c_free(status)
+        return -1
+    }
+    let packed = umay_read_u32(status) as i32
+    umay_c_free(status)
+    // A process killed by a signal has no exit status; report the signal as a
+    // negative number so the two cases cannot be confused for one another.
+    let signal = packed & 0x7f
+    if signal != 0 {
+        return 0 - signal
+    }
+    return (packed >> 8) & 0xff
 }

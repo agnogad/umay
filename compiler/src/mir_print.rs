@@ -157,6 +157,7 @@ fn print_constant(c: &Constant, types: &mut crate::types::TyCtxt, strings: &[Str
         Constant::Str(id) => format!("const {}", str_ann(*id, strings)),
         Constant::Unit => "const ()".to_string(),
         Constant::Fn(f) => format!("const fn{}", f.0),
+        Constant::NamedFn(name) => format!("const {name}"),
         Constant::Const(c) => format!("const c{}", c.0),
         Constant::UnitVariant { def, index } => format!("const variant(def{}, {})", def.0, index),
     }

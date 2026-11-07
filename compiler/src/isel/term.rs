@@ -143,6 +143,10 @@ impl<'a, 't> Isel<'a, 't> {
         if let Operand::Constant(Constant::Fn(id)) = callee {
             return self.call_symbol(&symbol_for(*id, self.fn_symbols), args, destination, target, out);
         }
+        // A construct that lowers to a library call names its symbol directly.
+        if let Operand::Constant(Constant::NamedFn(name)) = callee {
+            return self.call_symbol(name, args, destination, target, out);
+        }
 
         // Evaluate every argument into a register first. Doing this before
         // writing the argument registers is what makes the sequence correct when
@@ -563,6 +567,14 @@ impl<'a, 't> Isel<'a, 't> {
     pub(crate) fn epilogue_label(&self) -> Label {
         Label(self.block_labels.len() as u32)
     }
+}
+
+/// The symbol a function id is called by.
+pub(crate) fn term_symbol_for(
+    id: crate::hir::FnId,
+    symbols: &std::collections::HashMap<crate::hir::FnId, String>,
+) -> String {
+    symbol_for(id, symbols)
 }
 
 /// The symbol a function id is called by.

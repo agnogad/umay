@@ -362,6 +362,25 @@ impl<'a, 't> Isel<'a, 't> {
         Ok(dst)
     }
 
+    /// The place to read a function pointer from, when the projection ends in
+    /// one dereference of a function pointer.
+    ///
+    /// A `*const fn(..)` is not a pointer to a pointer to code; it is a pointer
+    /// to code. Dereferencing it once names the function, so the value to load is
+    /// the pointer itself.
+    pub(crate) fn fn_ptr_place(&mut self, place: &Place) -> Option<Place> {
+        let last = place.projection.last()?;
+        if !matches!(last, Projection::Deref) {
+            return None;
+        }
+        let mut probe = Place { local: place.local, projection: place.projection[..place.projection.len() - 1].to_vec() };
+        let ty = self.place_ty(&probe);
+        if matches!(self.types().kind_owned(ty), TyKind::RawPtr(inner) | TyKind::Ref(inner) | TyKind::RefMut(inner) if matches!(self.types().kind_owned(inner), TyKind::FnPtr { .. })) {
+            return Some(probe);
+        }
+        None
+    }
+
     /// Materialises `mem`'s address into a register.
     pub(crate) fn mem_to_reg(&mut self, mem: &Mem, _width: RegWidth) -> Result<Reg, String> {
         if let (Some(base), None) = (mem.base, mem.index) {
@@ -379,6 +398,14 @@ impl<'a, 't> Isel<'a, 't> {
         match op {
             Operand::Copy(place) | Operand::Move(place) => {
                 let ty = self.place_ty(place);
+                // One level of dereference on a function pointer is already
+                // applied. A `fn` value is the address of its code, so the place
+                // holds the address itself; loading what it points at would fetch
+                // the first instruction byte and call that as an address.
+                if let Some(inner) = self.fn_ptr_place(place) {
+                    let mem = self.place_addr(&inner)?;
+                    return self.load_place_mem(&mem, ty);
+                }
                 let mem = self.place_addr(place)?;
                 self.load_place_mem(&mem, ty)
             }
@@ -386,6 +413,18 @@ impl<'a, 't> Isel<'a, 't> {
                 // A `&str` is the address of a NUL-terminated buffer in
                 // `.rodata`. `lea` computes that address without reading memory.
                 let name = self.str_symbol(*id);
+                let dst = self.vreg();
+                self.emit(Inst::Lea {
+                    src: Mem::symbol(&name),
+                    dst: MOperand::Reg(dst),
+                });
+                Ok(dst)
+            }
+            Operand::Constant(Constant::Fn(id)) => {
+                // A function used as a value is its address. Taking it is what
+                // lets a function be handed to another function -- a thread's
+                // entry point, a callback -- which previously had no form.
+                let name = crate::isel::term::term_symbol_for(*id, self.fn_symbols);
                 let dst = self.vreg();
                 self.emit(Inst::Lea {
                     src: Mem::symbol(&name),

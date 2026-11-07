@@ -238,7 +238,7 @@ fn optimisation_levels_agree_on_the_result() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn an_unsupported_construct_is_reported_not_crashed() {
+fn a_function_value_is_called_through_its_pointer() {
     if !have_toolchain() {
         eprintln!("skipping: no toolchain");
         return;
@@ -247,9 +247,8 @@ fn an_unsupported_construct_is_reported_not_crashed() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
     let source = dir.join("main.um");
-    // Calling through a function value needs an indirect call, which the backend
-    // does not implement yet. The point of this test is that the gap produces a
-    // diagnostic rather than a crash or a wrong binary.
+    // A `fn` parameter is called through an indirect call: the callee is an
+    // address rather than a name, so the call goes through a register.
     std::fs::write(
         &source,
         "fn twice(x: i64) -> i64 {\n    return x * 2\n}\nfn apply(f: fn(i64) -> i64, v: i64) -> i64 {\n    return f(v)\n}\nfn main() -> i32 {\n    return apply(twice, 3) as i32\n}",
@@ -262,15 +261,11 @@ fn an_unsupported_construct_is_reported_not_crashed() {
         .output()
         .expect("run umay");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "should not have built");
-    assert!(
-        stderr.contains("E3001"),
-        "the failure must be a diagnostic, not a panic:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("panicked"),
-        "the compiler must not panic on an unsupported construct:\n{stderr}"
-    );
+    assert!(output.status.success(), "should have built:\n{stderr}");
+    assert!(!stderr.contains("panicked"), "the compiler must not panic:\n{stderr}");
+    let program = dir.join("dist").join("main");
+    let ran = Command::new(&program).output().expect("run program");
+    assert_eq!(ran.status.code(), Some(6), "`apply(twice, 3)` must return 6");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

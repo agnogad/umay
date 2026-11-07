@@ -241,8 +241,11 @@ fn parse_terminator(line: &str, strings: &mut Vec<String>, n: usize) -> Result<T
             Some(parse_place(dest_text, strings, n)?)
         };
         let after = line[eq + " = call ".len()..].trim_start_matches("call ");
-        let open = after
-            .find('(')
+        // The arguments open at the first `(` that is not part of a projection.
+        // A callee may name a dereference of a function pointer --
+        // `copy _2.(deref)(...)` -- so `(deref)` must not be mistaken for the
+        // argument list.
+        let open = argument_list_start(after)
             .ok_or_else(|| ParseError { line: n, message: "call without arguments".into() })?;
         let callee = parse_operand(&after[..open], strings, n)?;
         let arrow = after
@@ -537,6 +540,26 @@ fn parse_operand_list(s: &str, strings: &mut Vec<String>, n: usize) -> Result<Ve
     Ok(out)
 }
 
+/// The index of the `(` that opens a call's argument list.
+///
+/// A projected callee writes its dereferences as `.(deref)`, so those are
+/// skipped; the next `(` after them is the argument list.
+fn argument_list_start(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'(' {
+            if text[i..].starts_with("(deref)") {
+                i += "(deref)".len();
+                continue;
+            }
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 fn parse_operand(s: &str, strings: &mut Vec<String>, n: usize) -> Result<Operand, ParseError> {
     // The printer writes function constants as `const fn<id>`, matching the
     // spelling used for every other constant.
@@ -591,6 +614,14 @@ fn parse_constant(s: &str, strings: &mut Vec<String>, n: usize) -> Result<Consta
     if let Some(rest) = s.strip_prefix("fn") {
         let (id, _) = split_number(rest, n)?;
         return Ok(Constant::Fn(FnId(id)));
+    }
+    // A library function is printed by its symbol, which is not a number. It is
+    // only ever a callee, so any name that is not a literal is taken as one.
+    if !s.is_empty()
+        && !s.starts_with(|c: char| c.is_ascii_digit() || c == '+' || c == '-')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Ok(Constant::NamedFn(s.to_string()));
     }
     if let Some(rest) = s.strip_prefix('c') {
         if let Ok((id, _)) = split_number(rest, n) {
