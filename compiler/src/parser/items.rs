@@ -50,10 +50,30 @@ impl Parser {
             TokenKind::Keyword(Keyword::Fn) => {
                 let fn_span = self.span();
                 self.advance();
+                // `extern fn "symbol" name(..)` names the linker symbol separately
+                // from the UMAY name. The prelude needs this: it declares `read` and
+                // `write` to reach the C library, and a program is free to have its
+                // own `read`. Without a separate symbol the prelude would occupy
+                // those names for every program.
+                let link_name = if is_extern {
+                    if let TokenKind::Str(symbol) = self.kind().clone() {
+                        let span = self.span();
+                        self.advance();
+                        Some((symbol, span))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let mut f = self.parse_fn_body(false)?;
                 f.is_extern = is_extern;
                 f.fn_span = fn_span;
                 f.extern_span = extern_span;
+                if let Some((symbol, span)) = link_name.clone() {
+                    f.link_name = Some(symbol);
+                    f.link_name_span = Some(span);
+                }
                 Item::Fn(f)
             }
             _ if is_extern => {
@@ -234,6 +254,8 @@ impl Parser {
             body,
             attrs: Vec::new(),
             is_extern: false,
+            link_name: None,
+            link_name_span: None,
             fn_span: name_span,
             extern_span: None,
             span: name_span.to(end),

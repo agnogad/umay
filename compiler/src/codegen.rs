@@ -55,6 +55,10 @@ fn function_symbols(hir: &crate::hir::Hir, program: &MirProgram) -> HashMap<FnId
             // A name already reserved by the `umay_` prefix is the runtime's own
             // surface, which the prelude declares as `extern fn` and therefore
             // has to keep exactly.
+            // An `extern fn "symbol" name(..)` says which symbol to call, so its
+            // UMAY name can differ from the C one. The prelude relies on this: it
+            // reaches `read` and `write` without occupying those names.
+            _ if f.link_name.is_some() => f.link_name.clone().unwrap_or_else(|| f.name.clone()),
             None if f.body.is_some()
                 && f.name != "main"
                 && !f.name.starts_with("umay_") =>

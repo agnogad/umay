@@ -1,24 +1,6 @@
-extern fn socket(d: i32, k: i32, p: i32) -> i32
-extern fn bind(fd: i32, a: *const u8, l: i32) -> i32
-extern fn listen(fd: i32, b: i32) -> i32
-extern fn accept(fd: i32, a: *mut u8, l: *mut i32) -> i32
-extern fn read(fd: i32, b: *mut u8, n: usize) -> i64
-extern fn write(fd: i32, b: *const u8, n: usize) -> i64
-extern fn close(fd: i32) -> i32
 extern fn strlen(s: *const u8) -> usize
 
 struct Route { path: *const u8, body: *const u8 }
-
-fn sockaddr(port: u16) -> *mut u8 {
-    let p = alloc(16)
-    unsafe {
-        let mut i: usize = 0
-        while i < 16 { write_byte((p as usize + i) as *mut u8, 0u8); i = i + 1 }
-        write_u16(p, 2u16)
-        write_u16((p as usize + 2) as *mut u8, (port / 256u16) + (port % 256u16) * 256u16)
-    }
-    return p
-}
 
 // Walk the route table as a slice: the cast gives a pointer to its first
 // element, and sizeof(Route) steps to the next.
@@ -42,25 +24,28 @@ fn route_body(table: *const Route, count: usize, want: Bytes) -> *const u8 {
 // The status line is assembled from the stdlib's `status_text` and `reason`, so
 // every route answers with a code the library knows rather than a hand-written
 // string that can drift from the number.
-fn send(fd: i32, response: Response) {
+fn send(sock: &Socket, response: Response) {
     let status = response.status()
     let body = response.body()
-    write(fd, "HTTP/1.1 " as *const u8, byte_len("HTTP/1.1 " as *const u8))
+    // Each piece goes out with a counted write, so a body with a NUL in it is not
+    // cut short the way a string length would cut it.
+    let parts_ok = socket_write_all(sock, "HTTP/1.1 " as *const u8, byte_len("HTTP/1.1 " as *const u8))
     let text = status_text(status)
-    write(fd, text as *const u8, byte_len(text as *const u8))
-    write(fd, " " as *const u8, byte_len(" " as *const u8))
+    socket_write_all(sock, text as *const u8, byte_len(text as *const u8))
+    socket_write_all(sock, " " as *const u8, byte_len(" " as *const u8))
     let why = reason(status)
-    write(fd, why as *const u8, byte_len(why as *const u8))
-    write(fd, "\r\nContent-Length: " as *const u8, byte_len("\r\nContent-Length: " as *const u8))
-    write_decimal(fd, body.len)
-    write(fd, "\r\nConnection: close\r\n\r\n" as *const u8, byte_len("\r\nConnection: close\r\n\r\n" as *const u8))
+    socket_write_all(sock, why as *const u8, byte_len(why as *const u8))
+    socket_write_all(sock, "\r\nContent-Length: " as *const u8, byte_len("\r\nContent-Length: " as *const u8))
+    write_decimal(sock, body.len)
+    socket_write_all(sock, "\r\nConnection: close\r\n\r\n" as *const u8, byte_len("\r\nConnection: close\r\n\r\n" as *const u8))
     if body.len > 0 {
-        write(fd, body.data, body.len)
+        socket_write_all(sock, body.data, body.len)
     }
+    let _ = parts_ok
 }
 
 // Writes `value` in decimal, least significant digit last.
-fn write_decimal(fd: i32, value: usize) {
+fn write_decimal(sock: &Socket, value: usize) {
     let digits = alloc(24)
     let mut n = value
     let mut d: usize = 0
@@ -76,7 +61,7 @@ fn write_decimal(fd: i32, value: usize) {
         }
         while d > 0 {
             d = d - 1
-            write(fd, (digits as usize + d) as *const u8, 1)
+            socket_write_all(sock, (digits as usize + d) as *const u8, 1)
         }
     }
     dealloc(digits)
@@ -91,9 +76,9 @@ fn put_byte(dst: *mut u8, at: usize, byte: u8) -> usize {
 }
 
 // Answers one connection. Run in a child, so it owns what it allocates.
-fn serve_one(conn: i32, table: *const Route, count: usize) {
+fn serve_one(conn: &Socket, table: *const Route, count: usize) {
     let buf = alloc(2048)
-    let got = read(conn, buf, 2048)
+    let got = socket_read(conn, buf, 2048)
     let request = parse_request(Bytes::view(buf as *const u8, got as usize))
     if request.target().is_empty() {
         send(conn, Response::new(400))
@@ -124,7 +109,7 @@ fn serve_one(conn: i32, table: *const Route, count: usize) {
             send(conn, Response::new(200).with_body(Bytes::from_str(unsafe { body as &str })))
         }
     }
-    close(conn)
+    socket_close(conn)
     dealloc(buf)
 }
 
@@ -135,13 +120,20 @@ fn main() -> i32 {
         Route { path: "/api/health" as *const u8, body: "ok-true" as *const u8 },
     ]
     let table = routes as *const Route
-    let server = socket(2, 1, 0)
-    bind(server, sockaddr(8080u16) as *const u8, 16)
-    listen(server, 4)
+    // `net` owns the socket address layout: a port written whole would bind a
+    // different port and still succeed.
+    let server = tcp_socket()
+    let addr = address(8080u16)
+    if !socket_bind(&server, &addr) {
+        println("bind failed: the port is held")
+        return 1
+    }
+    release_address(addr)
+    socket_listen(&server, 4)
     println("listening")
     let mut served = 0
     while served < 4 {
-        let conn = accept(server, unsafe { 0 as *mut u8 }, unsafe { 0 as *mut i32 })
+        let conn = socket_accept(&server)
         // Each connection goes to a child. The child has its own copy of every
         // variable, so the route table is read without a lock and the parent's
         // `served` counter cannot be raced on; the price is that a child's
@@ -149,14 +141,13 @@ fn main() -> i32 {
         // the parent.
         let pid = spawn()
         if is_child(pid) {
-            serve_one(conn, table, 3usize)
-            close(server)
+            serve_one(&conn, table, 3usize)
             exit(0)
         }
-        close(conn)
+        socket_close(&conn)
         served = served + 1
     }
     wait()
-    close(server)
+    socket_close(&server)
     return 0
 }

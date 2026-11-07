@@ -55,6 +55,11 @@ pub struct FnDecl {
     pub fn_span: Span,
     /// Span of the `extern` keyword when present, so a fix can remove it.
     pub extern_span: Option<Span>,
+    /// The linker symbol named by `extern fn "symbol" name(..)`. `None` means the
+    /// symbol is the UMAY name.
+    pub link_name: Option<String>,
+    /// Span of that symbol, so a diagnostic can point at it.
+    pub link_name_span: Option<Span>,
     pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
     /// `self` receiver, if this is a method.

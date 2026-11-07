@@ -210,6 +210,7 @@ impl<'a> Checker<'a> {
             body: None,
             is_pub: true,
             owner: None,
+            link_name: None,
         });
         id
     }
@@ -245,6 +246,7 @@ impl<'a> Checker<'a> {
                 body: None,
                 is_pub: true,
                 owner: Some(self_ty_name.clone()),
+                link_name: None,
             });
             }
     }
@@ -434,6 +436,7 @@ impl<'a> Checker<'a> {
                 info.has_self = has_self;
                 info.self_mutable = self_mutable;
                 info.self_by_ref = self_by_ref;
+                info.link_name = f.link_name.clone();
             }
         }
     }

@@ -1,0 +1,134 @@
+// TCP sockets.
+//
+// The system calls are already reachable through `extern fn`; what this file adds
+// is the boilerplate around them, which is where a server goes wrong. The socket
+// address in particular: a port is two bytes in network order, and writing them
+// the intuitive way binds the wrong port without any error.
+
+// The linker symbols are named explicitly so that UMAY names such as `read` and
+// `write` stay free for a program to use.
+extern fn "socket" umay_net_socket(domain: i32, kind: i32, protocol: i32) -> i32
+extern fn "bind" umay_net_bind(fd: i32, addr: *const u8, len: i32) -> i32
+extern fn "listen" umay_net_listen(fd: i32, backlog: i32) -> i32
+extern fn "accept" umay_net_accept(fd: i32, addr: *mut u8, len: *mut i32) -> i32
+extern fn "read" umay_net_read(fd: i32, buf: *mut u8, count: usize) -> i64
+extern fn "write" umay_net_write(fd: i32, buf: *const u8, count: usize) -> i64
+extern fn "close" umay_net_close(fd: i32) -> i32
+
+// A listening or connected socket.
+struct Socket {
+    fd: i32,
+}
+
+// A socket address: an IPv4 address and a port, in the layout `bind` expects.
+struct Address {
+    bytes: *mut u8,
+}
+
+// Establishes a socket address for `port` on every interface.
+//
+// The two-byte family and the two-byte port are in network order, which is why
+// the port's halves are swapped: writing it whole would bind a different port and
+// still succeed.
+fn address(port: u16) -> Address {
+    let raw = alloc(16)
+    unsafe {
+        let mut i: usize = 0
+        while i < 16 {
+            write_byte((raw as usize + i) as *mut u8, 0u8)
+            i = i + 1
+        }
+        // AF_INET is 2 on Linux, and the address field follows the port as zeroes,
+        // which means "any interface".
+        write_u16(raw, 2u16)
+        write_u16((raw as usize + 2) as *mut u8, (port / 256u16) + (port % 256u16) * 256u16)
+    }
+    return Address { bytes: raw }
+}
+
+// How many bytes an `Address` occupies, as `bind` needs.
+fn address_size() -> usize {
+    return 16usize
+}
+
+// Releases an address.
+fn release_address(a: Address) {
+    dealloc(a.bytes)
+}
+
+// A closed socket, so a failure has a value to return.
+fn closed_socket() -> Socket {
+    return Socket { fd: -1 }
+}
+
+// True when the socket is not open.
+fn socket_is_closed(s: &Socket) -> bool {
+    return s.fd < 0
+}
+
+// A TCP socket, or a closed one when the system would not give one.
+fn tcp_socket() -> Socket {
+    // AF_INET is 2 and SOCK_STREAM is 1.
+    let fd = umay_net_socket(2, 1, 0)
+    if fd < 0 {
+        return closed_socket()
+    }
+    return Socket { fd: fd }
+}
+
+// Binds a socket to an address. Returns false when the address is taken.
+//
+// A held port is the usual reason, and it is not an error worth aborting on: a
+// caller that has just restarted a server needs to report it and stop.
+fn socket_bind(s: &Socket, a: &Address) -> bool {
+    return umay_net_bind(s.fd, a.bytes as *const u8, address_size() as i32) == 0
+}
+
+// Starts listening on a bound socket. Returns false on failure.
+fn socket_listen(s: &Socket, backlog: i32) -> bool {
+    return umay_net_listen(s.fd, backlog) == 0
+}
+
+// Accepts one connection, returning a closed socket when that fails.
+fn socket_accept(s: &Socket) -> Socket {
+    let fd = umay_net_accept(s.fd, unsafe { 0 as *mut u8 }, unsafe { 0 as *mut i32 })
+    if fd < 0 {
+        return closed_socket()
+    }
+    return Socket { fd: fd }
+}
+
+// Reads up to `into.len` bytes, returning how many arrived.
+//
+// Zero means the other end closed; a negative value is a failure. The caller is
+// given the count rather than a terminator, so the bytes it reads are exactly the
+// bytes that came.
+fn socket_read(s: &Socket, into: *mut u8, capacity: usize) -> i64 {
+    return umay_net_read(s.fd, into, capacity)
+}
+
+// Writes the whole of a buffer, retrying short writes.
+//
+// A single `write` may send less than it was given, so looping here is what makes
+// "all the bytes are out" true for the caller.
+fn socket_write_all(s: &Socket, data: *const u8, count: usize) -> bool {
+    let mut sent: usize = 0
+    while sent < count {
+        let n = unsafe { umay_net_write(s.fd, (data as usize + sent) as *const u8, count - sent) }
+        if n <= 0i64 {
+            return false
+        }
+        sent = sent + n as usize
+    }
+    return true
+}
+
+// Closes the socket. Doing it twice is harmless.
+//
+// Taking a reference rather than the socket keeps a caller free to close after
+// its last use without the move being seen as ending the borrow order.
+fn socket_close(s: &Socket) {
+    if s.fd >= 0 {
+        umay_net_close(s.fd)
+    }
+}

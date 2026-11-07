@@ -181,6 +181,11 @@ pub struct HirFn {
     /// itself, so a method's symbol is qualified with this name. Without it a
     /// method would take over a C function of the same name at link time.
     pub owner: Option<String>,
+    /// The linker symbol for an `extern fn "symbol" name(..)`.
+    ///
+    /// A declaration may reach a C function without taking its name, which is what
+    /// lets the prelude call `read` while a program is free to define its own.
+    pub link_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -1866,3 +1866,79 @@ fn main() -> i32 {
 "##;
     expect_stdout("json_write", source, "2\n-7\n\"a\\\"b\"\n3\n");
 }
+
+#[test]
+fn a_generic_function_may_return_a_tuple() {
+    // A tuple return from a bounded generic instantiation was once typed as `()`,
+    // which made the result unusable; the bound's method result is substituted with
+    // the bound's argument and the tuple comes back intact.
+    let source = r##"
+struct Counter { at: i64, stop: i64 }
+impl Counter {
+    fn next(&mut self) -> Option<i64> {
+        if self.at >= self.stop { return Option::None }
+        self.at = self.at + 1
+        return Option::Some(self.at)
+    }
+}
+fn main() -> i32 {
+    let mut c = Counter { at: 0i64, stop: 4i64 }
+    let (sum, seen) = iterate_sum_and_count(&mut c, 10usize)
+    println_i64(sum)
+    println_i64(seen as i64)
+    return 0
+}
+"##;
+    expect_stdout("generic_tuple_return", source, "10\n4\n");
+}
+
+#[test]
+fn a_program_may_define_a_name_the_prelude_also_uses() {
+    // The prelude reaches the C library's `read` and `write`, but it names them
+    // `umay_c_read`/`umay_c_write` and links them through `extern fn "read" ..`,
+    // so those words stay free for a program.
+    let source = r##"
+fn read(n: i64) -> i64 { return n + 1i64 }
+fn write(n: i64) -> i64 { return read(n) * 2i64 }
+fn main() -> i32 {
+    println_i64(write(4i64))
+    return 0
+}
+"##;
+    expect_stdout("prelude_name_is_free", source, "10\n");
+}
+
+#[test]
+fn net_binds_a_port_and_accepts() {
+    // The socket address layout is the library's business: a port written whole
+    // binds a different port and still succeeds, which is invisible without a real
+    // connection. This checks the address by binding, connecting and reading back.
+    let source = r##"
+extern fn "connect" sys_connect(fd: i32, addr: *const u8, len: i32) -> i32
+fn main() -> i32 {
+    let server = tcp_socket()
+    let addr = address(8422u16)
+    if !socket_bind(&server, &addr) {
+        println_i64(-1)
+        return 1
+    }
+    socket_listen(&server, 4)
+    let client = tcp_socket()
+    let ok = sys_connect(client.fd, addr.bytes as *const u8, address_size() as i32)
+    println_i64(ok as i64)
+    let peer = socket_accept(&server)
+    println_i64(if socket_is_closed(&peer) { 0 } else { 1 })
+    let buf = alloc(16)
+    socket_write_all(&client, "hi" as *const u8, 2usize)
+    let got = socket_read(&peer, buf, 16usize)
+    println_i64(got)
+    dealloc(buf)
+    socket_close(&peer)
+    socket_close(&client)
+    socket_close(&server)
+    release_address(addr)
+    return 0
+}
+"##;
+    expect_stdout("net_bind_accept", source, "0\n1\n2\n");
+}

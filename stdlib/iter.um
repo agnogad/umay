@@ -78,7 +78,10 @@ fn iterate_collect<T: Iterator<i64>>(it: &mut T, times: usize) -> Vec<i64> {
 //
 // The count comes back as a second value in a `Vec` because a tuple return is
 // not dependable yet; index 0 is the sum, index 1 the count.
-fn iterate_sum_and_count<T: Iterator<i64>>(it: &mut T, times: usize) -> Vec<i64> {
+// The sum and the number of items taken. A tuple return is what this shape wants,
+// and it is no longer standing in for a `Vec<i64>`: the two are one value, so a
+// caller that wants both cannot mix them up with an index.
+fn iterate_sum_and_count<T: Iterator<i64>>(it: &mut T, times: usize) -> (i64, usize) {
     let mut sum: i64 = 0
     let mut seen: usize = 0
     let mut i: usize = 0
@@ -92,8 +95,5 @@ fn iterate_sum_and_count<T: Iterator<i64>>(it: &mut T, times: usize) -> Vec<i64>
         }
         i = i + 1
     }
-    let mut out = Vec::new()
-    out = out.push(sum)
-    out = out.push(seen as i64)
-    return out
+    return (sum, seen)
 }

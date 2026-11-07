@@ -26,7 +26,7 @@ impl String {
         // allocates. `dealloc` is never called on it because `capacity` is zero.
         // Turning an integer into a pointer is `unsafe` because most integers are
         // not addresses, and zero is the one value that is safe by definition.
-        let empty = unsafe { 0 as usize as *mut u8 }
+        let empty = unsafe { 0 as *mut u8 }
         return String { ptr: empty, len: 0, capacity: 0 }
     }
 

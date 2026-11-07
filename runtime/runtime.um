@@ -21,25 +21,25 @@
 
 // `malloc(size)` returns a pointer to `size` uninitialised bytes, or null when
 // the request cannot be met.
-extern fn malloc(size: usize) -> *mut u8
+extern fn "malloc" umay_c_malloc(size: usize) -> *mut u8
 
 // `free(ptr)` releases a block obtained from `malloc`.
-extern fn free(ptr: *mut u8) -> ()
+extern fn "free" umay_c_free(ptr: *mut u8) -> ()
 
 // `write(fd, buf, count)` writes `count` bytes and returns how many were
 // written, or -1.
-extern fn write(fd: i32, buf: *const u8, count: usize) -> isize
+extern fn "write" umay_c_write(fd: i32, buf: *const u8, count: usize) -> isize
 
 // `exit(code)` terminates the process.
-extern fn exit(code: i32) -> ()
+extern fn "exit" umay_c_exit(code: i32) -> ()
 
 // `lseek(fd, offset, whence)` moves the file position and returns the new one,
 // or -1. `whence` 2 is `SEEK_END`, which combined with an offset of 0 reports the
 // size of a regular file without reading a byte of it.
-extern fn lseek(fd: i32, offset: i64, whence: i32) -> i64
+extern fn "lseek" umay_c_lseek(fd: i32, offset: i64, whence: i32) -> i64
 
 // `getenv(name)` returns the value of an environment variable, or 0.
-extern fn getenv(name: *const u8) -> *const u8
+extern fn "getenv" umay_c_getenv(name: *const u8) -> *const u8
 
 // `errno` is a macro over a function on glibc, so it cannot be declared directly.
 // This accessor is the portable spelling: glibc exports `__errno_location`, a
@@ -47,26 +47,26 @@ extern fn getenv(name: *const u8) -> *const u8
 extern fn __errno_location() -> *mut i32
 
 // Creates a child process that shares this address space copy-on-write.
-extern fn fork() -> i32
+extern fn "fork" umay_c_fork() -> i32
 
 // Waits for a child to change state.
-extern fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32
+extern fn "waitpid" umay_c_waitpid(pid: i32, status: *mut i32, options: i32) -> i32
 
 // POSIX file system calls. Each returns -1 on failure, which the wrappers below
 // turn into a result the caller can branch on.
 //
 // `open(path, flags, mode)` returns a file descriptor, or -1.
-extern fn open(path: *const u8, flags: i32, mode: i32) -> i32
+extern fn "open" umay_c_open(path: *const u8, flags: i32, mode: i32) -> i32
 // `close(fd)` releases a descriptor.
-extern fn close(fd: i32) -> i32
+extern fn "close" umay_c_close(fd: i32) -> i32
 // `read(fd, buf, count)` returns how many bytes were read, 0 at the end, or -1.
-extern fn read(fd: i32, buf: *mut u8, count: usize) -> isize
+extern fn "read" umay_c_read(fd: i32, buf: *mut u8, count: usize) -> isize
 // `unlink(path)` removes a file.
-extern fn unlink(path: *const u8) -> i32
+extern fn "unlink" umay_c_unlink(path: *const u8) -> i32
 // `rename(from, to)` renames a file.
-extern fn rename(from: *const u8, to: *const u8) -> i32
+extern fn "rename" umay_c_rename(from: *const u8, to: *const u8) -> i32
 // `mkdir(path, mode)` creates a directory.
-extern fn mkdir(path: *const u8, mode: i32) -> i32
+extern fn "mkdir" umay_c_mkdir(path: *const u8, mode: i32) -> i32
 
 // The flags `open` takes, as the kernel numbers them on Linux.
 //
@@ -92,7 +92,7 @@ const STDERR: i32 = 2
 // would mean writing through a null pointer. Every allocation goes through here
 // so that the check exists in exactly one place.
 pub fn umay_alloc(count: usize) -> *mut u8 {
-    let ptr = malloc(count)
+    let ptr = umay_c_malloc(count)
     if unsafe { ptr as usize } == 0 {
         umay_fail("umay: out of memory" as *const u8)
     }
@@ -100,7 +100,7 @@ pub fn umay_alloc(count: usize) -> *mut u8 {
 }
 
 pub fn umay_dealloc(ptr: *mut u8) {
-    free(ptr)
+    umay_c_free(ptr)
 }
 
 // --- raw memory -------------------------------------------------------------
@@ -158,30 +158,30 @@ pub fn umay_write_u32(ptr: *mut u8, value: u32) {
 
 // Opens `path` for reading and returns the descriptor, or -1.
 pub fn umay_open_read(path: *const u8) -> i32 {
-    return open(path, O_RDONLY, 0)
+    return umay_c_open(path, O_RDONLY, 0)
 }
 
 // Opens `path` for writing, creating or truncating it, and returns the descriptor,
 // or -1.
 pub fn umay_create(path: *const u8) -> i32 {
-    return open(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    return umay_c_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
 }
 
 // Opens `path` for appending, creating it if it does not exist, or -1.
 pub fn umay_append(path: *const u8) -> i32 {
-    return open(path, O_WRONLY | O_CREAT | O_APPEND, 420)
+    return umay_c_open(path, O_WRONLY | O_CREAT | O_APPEND, 420)
 }
 
 // Closes `fd` and returns 0, or -1.
 pub fn umay_close(fd: i32) -> i32 {
-    return close(fd)
+    return umay_c_close(fd)
 }
 
 // Fills `buf` with up to `count` bytes from `fd`.
 //
 // Returns the number read, which is 0 at the end of the file and -1 on failure.
 pub fn umay_read(fd: i32, buf: *mut u8, count: usize) -> isize {
-    return read(fd, buf, count)
+    return umay_c_read(fd, buf, count)
 }
 
 // Writes `count` bytes to `fd`, retrying a short write.
@@ -192,7 +192,7 @@ pub fn umay_write(fd: i32, buf: *const u8, count: usize) -> isize {
     let mut done = 0 as usize
     while done < count {
         let left = count - done
-        let chunk = write(fd, unsafe { (buf as usize + done) as *const u8 }, left)
+        let chunk = umay_c_write(fd, unsafe { (buf as usize + done) as *const u8 }, left)
         if chunk < 0 {
             return -1
         }
@@ -206,17 +206,17 @@ pub fn umay_write(fd: i32, buf: *const u8, count: usize) -> isize {
 
 // Removes the file at `path`.
 pub fn umay_unlink(path: *const u8) -> i32 {
-    return unlink(path)
+    return umay_c_unlink(path)
 }
 
 // Renames a file.
 pub fn umay_rename(from: *const u8, to: *const u8) -> i32 {
-    return rename(from, to)
+    return umay_c_rename(from, to)
 }
 
 // Creates a directory.
 pub fn umay_mkdir(path: *const u8) -> i32 {
-    return mkdir(path, 493)
+    return umay_c_mkdir(path, 493)
 }
 
 // The size of a regular file in bytes, or -1 when it cannot be measured.
@@ -227,8 +227,8 @@ pub fn umay_file_size(path: *const u8) -> i64 {
     if fd < 0 {
         return -1
     }
-    let end = lseek(fd, 0, 2)
-    close(fd)
+    let end = umay_c_lseek(fd, 0, 2)
+    umay_c_close(fd)
     return end
 }
 
@@ -240,21 +240,21 @@ pub fn umay_is_dir(path: *const u8) -> bool {
     }
     // A directory opens for reading on Linux but cannot be read from; the
     // descriptor is still usable, so the check is whether reading is refused.
-    let scratch = malloc(1)
-    let refused = read(fd, scratch, 1) < 0
-    free(scratch)
-    close(fd)
+    let scratch = umay_c_malloc(1)
+    let refused = umay_c_read(fd, scratch, 1) < 0
+    umay_c_free(scratch)
+    umay_c_close(fd)
     return refused
 }
 
 // The value of an environment variable, or 0 when it is not set.
 pub fn umay_getenv(name: *const u8) -> *const u8 {
-    return getenv(name)
+    return umay_c_getenv(name)
 }
 
 // Ends the process with `code`.
 pub fn umay_exit(code: i32) {
-    exit(code)
+    umay_c_exit(code)
 }
 
 // The number the last failing call left in `errno`.
@@ -302,7 +302,7 @@ fn write_at(fd: i32, ptr: *const u8, count: usize) {
     // The result is the number of bytes written; the runtime treats a short
     // write as final rather than retrying, which is good enough for a stream
     // that is normally a terminal or a file.
-    let _ = write(fd, ptr, count)
+    let _ = umay_c_write(fd, ptr, count)
 }
 
 // Writes a byte string with no trailing newline.
@@ -383,7 +383,7 @@ fn narrow_digit(d: i64) -> u8 {
 // reachable, so continuing would mean running with a broken invariant.
 pub fn umay_fail(message: *const u8) {
     umay_eprintln(message)
-    exit(101)
+    umay_c_exit(101)
 }
 
 // True when two NUL-terminated byte strings hold the same bytes.
@@ -416,10 +416,10 @@ pub fn umay_str_eq(a: *const u8, b: *const u8) -> bool {
 // every variable, so there is no shared mutable cell to race on, and a server
 // gets its parallelism from one process per connection instead of a thread.
 pub fn umay_fork() -> i32 {
-    return fork()
+    return umay_c_fork()
 }
 
 // Waits for any child to finish and returns its id, or `-1`.
 pub fn umay_waitpid(pid: i32, status: *mut i32, options: i32) -> i32 {
-    return waitpid(pid, status, options)
+    return umay_c_waitpid(pid, status, options)
 }
