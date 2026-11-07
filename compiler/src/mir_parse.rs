@@ -375,6 +375,9 @@ fn parse_rvalue(s: &str, strings: &mut Vec<String>, n: usize) -> Result<Rvalue, 
         return Ok(Rvalue::Len(place));
     }
     if let Some(rest) = s.strip_prefix("&mut ") {
+        if let Some(inner) = rest.strip_suffix(" (reborrow)") {
+            return Ok(Rvalue::Reborrow { mutable: true, place: parse_place(inner, strings, n)? });
+        }
         return Ok(Rvalue::Ref { mutable: true, place: parse_place(rest, strings, n)? });
     }
     if let Some(rest) = s.strip_prefix('&') {

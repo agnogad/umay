@@ -121,9 +121,16 @@ impl<'a> Lowering<'a> {
         for (i, l) in f.locals.iter().enumerate() {
             let id = LocalId(i as u32);
             local_map.insert(id, id);
+            let ty = if types.is_integer_var(l.ty) {
+                types.primitive("i32").unwrap_or(l.ty)
+            } else if types.is_float_var(l.ty) {
+                types.primitive("f64").unwrap_or(l.ty)
+            } else {
+                l.ty
+            };
             locals.push(LocalDecl {
                 name: l.name.clone(),
-                ty: l.ty,
+                ty,
                 mutable: l.mutable,
                 span: l.span,
                 is_temp: i >= f.params.len(),
@@ -249,6 +256,19 @@ impl<'a> Lowering<'a> {
     }
 
     // ---- locals and temporaries ------------------------------------------
+
+    /// A literal's type that reached this far has no width yet. It takes the
+    /// default, so that the temporary's slot matches the width the selector
+    /// stores into it.
+    pub(crate) fn settle_ty(&mut self, ty: TyId) -> TyId {
+        if self.types.is_integer_var(ty) {
+            return self.types.primitive("i32").unwrap_or(ty);
+        }
+        if self.types.is_float_var(ty) {
+            return self.types.primitive("f64").unwrap_or(ty);
+        }
+        ty
+    }
 
     pub(crate) fn temp(&mut self, ty: TyId) -> LocalId {
         let id = LocalId(self.locals.len() as u32);

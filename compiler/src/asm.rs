@@ -263,6 +263,18 @@ pub fn print_inst(inst: &Inst, function: &str) -> String {
             let width = match kind {
                 MoveKind::Move(w) | MoveKind::SignExtend { to: w, .. } | MoveKind::ZeroExtend { to: w, .. } => *w,
             };
+            // A 64-bit immediate that does not fit the sign-extended 32-bit
+            // field `movq` offers has to go through a register. `movabsq`
+            // reaches the whole 64-bit range, and the selector never keeps a
+            // value in `%rax` across a store.
+            if let Operand::Imm(v) = src {
+                if width == RegWidth::W64 && i32::try_from(*v).is_err() {
+                    return format!(
+                        "movabsq ${v}, %rax\n    movq %rax, {}",
+                        mem_str(dst, width)
+                    );
+                }
+            }
             let mnemonic = match kind {
                 MoveKind::Move(_) => format!("mov{}", width.suffix()),
                 // A store never extends; the selector does not emit these.
@@ -278,6 +290,13 @@ pub fn print_inst(inst: &Inst, function: &str) -> String {
 fn print_move(kind: MoveKind, src: &Operand, dst: &Operand) -> String {
     match kind {
         MoveKind::Move(width) => {
+            // `movq` only carries a sign-extended 32-bit immediate, so a wider
+            // constant is loaded with `movabsq` first.
+            if let (RegWidth::W64, Operand::Imm(v)) = (width, src) {
+                if i32::try_from(*v).is_err() {
+                    return format!("movabsq ${v}, {}", op_str(dst, width));
+                }
+            }
             format!("mov{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width))
         }
         MoveKind::SignExtend { from, to } => {

@@ -80,7 +80,7 @@ impl FnChecker<'_, '_> {
                 let _ = (place_expr, value_expr, unit);
                 self.check_assign(place, &combined, span)
             }
-            ast::ExprKind::Unary { op, operand } => self.check_unary(*op, operand, span),
+            ast::ExprKind::Unary { op, operand } => self.check_unary_hinted(*op, operand, span, hint),
             ast::ExprKind::Binary { op, lhs, rhs } => self.check_binary(*op, lhs, rhs, span),
             ast::ExprKind::Ref { mutable, operand } => self.check_ref(*mutable, operand, span),
             ast::ExprKind::Sizeof { ty } => {

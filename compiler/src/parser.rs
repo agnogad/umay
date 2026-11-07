@@ -133,6 +133,17 @@ impl Parser {
         }
     }
 
+    /// Whether the token at the cursor starts on a later line than the one
+    /// before it. Semicolons are optional, so this is how a statement ends: a
+    /// `(` or `[` on a new line begins a new statement, not a call.
+    fn starts_new_line(&self) -> bool {
+        if self.pos == 0 {
+            return false;
+        }
+        let prev = &self.tokens[(self.pos - 1).min(self.tokens.len() - 1)];
+        self.cur().line > prev.line
+    }
+
     fn prev_span(&self) -> Span {
         if self.pos == 0 {
             self.span()

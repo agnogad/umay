@@ -10,7 +10,24 @@ impl FnChecker<'_, '_> {
     // ---- unary -----------------------------------------------------------
 
     pub fn check_unary(&mut self, op: ast::UnaryOp, operand: &ast::Expr, span: crate::source::Span) -> HirExpr {
-        let operand = self.check_expr(operand);
+        self.check_unary_hinted(op, operand, span, None)
+    }
+
+    /// `-n` takes its width from the context: a `-1` passed to an `i64`
+    /// parameter is an `i64`, not an `i32` widened on the way out.
+    pub fn check_unary_hinted(
+        &mut self,
+        op: ast::UnaryOp,
+        operand: &ast::Expr,
+        span: crate::source::Span,
+        hint: Option<TyId>,
+    ) -> HirExpr {
+        let operand = match hint {
+            Some(h) if op == ast::UnaryOp::Neg && self.cx.cx.is_numeric(h) => {
+                self.check_expr_hinted(operand, Some(h))
+            }
+            _ => self.check_expr(operand),
+        };
         match op {
             ast::UnaryOp::Neg => {
                 let ty = operand.ty;

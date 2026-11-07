@@ -138,7 +138,17 @@ impl FnChecker<'_, '_> {
         }
         // Arguments are checked against the declaration the same way a free
         // function call's are; the callee is the function itself, not a path.
-        let arg_hirs: Vec<HirExpr> = args.iter().map(|a| self.check_expr(a)).collect();
+        // Each argument is told its parameter's type, so a bare literal such as
+        // `-1` takes that width instead of the default one.
+        let self_param = if info.has_self { 1 } else { 0 };
+        let arg_hirs: Vec<HirExpr> = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let expected = info.params.get(i + self_param).copied();
+                self.check_expr_hinted(a, expected)
+            })
+            .collect();
         self.check_call_args(&info.params, &arg_hirs, span, "function");
         // A method of `impl<T>` names `T` in its result, and its arguments may not
         // mention the parameter at all. The context's expected type is then the

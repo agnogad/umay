@@ -184,10 +184,10 @@ impl Parser {
         loop {
             match self.kind().clone() {
                 TokenKind::LParen => {
-                    // A number is never called: `1` followed by `(` on the next
-                    // line is the end of one statement and the start of the next,
-                    // not a call, because semicolons are optional.
-                    if matches!(expr.kind, ExprKind::IntLit { .. } | ExprKind::FloatLit { .. }) {
+                    // A `(` on the next line starts a new statement, not a call:
+                    // semicolons are optional, so `let y = x == k` followed by a
+                    // line beginning `(` must not become `k(..)`.
+                    if self.starts_new_line() {
                         break;
                     }
                     let start = expr.span;
@@ -215,6 +215,11 @@ impl Parser {
                     };
                 }
                 TokenKind::LBracket => {
+                    // As with `(`, a `[` on the next line begins a new statement
+                    // rather than indexing the previous one.
+                    if self.starts_new_line() {
+                        break;
+                    }
                     let start = expr.span;
                     self.advance();
                     let index = self.parse_expr();

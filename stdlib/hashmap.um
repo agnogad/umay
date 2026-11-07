@@ -113,7 +113,7 @@ impl HashMap {
             return Option::None
         }
         let mut index = hash_key(key) & self.mask
-        let mut probes = 0
+        let mut probes: usize = 0
         while probes < self.capacity {
             let entry = self.entry_at(index)
             let occupied = unsafe { (*entry).key as usize != 0 }
@@ -168,7 +168,7 @@ impl HashMap {
         }
         let new_slots = alloc(new_capacity * sizeof(Entry))
         unsafe {
-            let mut i = 0
+            let mut i: usize = 0
             while i < new_capacity * sizeof(Entry) {
                 write_byte((new_slots as usize + i) as *mut u8, 0u8)
                 i = i + 1
@@ -184,7 +184,7 @@ impl HashMap {
         let carried = self.len
         self.len = 0
         if old_capacity > 0 {
-            let mut i = 0
+            let mut i: usize = 0
             while i < old_capacity {
                 let old = unsafe { (old_slots as usize + i * sizeof(Entry)) as *mut Entry }
                 let key = unsafe { (*old).key }
