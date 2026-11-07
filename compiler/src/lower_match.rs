@@ -201,11 +201,28 @@ impl Lowering<'_> {
     /// String interpolation lowers to a chain of appends, so that the backend
     /// never needs a dedicated formatting instruction.
     pub(crate) fn lower_str_interp(&mut self, parts: &[HirStrPart], e: &HirExpr) -> Operand {
-        let mut acc = self.temp_place(e.ty);
+        // The first part initialises the accumulator rather than being appended
+        // to an uninitialised temporary.
+        let mut acc: Option<Place> = None;
         for part in parts {
             match part {
                 HirStrPart::Text(t) => {
                     let id = self.program.intern_string(t);
+                    let prev = match acc.take() {
+                        Some(p) => p,
+                        None => {
+                            // Nothing accumulated yet: this text *is* the
+                            // initial value.
+                            let p = self.temp_place(e.ty);
+                            self.assign(
+                                p.clone(),
+                                Rvalue::Use(Operand::Constant(Constant::Str(id))),
+                                e.span,
+                            );
+                            acc = Some(p);
+                            continue;
+                        }
+                    };
                     let concat = self.program.intern_string("intrinsic:str_concat");
                     let v = self.temp_place(e.ty);
                     let next = self.new_block();
@@ -213,7 +230,7 @@ impl Lowering<'_> {
                         Terminator::Call {
                             callee: Operand::Constant(Constant::Str(concat)),
                             args: vec![
-                                Operand::Copy(acc.clone()),
+                                Operand::Copy(prev),
                                 Operand::Constant(Constant::Str(id)),
                             ],
                             destination: Some(v.clone()),
@@ -223,17 +240,33 @@ impl Lowering<'_> {
                         },
                         next,
                     );
-                    acc = v;
+                    acc = Some(v);
                 }
                 HirStrPart::Value(expr) => {
                     let val = self.lower_expr(expr);
+                    let prev = match acc.take() {
+                        Some(p) => p,
+                        None => {
+                            // The interpolation starts with a value: format it
+                            // into a fresh string.
+                            let empty = self.program.intern_string("");
+                            let p = self.temp_place(e.ty);
+                            self.assign(
+                                p.clone(),
+                                Rvalue::Use(Operand::Constant(Constant::Str(empty))),
+                                e.span,
+                            );
+                            acc = Some(p);
+                            acc.clone().unwrap()
+                        }
+                    };
                     let append = self.program.intern_string("intrinsic:str_append_display");
                     let v = self.temp_place(e.ty);
                     let next = self.new_block();
                     self.terminate(
                         Terminator::Call {
                             callee: Operand::Constant(Constant::Str(append)),
-                            args: vec![Operand::Copy(acc.clone()), val],
+                            args: vec![Operand::Copy(prev), val],
                             destination: Some(v.clone()),
                             target: next,
                             unwind: Vec::new(),
@@ -241,10 +274,13 @@ impl Lowering<'_> {
                         },
                         next,
                     );
-                    acc = v;
+                    acc = Some(v);
                 }
             }
         }
-        Operand::Copy(acc)
+        match acc {
+            Some(p) => Operand::Copy(p),
+            None => Operand::Constant(Constant::Str(self.program.intern_string(""))),
+        }
     }
 }

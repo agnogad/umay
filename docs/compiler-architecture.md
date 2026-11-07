@@ -32,7 +32,10 @@ Drop elaboration ── every exit path drops what it still owns      [Phase 3]
 MIR        ── typed CFG: moves, borrows, drops, blocks         [Phase 3]
     │
     ▼
-Ownership/borrow checking (dataflow over the MIR CFG)          [Phase 4]
+Ownership checking ── definite init and moves, per place       [Phase 4]
+    │
+    ▼
+Borrow checking ── conflicts, escapes, both origins named       [Phase 4]
     │
     ▼
 MIR optimisation (folding, DCE, inlining, copy prop)            [Phase 5+]
@@ -71,8 +74,8 @@ reads source text except the lexer. No stage after HIR depends on syntax shape.
 | `lower` (Phase 3) | HIR → MIR, one block per linear region | know about ownership |
 | `drop_elab` (Phase 3) | Where values are dropped | decide ownership |
 | `mir_print` / `mir_parse` (Phase 3) | Text ⇄ MIR for tests and `umay mir` | be used by codegen |
-| `ownership` (Phase 4) | Move/init/drop dataflow | rewrite MIR semantics |
-| `borrowck` (Phase 4) | Borrow/lifetime analysis | rely on source text |
+| `ownership` (Phase 4) | Move/init dataflow over the CFG | rewrite MIR semantics |
+| `borrowck` (Phase 4) | Borrow conflicts and escaped references | depend on source text |
 | `optimizer` | MIR → MIR transformations | change observable behaviour |
 | `codegen` | MIR → machine instructions | be LLVM or Cranelift |
 | `linker` | Objects → executable | implement a linker front-end |

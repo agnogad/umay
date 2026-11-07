@@ -121,7 +121,7 @@ checking of the MIR (Phase 4).
 
 ---
 
-## Phase 4 — Ownership and Borrow Checking · planned
+## Phase 4 — Ownership and Borrow Checking · done
 
 - Definite initialisation (CFG dataflow).
 - Move analysis; partial moves.
@@ -138,6 +138,25 @@ checking of the MIR (Phase 4).
 Exit criteria: every adversarial fixture is rejected with the documented code;
 the accept corpus still compiles. UMAY only claims Rust-comparable safety after
 this phase's suite is reviewed and extended by fuzzing.
+
+Delivered:
+
+- `compiler/src/ownership.rs` — definite initialisation and move analysis as a
+  forward dataflow over the MIR CFG. Places are tracked as paths, so a partial
+  move (`p.x`) is distinguished from moving `p`.
+- `compiler/src/borrowck.rs` — borrow conflicts, checked at statement
+  granularity rather than block granularity, with each borrow living from its
+  creation to its last use. Conflicts report both origins.
+- `E0201` use after move, `E0204`/`E0205` overlapping borrows, `E0206`
+  assignment to a borrowed place, `E0207` returning a reference to a local,
+  `E0210` borrowing a temporary, `E0211` raw-pointer deref outside `unsafe`.
+- 29 tests in `compiler/tests/phase4_ownership.rs`: an adversarial suite, an
+  accept corpus, and diagnostic-quality assertions.
+
+Not yet enforced, and stated here rather than implied: `E0202` is unreachable
+because `let` always initialises (a design choice from ADR 0005), `E0208`–`E0209`
+need field-wise drop elaboration, and `E0212`–`E0213` need the concurrency and
+raw-pointer models from Phase 6.
 
 ---
 

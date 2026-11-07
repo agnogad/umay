@@ -774,14 +774,10 @@ fn ast_dump_lists_items() {
 
 #[test]
 fn documented_example_codes_exist() {
-    for code in ["E0101", "E0201", "E0001", "E0303"] {
-        // E0201 belongs to Phase 4 (borrow checking) and is intentionally
-        // documented in the spec before being implemented.
-        let known = umayc::explain_code(code).is_some();
-        if code == "E0201" {
-            assert!(!known, "E0201 must not be documented until Phase 4 lands");
-        } else {
-            assert!(known, "{code} must have an explain entry");
-        }
+    for code in ["E0101", "E0201", "E0204", "E0207", "E0211", "E0001", "E0303"] {
+        assert!(
+            umayc::explain_code(code).is_some(),
+            "{code} must have an explain entry"
+        );
     }
 }

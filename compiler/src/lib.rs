@@ -17,6 +17,7 @@
 
 pub mod ast;
 pub mod cache;
+pub mod borrowck;
 pub mod diagnostics;
 pub mod drop_elab;
 pub mod explain;
@@ -28,6 +29,7 @@ pub mod lower_flow;
 pub mod lower_match;
 pub mod mir;
 pub mod mir_parse;
+pub mod ownership;
 pub mod mir_print;
 pub mod parser;
 pub mod sema;
@@ -84,35 +86,52 @@ pub fn check_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
     (out.diagnostics, map)
 }
 
-/// Runs the full frontend through semantic analysis.
+/// Runs the full frontend: parsing, semantic analysis, lowering, and ownership
+/// and borrow checking.
 ///
-/// Parsing stops at the first fatal error: reporting name-resolution errors for
-/// a program the parser could not read would bury the real problem. When
-/// parsing succeeds, semantic diagnostics are appended.
+/// Each phase runs only if the previous one reported no errors. Reporting
+/// ownership errors for a program whose types do not check would bury the real
+/// problem under consequences of it.
 pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
     let mut map = SourceMap::new();
     let id = map.add(name, text);
     let out = parse_file(&map, id);
     let mut diagnostics = out.diagnostics;
-    if !diagnostics.has_errors() {
-        let sema = sema::analyze(&out.program, &map);
-        let sema_ok = !sema.diagnostics.has_errors();
-        for d in sema.diagnostics.items() {
-            let mut d = d.clone();
-            if let Some(entry) = explain::lookup(d.code) {
-                if d.cause.is_none() {
-                    d.cause = Some(entry.summary.to_string());
-                }
-                if d.explanation.is_none() {
-                    d.explanation = Some(entry.explanation.to_string());
-                }
-            }
-            diagnostics.push(d);
-        }
-        diagnostics.sort();
-        let _ = sema_ok;
+    if diagnostics.has_errors() {
+        return (diagnostics, map);
     }
+
+    let mut sema = sema::analyze(&out.program, &map);
+    append_all(&mut diagnostics, &sema.diagnostics);
+    diagnostics.sort();
+    if diagnostics.has_errors() {
+        return (diagnostics, map);
+    }
+
+    // Ownership checking runs on MIR, never on source text, so its results do
+    // not depend on formatting or expression nesting.
+    let mut lowered = lower::lower(&sema.hir, &mut sema.types);
+    drop_elab::elaborate(&mut lowered.program, &sema.types);
+    let ownership = ownership::check_program(&lowered.program, &sema.types);
+    append_all(&mut diagnostics, &ownership);
+    diagnostics.sort();
     (diagnostics, map)
+}
+
+/// Appends diagnostics, filling in the explanation text from the database.
+fn append_all(diagnostics: &mut Diagnostics, extra: &Diagnostics) {
+    for d in extra.items() {
+        let mut d = d.clone();
+        if let Some(entry) = explain::lookup(d.code) {
+            if d.cause.is_none() {
+                d.cause = Some(entry.summary.to_string());
+            }
+            if d.explanation.is_none() {
+                d.explanation = Some(entry.explanation.to_string());
+            }
+        }
+        diagnostics.push(d);
+    }
 }
 
 /// Runs the pipeline as far as MIR and returns the printed MIR.
@@ -146,6 +165,9 @@ pub fn lower_to_mir(name: &str, text: &str) -> Result<String, (Diagnostics, Sour
     }
     let mut lowered = lower::lower(&sema.hir, &mut sema.types);
     drop_elab::elaborate(&mut lowered.program, &sema.types);
+    // `umay mir` shows the lowering, so ownership errors are not fatal here:
+    // being able to see the MIR of a program that fails borrow checking is
+    // exactly when it is most useful.
     Ok(mir_print::print_program(&lowered.program, &mut sema.types))
 }
 

@@ -348,8 +348,12 @@ fn array_repeat_becomes_max_repeat() {
 fn interpolation_becomes_appends() {
     let text = mir("fn f(n: i32) -> str { \"n = {n}\" }");
     let body = body_of(&text, "f");
-    assert_contains(body, "intrinsic:str_concat");
+    // The leading text initialises the accumulator; the value is appended.
     assert_contains(body, "intrinsic:str_append_display");
+    // A value-first interpolation starts from an empty string instead of
+    // concatenating, so it never reads an uninitialised temporary.
+    let only_value = mir("fn g(n: i32) -> str { \"{n}\" }");
+    assert_not_contains(body_of(&only_value, "g"), "intrinsic:str_concat");
 }
 
 // ---- drop elaboration ----------------------------------------------------

@@ -328,6 +328,119 @@ pub static EXPLAIN: &[ExplainEntry] = &[
          a type that can carry that failure, otherwise the early return would have nowhere to go.",
         Some("fn parse(s: str) -> Option<i32> {\n    let n = read_number(s)?\n    Some(n)\n}"),
     ),
+    // ---- ownership and borrowing ------------------------------------------
+    e(
+        "E0201",
+        "use of a moved value",
+        "A value of a type that is not `Copy` was moved out of a variable, and the variable was \
+         used again. Moving transfers ownership: the original binding no longer holds a value, so \
+         there is nothing to read. Borrow the value instead of moving it when both uses need it.",
+        Some("let s = \"hello\"\ntake(s)\nprintln(s)   // error: `s` was moved"),
+    ),
+    e(
+        "E0202",
+        "use of a possibly-uninitialised value",
+        "The checker proved that a value is assigned on some paths to this point but not on all of \
+         them. Initialising it unconditionally, or in both branches, removes the doubt. `let` \
+         always takes an initialiser in UMAY, so this concerns assignments, which are the only way \
+         to leave a variable without a value.",
+        Some("let x: i32\nif c { x = 1 }\nprintln(x)   // error: only assigned when `c` holds"),
+    ),
+    e(
+        "E0203",
+        "reference may outlive its referent",
+        "The lifetime of a reference is inferred from its uses, and must end before the value it \
+         points at is destroyed. When inference cannot prove that, the reference would dangle. \
+         UMAY's inference is deliberately simpler than Rust's, so some programs a full checker \
+         would accept are rejected here: that limitation is intentional and reported under this \
+         code so it is never mistaken for a bug.",
+        Some("fn f(x: &i32, y: &i32) -> &i32 { x }   // error: which input? needed"),
+    ),
+    e(
+        "E0204",
+        "conflicting borrows",
+        "Two mutable borrows of the same place overlapped in time. A mutable borrow is exclusive: \
+         while it is alive nothing else may read or write the place, otherwise one of the two \
+         would observe a value changed through the other. A borrow lives until its last use, so \
+         ending the earlier use before the second borrow fixes this.",
+        Some("let a = &mut x\nlet b = &mut x   // error: `a` is used later"),
+    ),
+    e(
+        "E0205",
+        "mutable and shared borrows overlap",
+        "A mutable borrow cannot coexist with any other borrow of the same place. Sharing it while \
+         something may write to it is precisely the aliasing that UMAY forbids, because a reader \
+         through the shared reference could see the value change underneath it.",
+        Some("let s = &x\nlet m = &mut x   // error: `s` is still used later"),
+    ),
+    e(
+        "E0206",
+        "assignment to a borrowed place",
+        "A place was assigned to, or moved out of, while a borrow of it was still in use. The \
+         borrower holds a reference to that storage, so changing the value would be visible through \
+         it. Finish the borrow's last use first, then assign.",
+        Some("let r = &x\nx = 5   // error: `r` is used after this"),
+    ),
+    e(
+        "E0207",
+        "return of a reference to a local value",
+        "The function returns a reference to storage it owns. That storage is destroyed when the \
+         function returns, so the caller would receive a dangling reference. Returning a borrow of \
+         a parameter is fine, because the caller owns the parameter's referent and outlives the \
+         call; returning a borrow of a `let` binding or a temporary is not.",
+        Some("fn bad() -> &i32 {\n    let x = 1\n    &x   // error: `x` dies here\n}"),
+    ),
+    e(
+        "E0208",
+        "double drop, or move out of a type with a destructor",
+        "A value with a destructor was moved out of a place that will still be dropped, or was \
+         dropped twice. Drop flags make the guarantee static: each value is destroyed exactly \
+         once, on every path. Moving out of a partially borrowed or partially moved value is \
+         rejected for the same reason.",
+        Some("struct Guard { n: i32 }\nfn f(g: Guard) {\n    take(g)\n    drop(g)   // error: already destroyed\n}"),
+    ),
+    e(
+        "E0209",
+        "cannot move out of an index or a dereference",
+        "Indexing and dereferencing produce a place inside value the compiler cannot hand over \
+         wholesale: the index may be out of range, and a reference does not own its pointee. Copy \
+         the value out when the element type is `Copy`, or borrow it instead of moving.",
+        Some("let p = &v[0]\nlet mine = *p   // error for a non-Copy element"),
+    ),
+    e(
+        "E0210",
+        "reference to a temporary value",
+        "The `&` operator needs a place: storage that will still exist afterwards. A literal or the \
+         result of an expression is a temporary that is destroyed at the end of the enclosing \
+         statement, so a reference to it would dangle. Bind the value with `let` first, then \
+         borrow the binding.",
+        Some("let r = &count()   // error: the result is a temporary\nlet n = count()\nlet r = &n   // ok"),
+    ),
+    e(
+        "E0211",
+        "raw pointer dereference outside `unsafe`",
+        "Dereferencing a raw pointer is not checked: the pointer may be null, dangling, or point at \
+         memory of the wrong type. That is why it is confined to `unsafe` blocks, which mark the \
+         code as taking responsibility for the guarantee the checker cannot provide.",
+        Some("let p: *i32 = 0\nlet v = *p            // error\nlet v = unsafe { *p } // ok, but must be valid"),
+    ),
+    e(
+        "E0212",
+        "non-`Send` value crosses a thread boundary",
+        "A value may only be moved to another thread when its type is `Send`, and shared across \
+         threads only when it is `Sync`. Without that bound, safe code could construct a data race. \
+         Borrowing rules already prevent two threads from holding `&mut` to the same place.",
+        Some("let r = Rc.new(x)\nthread.spawn(|| r.use_it())   // error: `Rc` is not `Send`"),
+    ),
+    e(
+        "E0213",
+        "aliasing violation through a raw pointer",
+        "`unsafe` relaxes the checks, not the rules. Forming two mutable raw pointers to the same \
+         storage and writing through both breaks the assumption that a mutable reference is unique, \
+         which is undefined behaviour even though the compiler cannot see it. This diagnostic \
+         reports the cases that are visible statically.",
+        Some("let a: *mut i32 = &mut x\nlet b: *mut i32 = &mut x   // two mutable pointers to one place"),
+    ),
     // ---- warnings ---------------------------------------------------------
     e(
         "W0101",
@@ -381,7 +494,7 @@ mod tests {
     #[test]
     fn lookup_is_case_insensitive() {
         assert!(lookup("e0001").is_some());
-        assert!(lookup("E0201").is_none());
+        assert!(lookup("E0201").is_some(), "ownership codes are documented");
     }
 
     #[test]

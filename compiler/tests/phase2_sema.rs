@@ -699,7 +699,7 @@ fn borrowing_a_local_is_ok() {
 
 #[test]
 fn borrowing_a_literal_is_rejected() {
-    err("fn main() { let r = &1\n let _ = r }", "E1001");
+    err("fn main() { let r = &1\n let _ = r }", "E0210");
 }
 
 #[test]

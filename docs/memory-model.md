@@ -207,7 +207,7 @@ without synchronisation is not available in safe code. The concrete concurrency
 API is a Phase 6+ concern; the *guarantee* is that safe code cannot construct a
 data race.
 
-## 9. Error codes (reserved for Phase 4)
+## 9. Error codes
 
 | Code | Meaning |
 |------|---------|
@@ -225,8 +225,30 @@ data race.
 | `E0212` | data race: non-`Send` value across thread boundary |
 | `E0213` | aliasing violation through raw pointer |
 
+Status of each code, as of Phase 4:
+
+| Code | Enforced? | Notes |
+|------|-----------|-------|
+| `E0201` | yes | per-place move tracking, including partial moves |
+| `E0202` | not reachable | `let` always initialises, so a value is never partially live |
+| `E0203` | deferred | requires full lifetime inference; elision covers the common cases |
+| `E0204` | yes | mutable borrows checked against every other borrow |
+| `E0205` | yes | shared and mutable borrows checked against each other |
+| `E0206` | yes | assignment and move of a borrowed place |
+| `E0207` | yes | a returned reference into non-parameter storage |
+| `E0208` | deferred | needs field-wise drop elaboration |
+| `E0209` | deferred | needs the index and dereference models from the backend |
+| `E0210` | yes | checked in semantic analysis, where borrow operands are resolved |
+| `E0211` | yes | raw-pointer dereference outside `unsafe` |
+| `E0212` | deferred | needs `Send`/`Sync`, which is a Phase 6 concern |
+| `E0213` | deferred | needs the raw-pointer aliasing model |
+
 ## 10. Honesty policy
 
 UMAY does not claim "Rust-equivalent safety" until the borrow checker and its
-adversarial test suite are complete and validated. See
-[ROADMAP.md](../ROADMAP.md) Phase 4 exit criteria.
+adversarial test suite are complete and validated. Phase 4 delivered a checker
+that enforces the ownership and aliasing rules on MIR and is tested against both
+an adversarial suite and an accept corpus, but four of the thirteen codes above
+are not yet enforced, for the reasons listed. The claim this repository supports
+today is: **the rules in sections 1–3 are checked; the rules in sections 4 and 7
+are checked only where listed.**

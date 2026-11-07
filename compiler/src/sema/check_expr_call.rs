@@ -451,11 +451,20 @@ impl FnChecker<'_, '_> {
             );
             return self.error_hir(span);
         };
-        match info.fields.iter().find(|f| f.name == field) {
-            Some(f) => {
+        match info
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name == field)
+        {
+            Some((index, f)) => {
                 let ty = f.ty;
                 HirExpr {
-                    kind: HirExprKind::Field { base: Box::new(base_hir), name: field.to_string(), index: 0 },
+                    kind: HirExprKind::Field {
+                        base: Box::new(base_hir),
+                        name: field.to_string(),
+                        index: index as u32,
+                    },
                     ty,
                     span,
                 }

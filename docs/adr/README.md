@@ -12,6 +12,7 @@ consequences, alternatives.
 | [0005](0005-blocking-on-init.md) | `let` always initializes; deferred init rejected | accepted |
 | [0006](0006-semantic-analysis.md) | Three passes over items, body-local inference, conservative exhaustiveness | accepted |
 | [0007](0007-mir.md) | CFG-based MIR, sugar removed during lowering, drop elaboration as a pass | accepted |
+| [0008](0008-ownership-borrowck.md) | Path-based move tracking, definite-init dataflow, borrows live to last use | accepted |
 
 ## Template
 

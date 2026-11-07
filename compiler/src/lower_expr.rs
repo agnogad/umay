@@ -54,7 +54,12 @@ impl Lowering<'_> {
     pub(crate) fn lower_stmt(&mut self, stmt: &HirStmt) -> Option<Operand> {
         match &stmt.kind {
             HirStmtKind::Let { bindings, init } => {
-                let value = init.as_ref().map(|i| self.lower_expr(i));
+                // The initialiser's value is moved into the new local when it
+                // is not `Copy`; copying it would give two owners.
+                let value = init.as_ref().map(|i| {
+                    let op = self.lower_expr(i);
+                    self.into_move_if_owned(op, i.ty)
+                });
                 for (n, b) in bindings.iter().enumerate() {
                     let mir_local = self.map_local(*b);
                     self.emit(Statement::StorageLive(mir_local));
@@ -283,6 +288,24 @@ impl Lowering<'_> {
             Operand::Constant(Constant::Uint { ty, .. }) => *ty,
             Operand::Constant(Constant::Float { ty, .. }) => *ty,
             _ => self.ret_ty,
+        }
+    }
+
+    /// Turns a copy of an operand into a move when the value owns resources.
+    ///
+    /// Used wherever a value is transferred rather than duplicated: `let`
+    /// bindings and call arguments. Without this, an owned value would have two
+    /// owners and be dropped twice.
+    pub(crate) fn into_move_if_owned(&mut self, op: Operand, ty: TyId) -> Operand {
+        if self.types.is_copy(ty) {
+            return op;
+        }
+        match op {
+            Operand::Copy(place) => {
+                self.emit(Statement::SetDropFlag { local: place.local, value: false });
+                Operand::Move(place)
+            }
+            other => other,
         }
     }
 

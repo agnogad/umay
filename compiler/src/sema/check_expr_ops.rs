@@ -328,7 +328,7 @@ impl FnChecker<'_, '_> {
         }
         if !self.is_place(&inner) {
             self.push(
-                Diagnostic::error("E1001", "cannot borrow this expression")
+                Diagnostic::error("E0210", "cannot borrow a temporary value")
                     .at(inner.span)
                     .with_cause("only places can be borrowed; this is a temporary value")
                     .with_explanation(
