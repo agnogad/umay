@@ -213,6 +213,7 @@ pub enum Keyword {
     Ref,
     Dyn,
     Extern,
+    Sizeof,
 }
 
 impl Keyword {
@@ -253,6 +254,7 @@ impl Keyword {
             Keyword::Ref => "ref",
             Keyword::Dyn => "dyn",
             Keyword::Extern => "extern",
+            Keyword::Sizeof => "sizeof",
         }
     }
 
@@ -293,6 +295,7 @@ impl Keyword {
             "ref" => Keyword::Ref,
             "dyn" => Keyword::Dyn,
             "extern" => Keyword::Extern,
+            "sizeof" => Keyword::Sizeof,
             _ => return None,
         })
     }

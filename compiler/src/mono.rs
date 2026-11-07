@@ -170,6 +170,33 @@ impl<'t> Mono<'t> {
         subst.into_iter().collect()
     }
 
+    /// The types an associated function is instantiated with, from its result.
+    ///
+    /// `Vec::with_capacity(n)` returns a `Vec<T>` whose parameter no argument
+    /// mentions; the call site's expected type already made it concrete, so the
+    /// result names the instance.
+    fn infer_result(&self, hir: &Hir, callee: FnId, result: TyId) -> Option<Vec<TyId>> {
+        let ret = hir.fns.iter().find(|f| f.id == callee)?.ret;
+        let names = self.decl_generics.get(&callee)?;
+        let mut subst: Vec<Option<TyId>> = vec![None; names.len()];
+        match (self.types.kind(ret).clone(), self.types.kind(result).clone()) {
+            (
+                TyKind::Adt { def: d1, args: declared },
+                TyKind::Adt { def: d2, args: concrete },
+            ) if d1 == d2 => {
+                for (i, decl) in declared.iter().enumerate() {
+                    let TyKind::Param { name } = self.types.kind(*decl).clone() else { continue };
+                    let Some(pos) = names.iter().position(|n| *n == name) else { continue };
+                    if let Some(arg) = concrete.get(i) {
+                        subst[pos] = Some(*arg);
+                    }
+                }
+            }
+            _ => return None,
+        }
+        subst.into_iter().collect()
+    }
+
     /// The types a method call instantiates its `impl` with, from the receiver.
     fn infer_method(&self, method: FnId, recv_ty: TyId) -> Option<Vec<TyId>> {
         self.impl_generics.get(&method)?;
@@ -241,6 +268,13 @@ impl<'t> Mono<'t> {
     fn demand(&mut self, callee: FnId, args: &[TyId]) -> Option<FnId> {
         if !self.is_generic(callee) {
             return Some(callee);
+        }
+        // An argument that is still a parameter means this call was reached from
+        // inside another generic body, not from code with a concrete type: it is
+        // that template's own business and produces no instance. Recording it
+        // would create a copy whose `T` is another `T`, which no caller can use.
+        if args.iter().any(|a| self.types.first_param(*a).is_some()) {
+            return None;
         }
         let instance = Instance::new(callee, args.to_vec());
         if let Some(&id) = self.produced.get(&instance) {
@@ -323,6 +357,7 @@ impl<'m, 't, 'h> Rewriter<'m, 't, 'h> {
         // a generic call whose arguments are now all concrete.
         match &mut e.kind {
             HirExprKind::Call { callee, args } => {
+                let call_ty = e.ty;
                 self.rewrite_expr(callee);
                 for a in args.iter_mut() {
                     self.rewrite_expr(a);
@@ -333,7 +368,14 @@ impl<'m, 't, 'h> Rewriter<'m, 't, 'h> {
                 };
                 if let Some(id) = fn_id {
                     let arg_tys: Vec<TyId> = args.iter().map(|a| a.ty).collect();
-                    let Some(instance_args) = self.mono.infer_free(self.hir, id, &arg_tys) else {
+                    // A generic callee whose arguments do not mention its parameter
+                    // is an associated function such as `Vec::with_capacity(n)`,
+                    // where the result type is the only thing that says which
+                    // instance is meant: it was already made concrete against the
+                    // annotation at the call site.
+                    let Some(instance_args) = self.mono.infer_free(self.hir, id, &arg_tys).or_else(|| {
+                        self.mono.infer_result(self.hir, id, call_ty)
+                    }) else {
                         return;
                     };
                     let resolved = if self.collect {
@@ -542,6 +584,9 @@ fn substitute_expr_types(types: &mut TyCtxt, e: &mut HirExpr, subst: &HashMap<St
             substitute_expr_types(types, expr, subst);
             *to = types.substitute(*to, subst);
         }
+        // `sizeof(T)` names a type directly, so it is the one expression whose
+        // operand must be substituted even though nothing is evaluated.
+        HirExprKind::Sizeof { of } => *of = types.substitute(*of, subst),
         HirExprKind::PtrOffset { ptr, count } => {
             substitute_expr_types(types, ptr, subst);
             substitute_expr_types(types, count, subst);

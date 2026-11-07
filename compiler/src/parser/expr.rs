@@ -330,6 +330,20 @@ impl Parser {
                 let span = self.advance().span;
                 Expr { kind: ExprKind::BoolLit(false), span }
             }
+            TokenKind::Keyword(Keyword::Sizeof) => {
+                // `sizeof(Type)`. A size is a property of the type, so it is read
+                // from a type rather than from a value, and no value is evaluated.
+                let start = self.advance().span;
+                if !self.at(&TokenKind::LParen) {
+                    let sp = self.span();
+                    self.error("E0322", "expected `(` after `sizeof`", sp);
+                    return Expr { kind: ExprKind::Infer, span: start.to(sp) };
+                }
+                self.advance();
+                let ty = self.parse_type();
+                let end = self.expect(TokenKind::RParen, "E0322", "`sizeof(`").unwrap_or(start);
+                Expr { kind: ExprKind::Sizeof { ty }, span: start.to(end) }
+            }
             TokenKind::Underscore => {
                 let span = self.advance().span;
                 Expr { kind: ExprKind::Infer, span }

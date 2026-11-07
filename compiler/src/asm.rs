@@ -277,6 +277,11 @@ fn print_move(kind: MoveKind, src: &Operand, dst: &Operand) -> String {
             // `movsX` naming: source width first, then destination.
             format!("movs{}{} {}, {}", from.suffix(), to.suffix(), op_str(src, from), op_str(dst, to))
         }
+        // `movz{32}{64}` does not exist: a 32-bit register write clears the upper
+        // half on its own, so a 32-bit move is the zero-extending form.
+        MoveKind::ZeroExtend { from: RegWidth::W32, to: RegWidth::W64 } => {
+            format!("movl {}, {}", op_str(src, RegWidth::W32), op_str(dst, RegWidth::W32))
+        }
         MoveKind::ZeroExtend { from, to } => {
             format!("movz{}{} {}, {}", from.suffix(), to.suffix(), op_str(src, from), op_str(dst, to))
         }

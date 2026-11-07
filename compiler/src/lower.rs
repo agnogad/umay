@@ -27,6 +27,10 @@ use crate::types::TyId;
 /// The result of lowering a program.
 pub struct Lowered {
     pub program: MirProgram,
+    /// Problems found while lowering that the checker could not see, such as a
+    /// size asked of an unsized type. Lowering has no diagnostic channel of its
+    /// own, so the caller turns these into the usual diagnostics.
+    pub errors: Vec<(String, Span)>,
 }
 
 /// Lowers every function with a body into MIR.
@@ -37,6 +41,7 @@ pub struct Lowered {
 pub fn lower(hir: &mut Hir, types: &mut crate::types::TyCtxt) -> Lowered {
     crate::mono::Mono::new(types, hir).run(hir);
     let mut program = MirProgram::default();
+    let mut errors: Vec<(String, Span)> = Vec::new();
     for f in hir.fns.iter() {
         // A generic declaration is a template, not a function: its body was
         // copied once per instantiation and no call can reach the original. It has
@@ -45,18 +50,18 @@ pub fn lower(hir: &mut Hir, types: &mut crate::types::TyCtxt) -> Lowered {
             continue;
         }
         let Some(body) = &f.body else { continue };
-        let l = Lowering::new(hir, types, f, &mut program);
+        let l = Lowering::new(hir, types, f, &mut program, &mut errors);
         let mir = l.lower_fn(body);
         program.bodies.push(mir);
     }
     // Constants are lowered into their own bodies so that the backend has one
     // uniform thing to compile.
     for c in hir.consts.iter() {
-        let l = Lowering::new_const(hir, types, c, &mut program);
+        let l = Lowering::new_const(hir, types, c, &mut program, &mut errors);
         let mir = l.lower_const(&c.value);
         program.bodies.push(mir);
     }
-    Lowered { program }
+    Lowered { program, errors }
 }
 
 /// Per-function lowering state.
@@ -87,6 +92,10 @@ pub(crate) struct Lowering<'a> {
     pub(crate) loop_stack: Vec<LoopTargets>,
     /// Deferred blocks that run when the scope exits.
     pub(crate) defer_stack: Vec<Vec<HirBlock>>,
+    /// Diagnostics that only lowering can raise, such as a size asked of an
+    /// unsized type. Shared with the program being built so they survive this
+    /// value being consumed by `lower_fn`.
+    pub(crate) errors: &'a mut Vec<(String, Span)>,
 }
 
 #[derive(Clone, Copy)]
@@ -100,7 +109,13 @@ pub(crate) struct LoopTargets {
 }
 
 impl<'a> Lowering<'a> {
-    fn new(hir: &'a Hir, types: &'a mut crate::types::TyCtxt, f: &HirFn, program: &'a mut MirProgram) -> Self {
+    fn new(
+        hir: &'a Hir,
+        types: &'a mut crate::types::TyCtxt,
+        f: &HirFn,
+        program: &'a mut MirProgram,
+        errors: &'a mut Vec<(String, Span)>,
+    ) -> Self {
         let mut locals = Vec::new();
         let mut local_map = HashMap::new();
         for (i, l) in f.locals.iter().enumerate() {
@@ -142,6 +157,7 @@ impl<'a> Lowering<'a> {
             next_temp: 0,
             loop_stack: Vec::new(),
             defer_stack: Vec::new(),
+            errors,
         }
     }
 
@@ -150,6 +166,7 @@ impl<'a> Lowering<'a> {
         types: &'a mut crate::types::TyCtxt,
         c: &HirConst,
         program: &'a mut MirProgram,
+        errors: &'a mut Vec<(String, Span)>,
     ) -> Self {
         let ret_local = LocalId(0);
         Lowering {
@@ -176,6 +193,7 @@ impl<'a> Lowering<'a> {
             next_temp: 0,
             loop_stack: Vec::new(),
             defer_stack: Vec::new(),
+            errors,
         }
     }
 

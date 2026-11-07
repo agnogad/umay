@@ -87,6 +87,26 @@ pub fn umay_write_i64(ptr: *mut u8, value: i64) {
     unsafe { *(ptr as *mut i64) = value }
 }
 
+// Reads a `u16` from a raw address.
+pub fn umay_read_u16(ptr: *const u8) -> u16 {
+    return unsafe { *(ptr as *const u16) }
+}
+
+// Writes a `u16` to a raw address.
+pub fn umay_write_u16(ptr: *mut u8, value: u16) {
+    unsafe { *(ptr as *mut u16) = value }
+}
+
+// Reads a `u32` from a raw address.
+pub fn umay_read_u32(ptr: *const u8) -> u32 {
+    return unsafe { *(ptr as *const u32) }
+}
+
+// Writes a `u32` to a raw address.
+pub fn umay_write_u32(ptr: *mut u8, value: u32) {
+    unsafe { *(ptr as *mut u32) = value }
+}
+
 // --- byte strings -----------------------------------------------------------
 
 // The number of bytes before the terminating zero.

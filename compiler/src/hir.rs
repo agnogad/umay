@@ -250,6 +250,8 @@ pub enum HirExprKind {
     /// `move expr`
     Move(Box<HirExpr>),
     /// `expr as Ty`
+    /// `sizeof(Type)` — the size of a type in bytes, known at compile time.
+    Sizeof { of: TyId },
     Cast { expr: Box<HirExpr>, to: TyId },
     /// `ptr.offset(n)` — moves a raw pointer by `n` elements of its pointee.
     ///
@@ -511,6 +513,7 @@ fn rewrite_block(block: &mut HirBlock, map: &std::collections::HashMap<TyId, TyI
 fn rewrite_expr(e: &mut HirExpr, map: &std::collections::HashMap<TyId, TyId>) {
     map_ty(&mut e.ty, map);
     match &mut e.kind {
+        HirExprKind::Sizeof { of } => map_ty(of, map),
         HirExprKind::IntLit { .. }
         | HirExprKind::FloatLit { .. }
         | HirExprKind::StrLit(_)

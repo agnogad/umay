@@ -354,6 +354,8 @@ pub enum ExprKind {
     Ref { mutable: bool, operand: Box<Expr> },
     /// `expr as Type`
     Cast { expr: Box<Expr>, ty: TypeExpr },
+    /// `sizeof(Type)` — the size of a type in bytes.
+    Sizeof { ty: TypeExpr },
     /// Plain assignment: `place = value`.
     Assign { place: Box<Expr>, value: Box<Expr> },
     /// Compound assignment: `place op= value`.

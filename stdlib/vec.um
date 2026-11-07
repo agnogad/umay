@@ -31,15 +31,23 @@ impl<T> Vec<T> {
         return self.cap
     }
 
+    // The number of bytes one element occupies.
+    //
+    // `sizeof(T)` is resolved when this body is compiled, which is after
+    // monomorphisation has fixed what `T` is, so every instance gets its own
+    // stride without a separate declaration.
+    fn stride(&self) -> usize {
+        return sizeof(T)
+    }
+
     // The address of element `index`, in bytes.
     //
-    // The stride is `T`'s size, which is why this needs the layout: the block is
-    // addressed as bytes so that one `Vec` implementation serves every `T`.
+    // The block is addressed as bytes so that one implementation serves every
+    // `T`; the stride is what makes the index mean elements rather than bytes.
     fn address_of(&self, index: usize) -> *mut u8 {
         unsafe {
             let base = self.ptr as usize
-            let stride = 8 as usize
-            return (base + index * stride) as *mut u8
+            return (base + index * self.stride()) as *mut u8
         }
     }
 }
@@ -55,7 +63,7 @@ impl<T> Vec<T> {
     // A vector with room for at least `capacity` elements.
     fn with_capacity(capacity: usize) -> Vec<T> {
         unsafe {
-            let bytes = capacity * 8 as usize
+            let bytes = capacity * sizeof(T)
             return Vec { ptr: alloc(bytes), len: 0, cap: capacity }
         }
     }
@@ -70,8 +78,8 @@ impl<T> Vec<T> {
     fn grow(&self) -> Vec<T> {
         unsafe {
             let new_cap = if self.cap == 0 { 2 as usize } else { self.cap * 2 as usize }
-            let fresh = alloc(new_cap * 8 as usize)
-            copy_bytes(self.ptr, fresh, self.len * 8 as usize)
+            let fresh = alloc(new_cap * sizeof(T))
+            copy_bytes(self.ptr, fresh, self.len * sizeof(T))
             if self.cap > 0 {
                 dealloc(self.ptr)
             }
@@ -95,21 +103,53 @@ impl<T> Vec<T> {
     // Writes `value` at `index` and counts it as an element.
     fn with_value_at(&self, index: usize, value: i64) -> Vec<T> {
         unsafe {
-            write_i64(self.address_of(index), value)
-            return Vec { ptr: self.ptr, len: index + 1 as usize, cap: self.cap }
+            let written = self.set(index, value)
+            return Vec { ptr: written.ptr, len: index + 1 as usize, cap: written.cap }
         }
     }
 
-    // The element at `index`, or `0` when the index is out of range.
+    // Reads the element at `index` as an `i64`.
     //
-    // A bounds check rather than a trap: a caller that wants to know whether the
-    // index was valid should compare it with `len` first.
+    // The value must occupy eight bytes. A narrower element is read with its own
+    // width so that a `Vec<u8>` holds bytes rather than the eight-byte word the
+    // address happens to start, and a wider one is rejected by the layout.
     fn get(&self, index: usize) -> i64 {
         unsafe {
-            if index < self.len {
-                return read_i64(self.address_of(index))
+            if index >= self.len {
+                return 0
             }
-            return 0
+            let at = self.address_of(index)
+            let width = sizeof(T)
+            if width == 1 {
+                return read_byte(at) as i64
+            }
+            if width == 2 {
+                return read_u16(at) as i64
+            }
+            if width == 4 {
+                return read_u32(at) as i64
+            }
+            return read_i64(at)
+        }
+    }
+
+    // Writes `value` at `index` using the element's own width, and counts it as
+    // an element. A `push` of an element wider or narrower than eight bytes goes
+    // through here, so the stored bytes are the element and nothing else.
+    fn set(&self, index: usize, value: i64) -> Vec<T> {
+        unsafe {
+            let at = self.address_of(index)
+            let width = sizeof(T)
+            if width == 1 {
+                write_byte(at, value as u8)
+            } else if width == 2 {
+                write_u16(at, value as u16)
+            } else if width == 4 {
+                write_u32(at, value as u32)
+            } else {
+                write_i64(at, value)
+            }
+            return Vec { ptr: self.ptr, len: self.len, cap: self.cap }
         }
     }
 

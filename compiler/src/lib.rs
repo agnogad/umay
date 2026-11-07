@@ -123,6 +123,11 @@ pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
     // Ownership checking runs on MIR, never on source text, so its results do
     // not depend on formatting or expression nesting.
     let mut lowered = lower::lower(&mut sema.hir, &mut sema.types);
+    for (message, span) in &lowered.errors {
+        // These are codegen-shaped problems the checker could not see, so they
+        // carry the backend's code rather than a front-end one.
+        diagnostics.push(Diagnostic::error("E3001", message.clone()).at(*span));
+    }
     drop_elab::elaborate(&mut lowered.program, &sema.types);
     let ownership = ownership::check_program(&lowered.program, &sema.types);
     append_all(&mut diagnostics, &ownership);
@@ -190,6 +195,11 @@ pub fn lower_to_mir_opt(
         return Err((diagnostics, map));
     }
     let mut lowered = lower::lower(&mut sema.hir, &mut sema.types);
+    for (message, span) in &lowered.errors {
+        // These are codegen-shaped problems the checker could not see, so they
+        // carry the backend's code rather than a front-end one.
+        diagnostics.push(Diagnostic::error("E3001", message.clone()).at(*span));
+    }
     drop_elab::elaborate(&mut lowered.program, &sema.types);
     crate::opt::optimize(&mut lowered.program, &sema.types, level);
     // `umay mir` shows the lowering, so ownership errors are not fatal here:
@@ -316,6 +326,11 @@ fn codegen_source_impl(
     }
 
     let mut lowered = lower::lower(&mut sema.hir, &mut sema.types);
+    for (message, span) in &lowered.errors {
+        // These are codegen-shaped problems the checker could not see, so they
+        // carry the backend's code rather than a front-end one.
+        diagnostics.push(Diagnostic::error("E3001", message.clone()).at(*span));
+    }
     drop_elab::elaborate(&mut lowered.program, &sema.types);
     let ownership = ownership::check_program(&lowered.program, &sema.types);
     append_all(&mut diagnostics, &ownership);

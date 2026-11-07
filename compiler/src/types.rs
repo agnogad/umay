@@ -175,6 +175,11 @@ impl TyCtxt {
         self.intern(TyKind::Error)
     }
 
+    /// The `usize` type, the width of a size or an index.
+    pub fn usize_ty(&mut self) -> TyId {
+        self.intern(TyKind::Usize)
+    }
+
     /// The `u8` type, the width of an enum's tag.
     pub fn u8_ty(&mut self) -> TyId {
         self.intern(TyKind::U8)

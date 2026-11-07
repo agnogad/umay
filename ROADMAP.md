@@ -234,9 +234,16 @@ resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
   substituted, and the call is rewritten to the copy. Discovery runs over the
   bodies to a fixed point, so an instance created inside another instance is
   found too. A template is never lowered: only its instances are.
-- [x] `Vec<T>` in `stdlib/vec.um` — `new`, `with_capacity`, `push`, `get`, `len`,
-  `capacity`, `is_empty`, `free`, with doubling growth and a bounds check in
-  `get`. `Vec<i64>` pushes, grows and reads back correctly.
+- [x] `Vec<T>` in `stdlib/vec.um` — `new`, `with_capacity`, `push`, `get`, `set`,
+  `len`, `capacity`, `is_empty`, `free`, with doubling growth and a bounds check
+  in `get`. The stride is `sizeof(T)`, so `Vec<u8>` packs one byte per element
+  and `Vec<i64>` one word.
+- [x] `sizeof(Type)` — the size of a type in bytes, folded at compile time.
+  Monomorphisation substitutes its operand like any other type, so a generic body
+  can size its own parameter.
+- [x] `Type::fn(..)` — an associated function in the type's `impl` block with no
+  receiver, which is how a constructor is written. A generic type's associated
+  function takes its instance from the binding's annotation.
 
 - [ ] `Option`, `Result`, `Iterator` basics.
 - [ ] `fs`: read, write, open, metadata.
@@ -305,16 +312,22 @@ Inference also learned three things:
 - A literal written inside `impl<T> Vec<T>` means the `Vec<T>` being defined, so a
   constructor can build its own type without an annotation.
 
-`Vec::new()` is called as `Vec::new()` with a type annotation rather than
-`Vec::<i64>::new()`: turbofish is still a parser gap.
+`Vec::new()` is called with a type annotation rather than `Vec::<i64>::new()`:
+turbofish is still a parser gap.
+
+Three more defects surfaced on the way:
+
+- `ZeroExtend { from: W32, to: W64 }` printed `movzlq`, which no assembler
+  accepts. A 32-bit register write clears the upper half on its own, so it is now
+  `movl`.
+- Monomorphisation recorded instances for calls made *inside* a generic body
+  whose arguments were still parameters, creating copies whose `T` was another
+  `T`. Those are now skipped: they are the template's own business.
+- `sizeof`'s operand is the one expression a monomorphiser had to substitute
+  without evaluating anything, and it was not, so a `Vec<u8>` measured a `T`.
 
 Known gaps this step depends on, now listed rather than assumed:
 
-- An associated function is not callable as `Type::fn(..)`: only `Vec::new()`
-  works, and only because it resolves to the single `new` in scope. Real
-  `Type::fn` resolution is a front-end task.
-- `Vec<T>` stores its stride as a literal `8`, because `size_of::<T>()` does not
-  exist yet; a `Vec<u8>` would therefore use the wrong stride.
 - `push` takes and returns the vector by value, so a caller must write
   `v = v.push(x)`. An `&mut self` method that reallocates would be the better
   shape, but `&mut T` does not coerce to `&T` yet.

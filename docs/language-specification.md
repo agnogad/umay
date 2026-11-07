@@ -411,10 +411,22 @@ let empty: Option<i64> = Option::None   // `T` comes from the annotation
 Without such an annotation an instance that nothing names is reported
 ("cannot infer the type parameter `T`") rather than guessed.
 
-`Vec<T>` is available in the standard library — see `stdlib/vec.um`. Its stride
-is currently fixed at eight bytes, so it serves eight-byte element types until
-`size_of::<T>()` exists. `Option`, `Result` and `Iterator` are not in the standard
-library yet, though the declaration form works.
+`sizeof(Type)` gives a type's size in bytes. It takes a type, not a value, so
+nothing is evaluated and the result is a compile-time constant. Its operand is
+substituted like any other type, which is how a generic body can size its own
+parameter:
+
+```umay
+fn stride(&self) -> usize { return sizeof(T) }
+```
+
+A function in an `impl` block that takes no receiver is called through the type:
+`Type::fn(args)`. That is how a constructor is written, and a generic type's
+associated function takes its instance from the binding's annotation
+(`let v: Vec<i64> = Vec::with_capacity(4)`).
+
+`Vec<T>` is in the standard library — see `stdlib/vec.um`. `Option`, `Result` and
+`Iterator` are not, though the declaration form works.
 
 ---
 

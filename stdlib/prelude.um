@@ -28,6 +28,10 @@ extern fn umay_read_byte(ptr: *const u8) -> u8
 extern fn umay_write_byte(ptr: *mut u8, value: u8) -> ()
 extern fn umay_read_i64(ptr: *const u8) -> i64
 extern fn umay_write_i64(ptr: *mut u8, value: i64) -> ()
+extern fn umay_read_u16(ptr: *const u8) -> u16
+extern fn umay_write_u16(ptr: *mut u8, value: u16) -> ()
+extern fn umay_read_u32(ptr: *const u8) -> u32
+extern fn umay_write_u32(ptr: *mut u8, value: u32) -> ()
 
 // ---------------------------------------------------------------------------
 // Output
@@ -106,6 +110,26 @@ pub fn read_i64(ptr: *const u8) -> i64 {
 // Writes `value` to the `i64` at `ptr`.
 pub fn write_i64(ptr: *mut u8, value: i64) {
     umay_write_i64(ptr, value)
+}
+
+// Reads a `u16` from `ptr`.
+pub fn read_u16(ptr: *const u8) -> u16 {
+    return umay_read_u16(ptr)
+}
+
+// Writes `value` to the `u16` at `ptr`.
+pub fn write_u16(ptr: *mut u8, value: u16) {
+    umay_write_u16(ptr, value)
+}
+
+// Reads a `u32` from `ptr`.
+pub fn read_u32(ptr: *const u8) -> u32 {
+    return umay_read_u32(ptr)
+}
+
+// Writes `value` to the `u32` at `ptr`.
+pub fn write_u32(ptr: *mut u8, value: u32) {
+    umay_write_u32(ptr, value)
 }
 
 // ---------------------------------------------------------------------------

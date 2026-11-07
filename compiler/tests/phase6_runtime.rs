@@ -767,3 +767,111 @@ fn an_out_of_range_index_does_not_read_past_the_allocation() {
         "0\n2\n",
     );
 }
+
+#[test]
+fn sizeof_reports_a_type_it_has_to_lay_out() {
+    // The operand is a type, not a value, so nothing is evaluated and the size is
+    // known before the program runs.
+    expect_stdout(
+        "sizeof",
+        "fn main() -> i32 {\n\
+             println_i64(sizeof(u8) as i64)\n\
+             println_i64(sizeof(i64) as i64)\n\
+             println_i64(sizeof(Vec<u8>) as i64)\n\
+             println_i64(sizeof([u8; 4]) as i64)\n\
+             return 0\n\
+         }",
+        "1\n8\n24\n4\n",
+    );
+}
+
+#[test]
+fn a_vector_of_bytes_stores_one_byte_per_element() {
+    // The stride comes from `sizeof(T)`, so a byte vector must pack its elements
+    // one byte apart. Reading a byte as an eight-byte word would return whatever
+    // the neighbouring bytes happen to be.
+    expect_stdout(
+        "vec_u8",
+        "fn main() -> i32 {\n\
+             unsafe {\n\
+                 let mut v: Vec<u8> = Vec::new()\n\
+                 v = v.push(65)\n\
+                 v = v.push(66)\n\
+                 v = v.push(67)\n\
+                 println_i64(v.len() as i64)\n\
+                 println_i64(v.get(0))\n\
+                 println_i64(v.get(1))\n\
+                 println_i64(v.get(2))\n\
+                 let gap = (v.address_of(1) as i64) - (v.address_of(0) as i64)\n\
+                 println_i64(gap)\n\
+                 v.free()\n\
+             }\n\
+             return 0\n\
+         }",
+        "3\n65\n66\n67\n1\n",
+    );
+}
+
+#[test]
+fn a_vector_of_words_stores_one_word_per_element() {
+    expect_stdout(
+        "vec_i64_stride",
+        "fn main() -> i32 {\n\
+             unsafe {\n\
+                 let mut v: Vec<i64> = Vec::new()\n\
+                 v = v.push(1000000000)\n\
+                 v = v.push(2000000000)\n\
+                 let gap = (v.address_of(1) as i64) - (v.address_of(0) as i64)\n\
+                 println_i64(gap)\n\
+                 println_i64(v.get(0))\n\
+                 println_i64(v.get(1))\n\
+                 v.free()\n\
+             }\n\
+             return 0\n\
+         }",
+        "8\n1000000000\n2000000000\n",
+    );
+}
+
+#[test]
+fn an_associated_function_is_called_through_its_type() {
+    // `Type::fn(..)` reaches a function in the type's `impl` block that takes no
+    // receiver. Without it a constructor can only be a free function.
+    expect_stdout(
+        "associated_fn",
+        "struct Point { x: i64, y: i64 }\n\
+         impl Point {\n\
+             fn origin() -> Point { return Point { x: 0, y: 0 } }\n\
+             fn at(x: i64, y: i64) -> Point { return Point { x: x, y: y } }\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let p = Point::origin()\n\
+             let q = Point::at(3, 4)\n\
+             println_i64(p.x + p.y)\n\
+             println_i64(q.x)\n\
+             println_i64(q.y)\n\
+             return 0\n\
+         }",
+        "0\n3\n4\n",
+    );
+}
+
+#[test]
+fn an_associated_function_of_a_generic_type_takes_its_instance_from_the_binding() {
+    // `Vec::with_capacity(n)` names no `T` in its arguments, so the annotation on
+    // the binding is what says which `Vec` it returns.
+    expect_stdout(
+        "associated_fn_generic",
+        "fn main() -> i32 {\n\
+             unsafe {\n\
+                 let mut v: Vec<i64> = Vec::with_capacity(4)\n\
+                 v = v.push(9)\n\
+                 println_i64(v.capacity() as i64)\n\
+                 println_i64(v.get(0))\n\
+                 v.free()\n\
+             }\n\
+             return 0\n\
+         }",
+        "4\n9\n",
+    );
+}

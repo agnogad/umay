@@ -138,6 +138,18 @@ impl Lowering<'_> {
                 Operand::Copy(t)
             }
 
+            HirExprKind::Sizeof { of } => {
+                // A size is known once the type is concrete, which monomorphisation
+                // has already ensured. A type that has no size is a real error.
+                let usize_ty = self.types.usize_ty();
+                match self.size_of(*of) {
+                    Some(size) => Operand::Constant(Constant::Uint { value: size as u128, ty: usize_ty }),
+                    None => {
+                        self.errors.push(("cannot take the size of an unsized type".to_string(), e.span));
+                        Operand::Constant(Constant::Unit)
+                    }
+                }
+            }
             HirExprKind::Unary { op, operand } => self.lower_unary(*op, operand, e),
             HirExprKind::Binary { op, lhs, rhs } => self.lower_binary(*op, lhs, rhs, e),
             HirExprKind::Assign { place, value } => self.lower_assign(place, value, e),
@@ -327,6 +339,54 @@ impl Lowering<'_> {
 
     /// The type of a place after every projection, e.g. the `Option<i64>` behind
     /// a `&Option<i64>` that `match *self` dereferences.
+    /// The size of a type in bytes, or `None` when it has none.
+    ///
+    /// This is the subset of layout lowering needs for `sizeof`: the scalars and
+    /// the aggregates whose fields are all sized. A pointer is one word.
+    fn size_of(&mut self, ty: TyId) -> Option<u64> {
+        let kind = self.types.kind(ty).clone();
+        Some(match kind {
+            crate::types::TyKind::Bool
+            | crate::types::TyKind::I8
+            | crate::types::TyKind::U8 => 1,
+            crate::types::TyKind::I16 | crate::types::TyKind::U16 => 2,
+            crate::types::TyKind::I32
+            | crate::types::TyKind::U32
+            | crate::types::TyKind::Char
+            | crate::types::TyKind::F32 => 4,
+            crate::types::TyKind::I64
+            | crate::types::TyKind::U64
+            | crate::types::TyKind::Usize
+            | crate::types::TyKind::Isize
+            | crate::types::TyKind::F64
+            | crate::types::TyKind::RawPtr(_)
+            | crate::types::TyKind::RawPtrMut(_)
+            | crate::types::TyKind::Ref(_)
+            | crate::types::TyKind::RefMut(_) => 8,
+            crate::types::TyKind::Unit => 0,
+            crate::types::TyKind::Array { elem, len } => self.size_of(elem)? * len,
+            crate::types::TyKind::Tuple(elems) => {
+                let mut total = 0;
+                for e in elems {
+                    total += self.size_of(e)?;
+                }
+                total
+            }
+            crate::types::TyKind::Adt { def, .. } => {
+                // A struct is the sum of its fields. This ignores padding, which
+                // makes it an under-estimate for an aggregate with a mixed layout;
+                // it is exact for the element types a container uses today.
+                let fields = self.hir.structs.iter().find(|s| s.def_id == def)?.fields.clone();
+                let mut total = 0;
+                for f in fields {
+                    total += self.size_of(f.ty)?;
+                }
+                total
+            }
+            _ => return None,
+        })
+    }
+
     pub(crate) fn place_type(&mut self, place: &crate::mir::Place) -> TyId {
         let mut ty = self.local_ty(place.local);
         for projection in &place.projection {

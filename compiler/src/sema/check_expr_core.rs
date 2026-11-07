@@ -83,8 +83,15 @@ impl FnChecker<'_, '_> {
             ast::ExprKind::Unary { op, operand } => self.check_unary(*op, operand, span),
             ast::ExprKind::Binary { op, lhs, rhs } => self.check_binary(*op, lhs, rhs, span),
             ast::ExprKind::Ref { mutable, operand } => self.check_ref(*mutable, operand, span),
+            ast::ExprKind::Sizeof { ty } => {
+                // The operand is a type, not a value, so nothing is evaluated.
+                let generics = self.generics.clone();
+                let of = self.cx.resolve_type(ty, &generics);
+                let usize_ty = self.cx.cx.usize_ty();
+                HirExpr { kind: HirExprKind::Sizeof { of }, ty: usize_ty, span }
+            }
             ast::ExprKind::Cast { expr, ty } => self.check_cast(expr, ty, span),
-            ast::ExprKind::Call { callee, args, .. } => self.check_call(callee, args, span),
+            ast::ExprKind::Call { callee, args, .. } => self.check_call(callee, args, span, hint),
             ast::ExprKind::MethodCall { receiver, method, method_span, args } => {
                 self.check_method_call(receiver, method, *method_span, args, span)
             }

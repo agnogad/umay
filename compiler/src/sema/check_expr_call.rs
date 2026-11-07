@@ -10,16 +10,27 @@ use crate::types::{TyId, TyKind};
 impl FnChecker<'_, '_> {
     // ---- calls -----------------------------------------------------------
 
+    /// Checks a call, optionally knowing what type the context expects.
+    ///
+    /// The hint only reaches a function that cannot name its own type parameters
+    /// from its arguments, such as `Vec::with_capacity(n)`: the annotation on the
+    /// binding is what says which `Vec` it is.
     pub fn check_call(
         &mut self,
         callee: &ast::Expr,
         args: &[ast::Expr],
         span: crate::source::Span,
+        hint: Option<crate::types::TyId>,
     ) -> HirExpr {
         // `Type::Variant(...)` constructs an enum variant.
         if let ast::ExprKind::Path(path) = &callee.kind {
             if path.segments.len() == 2 {
                 if let Some(e) = self.try_variant_ctor(path, args, span) {
+                    return e;
+                }
+                // `Type::fn(args)` reaches a function defined in the type's `impl`
+                // block, which is how a constructor with no receiver is written.
+                if let Some(e) = self.try_associated_fn(path, args, span, hint) {
                     return e;
                 }
             }
@@ -91,6 +102,71 @@ impl FnChecker<'_, '_> {
     }
 
     /// Attempts `Enum::Variant(args)` construction.
+    /// `Type::fn(args)` — a function in `Type`'s `impl` block with no receiver.
+    ///
+    /// Returns `None` when the first segment is not a type this program declares
+    /// or the block has no such function, so the caller can carry on treating the
+    /// path as a value.
+    fn try_associated_fn(
+        &mut self,
+        path: &ast::Path,
+        args: &[ast::Expr],
+        span: crate::source::Span,
+        hint: Option<crate::types::TyId>,
+    ) -> Option<HirExpr> {
+        let type_name = path.segments[0].name.clone();
+        let fn_name = path.segments[1].name.clone();
+        let fn_id = *self.cx.methods.get(&(type_name.clone(), fn_name.clone()))?;
+        // A method with a receiver is not callable through the type: it needs an
+        // instance, and saying so is more useful than an unknown-name error.
+        let info = self.cx.hir.fns.iter().find(|f| f.id == fn_id).cloned()?;
+        if !info.params.is_empty() && info.has_self {
+            self.push(
+                Diagnostic::error(
+                    "E1014",
+                    format!("`{type_name}::{fn_name}` takes a receiver, so it is called on a value"),
+                )
+                .at(span)
+                .with_cause("this function needs an instance of the type")
+                .with_suggestion(Suggestion::new(
+                    format!("write `value.{fn_name}(..)`"),
+                    path.span,
+                    format!("value.{fn_name}"),
+                )),
+            );
+            return Some(self.error_hir(span));
+        }
+        // Arguments are checked against the declaration the same way a free
+        // function call's are; the callee is the function itself, not a path.
+        let arg_hirs: Vec<HirExpr> = args.iter().map(|a| self.check_expr(a)).collect();
+        self.check_call_args(&info.params, &arg_hirs, span, "function");
+        // A method of `impl<T>` names `T` in its result, and its arguments may not
+        // mention the parameter at all. The context's expected type is then the
+        // only thing that says which instance is meant.
+        let ret = match hint {
+            Some(h) if self.cx.cx.first_param(info.ret).is_some() => {
+                match (self.cx.cx.kind(info.ret).clone(), self.cx.cx.kind(h).clone()) {
+                    (
+                        TyKind::Adt { def: d1, .. },
+                        TyKind::Adt { def: d2, args },
+                    ) if d1 == d2 => self.cx.cx.adt(d1, args),
+                    _ => info.ret,
+                }
+            }
+            _ => info.ret,
+        };
+        let callee = HirExpr {
+            kind: HirExprKind::FnRef(fn_id),
+            ty: self.cx.cx.fn_ptr(info.params.clone(), ret),
+            span: path.span,
+        };
+        Some(HirExpr {
+            kind: HirExprKind::Call { callee: Box::new(callee), args: arg_hirs },
+            ty: ret,
+            span,
+        })
+    }
+
     pub(crate) fn try_variant_ctor(
         &mut self,
         path: &ast::Path,
