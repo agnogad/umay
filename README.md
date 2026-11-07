@@ -25,12 +25,18 @@ fn main() {
 ## Status
 
 UMAY is under active development. This repository currently contains **Phases 0
-through 4** of the roadmap: a complete lexer, parser and semantic analyser with
+through 5** of the roadmap: a complete lexer, parser and semantic analyser with
 the AI-first diagnostics infrastructure, a full HIR → MIR lowering with explicit
-control flow and drop elaboration, and an ownership and borrow checker running
-on that MIR. There is no code generator yet, so
-`umay build` and `umay run` exist as commands but report that they are not
-implemented. The MIR can be inspected with `umay mir <file>`.
+control flow and drop elaboration, an ownership and borrow checker running on
+that MIR, and a custom x86_64 backend. `umay build` produces a working Linux
+executable, `umay run` builds and runs it, and `umay asm` prints the generated
+assembly. The MIR can be inspected with `umay mir <file>`.
+
+The backend is UMAY's own — no LLVM, no Cranelift. It covers integer
+arithmetic, control flow, structs, function calls and recursion, and is
+optimised at four levels. Constructs it cannot yet generate code for are
+reported as `E3001` rather than miscompiled; see
+[ADR 0009](docs/adr/0009-x86_64-backend.md).
 
 | Phase | Area | Status |
 |-------|------|--------|
@@ -39,7 +45,7 @@ implemented. The MIR can be inspected with `umay mir <file>`.
 | 2 | Semantic analysis and type checking | **complete** |
 | 3 | HIR and MIR | **complete** |
 | 4 | Ownership and borrow checking | **complete** |
-| 5 | Custom x86_64 backend | not started |
+| 5 | Custom x86_64 backend | **complete** |
 | 6 | Runtime and standard library | not started |
 | 7 | AI developer experience | not started |
 | 8 | Build system and packages | not started |

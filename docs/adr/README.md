@@ -13,6 +13,7 @@ consequences, alternatives.
 | [0006](0006-semantic-analysis.md) | Three passes over items, body-local inference, conservative exhaustiveness | accepted |
 | [0007](0007-mir.md) | CFG-based MIR, sugar removed during lowering, drop elaboration as a pass | accepted |
 | [0008](0008-ownership-borrowck.md) | Path-based move tracking, definite-init dataflow, borrows live to last use | accepted |
+| [0009](0009-x86_64-backend.md) | Stack slots per local, virtual registers per value, linear-scan allocation, assembly text as the backend boundary | accepted |
 
 ## Template
 

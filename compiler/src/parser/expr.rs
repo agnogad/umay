@@ -344,7 +344,7 @@ impl Parser {
             TokenKind::Keyword(Keyword::Match) => self.parse_match(),
             TokenKind::Keyword(Keyword::While) => {
                 self.advance();
-                let cond = self.parse_expr();
+                let cond = self.parse_condition();
                 let body = self.parse_block();
                 let span = start.to(body.span);
                 Expr { kind: ExprKind::While { cond: Box::new(cond), body }, span }
@@ -359,7 +359,7 @@ impl Parser {
                 self.advance();
                 let pattern = self.parse_pattern();
                 self.expect(TokenKind::Keyword(Keyword::In), "E0320", "`for` loop");
-                let iter = self.parse_expr();
+                let iter = self.parse_condition();
                 let body = self.parse_block();
                 let span = start.to(body.span);
                 Expr { kind: ExprKind::For { pattern, iter: Box::new(iter), body }, span }
@@ -512,6 +512,10 @@ impl Parser {
     /// syntax. An empty `{}` after a path is always a struct literal in
     /// expression position; UMAY requires an explicit block for closures.
     fn looks_like_struct_literal(&self) -> bool {
+        // In a condition, `{` opens the body rather than a literal.
+        if self.no_struct_literal {
+            return false;
+        }
         if self.nth_kind(1) == &TokenKind::RBrace {
             return true;
         }
@@ -603,10 +607,20 @@ impl Parser {
         Expr { kind: ExprKind::ArrayLit { elems }, span: start.to(end) }
     }
 
+    /// Parses the condition of `if`, `while` or `for`, where a `{` opens the
+    /// body instead of a struct literal.
+    fn parse_condition(&mut self) -> Expr {
+        let saved = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let expr = self.parse_expr();
+        self.no_struct_literal = saved;
+        expr
+    }
+
     fn parse_if(&mut self) -> Expr {
         let start = self.span();
         self.advance(); // if
-        let cond = self.parse_expr();
+        let cond = self.parse_condition();
         let then_block = self.parse_block();
         let mut else_branch = None;
         if self.at_keyword(Keyword::Else) {

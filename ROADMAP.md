@@ -160,19 +160,30 @@ raw-pointer models from Phase 6.
 
 ---
 
-## Phase 5 — Custom x86_64 Backend · planned
+## Phase 5 — Custom x86_64 Backend · done
 
-- Target description abstraction.
-- Machine instruction representation and instruction selection from MIR.
-- Linear-scan register allocation with spilling.
-- Stack frames, System V AMD64 ABI calling convention.
-- ELF64 object emission with relocations.
-- Linking via the system linker.
-- Optimisation levels 0–3: constant folding/propagation, DCE, unreachable block
-  elimination, copy propagation, simple inlining, arithmetic simplification.
+- [x] Target description abstraction (`layout.rs`): sizes, alignments, SysV
+  eightbyte classification.
+- [x] Stack frames (`frame.rs`): one slot per MIR local, type-aligned.
+- [x] Machine instruction representation (`machine.rs`) and instruction selection
+  from MIR (`isel.rs`, `isel/stmt.rs`, `isel/term.rs`).
+- [x] Linear-scan register allocation with spilling (`regalloc.rs`).
+- [x] System V AMD64 calling convention, including stack arguments.
+- [x] Assembly printing (`asm.rs`).
+- [x] Optimisation levels 0–3 (`opt.rs`): constant folding/propagation, DCE,
+  unreachable block elimination, copy propagation.
+- [x] Linking via the system assembler and linker; `umay build`, `umay run`,
+  `umay asm`.
+
+Not done in this phase, and reported as `E3001` rather than miscompiled:
+ELF64 object emission with relocations (the system assembler is used instead),
+indirect calls through function values, aggregates returned by hidden pointer,
+floating-point arithmetic. See [ADR 0009](docs/adr/0009-x86_64-backend.md).
 
 Exit criteria: `umay build` produces a working Linux executable for a program
 using arithmetic, control flow, structs, and calls; output is verified by tests.
+**Met** — `compiler/tests/phase5_codegen.rs` compiles, links and runs 19 such
+programs and checks their exit codes.
 
 ---
 

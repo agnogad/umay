@@ -19,6 +19,7 @@ pub mod exit {
     pub const USAGE: u8 = 2;
     pub const IO_ERROR: u8 = 3;
     pub const NOT_IMPLEMENTED: u8 = 4;
+    pub const CODEGEN_ERROR: u8 = 5;
 }
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -46,8 +47,9 @@ pub fn run(args: Vec<String>) -> ExitCode {
             print_help();
             exit::OK
         }
-        "build" => not_yet("build", "Phase 5 (custom x86_64 backend)"),
-        "run" => not_yet("run", "Phase 5 (custom x86_64 backend)"),
+        "build" => cmd_build(&rest, false),
+        "run" => cmd_build(&rest, true),
+        "asm" => cmd_asm(&rest),
         "fmt" => not_yet("fmt", "Phase 7 (developer experience)"),
         "lint" => not_yet("lint", "Phase 7 (developer experience)"),
         "lsp" => not_yet("lsp", "Phase 7 (developer experience)"),
@@ -76,6 +78,9 @@ USAGE:
 
 COMMANDS:
     check <files...>   Parse and validate UMAY source
+    build <file>       Compile to an executable in dist/
+    run <file>         Compile and run it, reporting its exit status
+    asm <file>         Print the generated assembly
     ast <file>         Print the parsed syntax tree
     mir <file>         Print the lowered MIR (basic blocks)
     explain <CODE>     Explain a diagnostic code (e.g. umay explain E0101)
@@ -88,22 +93,37 @@ OPTIONS:
     --format human|json    Diagnostic output format (default: human)
     --color auto|always|never
     --explain              Include the full explanation under each diagnostic
+    -O0 .. -O3             Optimisation level for build, run and asm (-O = -O2)
 
 PLANNED (not in this build):
-    build, run, fmt, lint, lsp
+    fmt, lint, lsp
 
 EXIT CODES:
-    0 success   1 compile error   2 usage error   3 I/O error   4 not implemented"
+    0 success   1 compile error   2 usage error   3 I/O error
+    4 not implemented   5 code generation failed"
     );
 }
 
 /// A parsed `--flag` set shared by the file-oriented commands.
-#[derive(Default)]
 struct Options {
     format_json: bool,
     explain: bool,
     color: Option<bool>,
+    /// Optimisation level for `mir` and (later) `build`.
+    opt_level: umayc::opt::OptLevel,
     files: Vec<String>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            format_json: false,
+            explain: false,
+            color: None,
+            opt_level: umayc::opt::OptLevel::O0,
+            files: Vec::new(),
+        }
+    }
 }
 
 fn parse_options(args: &[String]) -> Result<Options, (u8, String)> {
@@ -112,6 +132,23 @@ fn parse_options(args: &[String]) -> Result<Options, (u8, String)> {
     while i < args.len() {
         let a = &args[i];
         match a.as_str() {
+            // `-O`, `-O2`, `-O3`: optimisation level. `-O` alone means `-O2`,
+            // matching the convention every systems compiler shares.
+            _ if a == "-O" => {
+                opts.opt_level = umayc::opt::OptLevel::O2;
+            }
+            _ if a.starts_with("-O") => {
+                let level = &a[2..];
+                match umayc::opt::OptLevel::parse(level) {
+                    Some(l) => opts.opt_level = l,
+                    None => {
+                        return Err((
+                            exit::USAGE,
+                            format!("invalid optimisation level `{a}` (expected -O, -O0, -O1, -O2 or -O3)"),
+                        ))
+                    }
+                }
+            }
             "--format" => {
                 i += 1;
                 match args.get(i).map(String::as_str) {
@@ -236,7 +273,7 @@ fn cmd_mir(args: &[String]) -> u8 {
             return exit::IO_ERROR;
         }
     };
-    match umayc::lower_to_mir(path.to_string_lossy().as_ref(), &text) {
+    match umayc::lower_to_mir_opt(path.to_string_lossy().as_ref(), &text, opts.opt_level) {
         Ok(mir) => {
             print!("{mir}");
             exit::OK
@@ -450,4 +487,161 @@ fn wrap(text: &str, width: usize) -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// build / run / asm
+// ---------------------------------------------------------------------------
+
+/// `umay build [options] <file>` — compile to an executable in `dist/`.
+///
+/// `run` compiles the same way and then executes the result.
+fn cmd_build(args: &[String], run: bool) -> u8 {
+    let opts = match parse_options(args) {
+        Ok(o) => o,
+        Err((code, msg)) => {
+            eprintln!("umay: {msg}");
+            return code;
+        }
+    };
+    if opts.files.len() != 1 {
+        eprintln!("umay: `{}` takes exactly one source file", if run { "run" } else { "build" });
+        return exit::USAGE;
+    }
+    let file = &opts.files[0];
+    let path = Path::new(file);
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("umay: cannot read `{file}`: {e}");
+            return exit::IO_ERROR;
+        }
+    };
+
+    let output = match umayc::codegen_source(path.to_string_lossy().as_ref(), &text, opts.opt_level) {
+        Ok(o) => o,
+        Err((diags, map)) => {
+            let rendered = umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
+            eprint!("{rendered}");
+            return exit::COMPILE_ERROR;
+        }
+    };
+
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+    // Artifacts go in `dist/` at the project root; the build never writes inside
+    // the source tree beyond that.
+    let dist = Path::new("dist");
+    if let Err(e) = std::fs::create_dir_all(dist) {
+        eprintln!("umay: cannot create `dist/`: {e}");
+        return exit::IO_ERROR;
+    }
+    let asm_path = dist.join(format!("{stem}.s"));
+    let exe_path = dist.join(stem);
+
+    if let Err(e) = std::fs::write(&asm_path, &output.assembly) {
+        eprintln!("umay: cannot write `{}`: {e}", asm_path.display());
+        return exit::IO_ERROR;
+    }
+
+    // Assemble. The system assembler turns the text into an object file; the
+    // backend stops at text deliberately, so that it never has to encode a
+    // relocation itself.
+    let obj_path = dist.join(format!("{stem}.o"));
+    let status = std::process::Command::new("as")
+        .arg("--64")
+        .arg("-o")
+        .arg(&obj_path)
+        .arg(&asm_path)
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("umay: the assembler failed with {s}\n  generated assembly: {}", asm_path.display());
+            return exit::CODEGEN_ERROR;
+        }
+        Err(e) => {
+            eprintln!("umay: cannot run `as`: {e}");
+            return exit::IO_ERROR;
+        }
+    }
+
+    // Link with the C compiler driver, which knows where the C library and crt
+    // objects live. Nothing else from C is used.
+    let status = std::process::Command::new("cc")
+        .arg("-o")
+        .arg(&exe_path)
+        .arg(&obj_path)
+        .arg("-no-pie")
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("umay: linking failed with {s}");
+            return exit::CODEGEN_ERROR;
+        }
+        Err(e) => {
+            eprintln!("umay: cannot run `cc`: {e}");
+            return exit::IO_ERROR;
+        }
+    }
+
+    println!("built {}", exe_path.display());
+
+    if run {
+        let status = std::process::Command::new(&exe_path).status();
+        match status {
+            Ok(s) if s.success() => exit::OK,
+            Ok(s) => {
+                // A non-zero status is the program's own result, not a compiler
+                // failure, so it is reported and passed through unchanged.
+                if let Some(code) = s.code() {
+                    eprintln!("umay: program exited with status {code}");
+                    code.clamp(0, 255) as u8
+                } else {
+                    eprintln!("umay: the program was terminated by a signal");
+                    exit::COMPILE_ERROR
+                }
+            }
+            Err(e) => {
+                eprintln!("umay: cannot run `{}`: {e}", exe_path.display());
+                exit::IO_ERROR
+            }
+        }
+    } else {
+        exit::OK
+    }
+}
+
+/// `umay asm [options] <file>` — print the generated assembly without building.
+fn cmd_asm(args: &[String]) -> u8 {
+    let opts = match parse_options(args) {
+        Ok(o) => o,
+        Err((code, msg)) => {
+            eprintln!("umay: {msg}");
+            return code;
+        }
+    };
+    if opts.files.len() != 1 {
+        eprintln!("umay: `asm` takes exactly one source file");
+        return exit::USAGE;
+    }
+    let file = &opts.files[0];
+    let text = match std::fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("umay: cannot read `{file}`: {e}");
+            return exit::IO_ERROR;
+        }
+    };
+    match umayc::codegen_source(file.as_str(), &text, opts.opt_level) {
+        Ok(o) => {
+            print!("{}", o.assembly);
+            exit::OK
+        }
+        Err((diags, map)) => {
+            let rendered = umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
+            eprint!("{rendered}");
+            exit::COMPILE_ERROR
+        }
+    }
 }

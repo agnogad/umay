@@ -441,6 +441,15 @@ pub static EXPLAIN: &[ExplainEntry] = &[
          reports the cases that are visible statically.",
         Some("let a: *mut i32 = &mut x\nlet b: *mut i32 = &mut x   // two mutable pointers to one place"),
     ),
+    e(
+        "E3001",
+        "a construct has no code generation yet",
+        "The program type-checked and passed ownership checking, but the code generator \
+         does not know how to emit machine code for some construct in it. This is a gap in \
+         the backend, not an error in the program, and it is reported instead of generating \
+         wrong code or crashing. The affected function is named in the message.",
+        Some("// e.g. returning a large aggregate by value, which needs a hidden pointer\nfn f() -> Big { big }"),
+    ),
     // ---- warnings ---------------------------------------------------------
     e(
         "W0101",

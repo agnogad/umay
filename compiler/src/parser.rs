@@ -43,6 +43,13 @@ pub struct Parser {
     pub diagnostics: Vec<Diagnostic>,
     /// Nesting depth guard against stack overflow on adversarial input.
     depth: usize,
+    /// True while parsing the condition of `if`, `while` or `for`.
+    ///
+    /// In that position `{` opens the body, not a struct literal, so
+    /// `if x > y { a }` must read `{ a }` as a block. Rust resolves the same
+    /// ambiguity the same way; without it, `y { a }` parses as a struct literal
+    /// and the `else` that follows becomes a syntax error.
+    no_struct_literal: bool,
 }
 
 const MAX_DEPTH: usize = 256;
@@ -53,7 +60,15 @@ impl Parser {
         // Line numbers are derived from token spans without needing the source
         // text: the lexer records spans, and the caller passes a line table.
         let line_of = tokens.iter().map(|t| t.line).collect();
-        Parser { tokens, pos: 0, file, lines: line_of, diagnostics: Vec::new(), depth: 0 }
+        Parser {
+            tokens,
+            pos: 0,
+            file,
+            lines: line_of,
+            diagnostics: Vec::new(),
+            depth: 0,
+            no_struct_literal: false,
+        }
     }
 
     /// 1-based line of the token at index `i`.

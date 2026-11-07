@@ -16,19 +16,27 @@
 //! implemented; see `ROADMAP.md`.
 
 pub mod ast;
+pub mod asm;
 pub mod cache;
+pub mod codegen;
 pub mod borrowck;
 pub mod diagnostics;
 pub mod drop_elab;
 pub mod explain;
 pub mod hir;
 pub mod lexer;
+pub mod frame;
+pub mod layout;
 pub mod lower;
+pub mod isel;
+pub mod machine;
 pub mod lower_expr;
 pub mod lower_flow;
 pub mod lower_match;
 pub mod mir;
 pub mod mir_parse;
+pub mod regalloc;
+pub mod opt;
 pub mod ownership;
 pub mod mir_print;
 pub mod parser;
@@ -139,6 +147,18 @@ fn append_all(diagnostics: &mut Diagnostics, extra: &Diagnostics) {
 /// This is the `umay mir` entry point and the basis of the Phase 3 tests: every
 /// program that type-checked must produce MIR.
 pub fn lower_to_mir(name: &str, text: &str) -> Result<String, (Diagnostics, SourceMap)> {
+    lower_to_mir_opt(name, text, crate::opt::OptLevel::O0)
+}
+
+/// Like [`lower_to_mir`], but runs the optimisation pipeline first.
+///
+/// `O0` prints exactly what lowering produced, which is what `umay mir` has
+/// always shown; a higher level shows what the backend will actually receive.
+pub fn lower_to_mir_opt(
+    name: &str,
+    text: &str,
+    level: crate::opt::OptLevel,
+) -> Result<String, (Diagnostics, SourceMap)> {
     let mut map = SourceMap::new();
     let id = map.add(name, text);
     let out = parse_file(&map, id);
@@ -165,6 +185,7 @@ pub fn lower_to_mir(name: &str, text: &str) -> Result<String, (Diagnostics, Sour
     }
     let mut lowered = lower::lower(&sema.hir, &mut sema.types);
     drop_elab::elaborate(&mut lowered.program, &sema.types);
+    crate::opt::optimize(&mut lowered.program, &sema.types, level);
     // `umay mir` shows the lowering, so ownership errors are not fatal here:
     // being able to see the MIR of a program that fails borrow checking is
     // exactly when it is most useful.
@@ -217,4 +238,69 @@ pub fn diagnostic_with_context(code: &'static str, span: source::Span, message: 
         d = d.with_cause(entry.summary).with_explanation(entry.explanation);
     }
     d
+}
+
+/// Everything needed to generate code, or the diagnostics that prevent it.
+pub struct CodegenOutput {
+    pub assembly: String,
+    pub program: mir::MirProgram,
+    pub types: types::TyCtxt,
+}
+
+/// Runs the whole pipeline from source text to assembly.
+///
+/// This is the entry point `umay build` uses. Diagnostics from every phase are
+/// returned together so that a failing build reports all of its problems at once
+/// rather than one per attempt.
+pub fn codegen_source(
+    name: &str,
+    text: &str,
+    level: opt::OptLevel,
+) -> Result<CodegenOutput, (Diagnostics, SourceMap)> {
+    let mut map = SourceMap::new();
+    let id = map.add(name, text);
+    let out = parse_file(&map, id);
+    let mut diagnostics = out.diagnostics;
+    if diagnostics.has_errors() {
+        return Err((diagnostics, map));
+    }
+
+    let mut sema = sema::analyze(&out.program, &map);
+    append_all(&mut diagnostics, &sema.diagnostics);
+    diagnostics.sort();
+    if diagnostics.has_errors() {
+        return Err((diagnostics, map));
+    }
+
+    let mut lowered = lower::lower(&sema.hir, &mut sema.types);
+    drop_elab::elaborate(&mut lowered.program, &sema.types);
+    let ownership = ownership::check_program(&lowered.program, &sema.types);
+    append_all(&mut diagnostics, &ownership);
+    diagnostics.sort();
+    if diagnostics.has_errors() {
+        return Err((diagnostics, map));
+    }
+
+    opt::optimize(&mut lowered.program, &sema.types, level);
+
+    match codegen::generate(&lowered.program, &mut sema.types, &sema.hir) {
+        Ok(assembly) => Ok(CodegenOutput { assembly, program: lowered.program, types: sema.types }),
+        Err(errors) => {
+            for error in errors {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E3001",
+                        format!("cannot generate code for `{}`: {}", error.function, error.message),
+                    )
+                    .with_cause("this construct is not supported by the code generator yet")
+                    .with_explanation(
+                        "UMAY's backend is built incrementally. A construct that type-checks \
+                         but has no code generation yet is reported here rather than silently \
+                         producing wrong code.",
+                    ),
+                );
+            }
+            Err((diagnostics, map))
+        }
+    }
 }

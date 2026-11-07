@@ -191,6 +191,31 @@ impl TyCtxt {
         Some(self.intern(kind))
     }
 
+    /// Looks up an already-interned type without interning a new one.
+    ///
+    /// The primitives are interned on first use, so a read-only context (such as
+    /// the backend, which holds `&TyCtxt`) can still ask for one once it exists.
+    /// A missing type is a compiler bug: every primitive that codegen can see has
+    /// already been interned by the front end.
+    pub fn find(&self, kind: &TyKind) -> Option<TyId> {
+        self.interned.get(kind).copied()
+    }
+
+    /// The `u8` type, for a context that cannot intern.
+    pub fn cached_u8(&self) -> TyId {
+        self.find(&TyKind::U8).expect("u8 is interned by the front end")
+    }
+
+    /// The `u32` type, for a context that cannot intern.
+    pub fn cached_u32(&self) -> TyId {
+        self.find(&TyKind::U32).expect("u32 is interned by the front end")
+    }
+
+    /// The unit type, for a context that cannot intern.
+    pub fn cached_unit(&self) -> TyId {
+        self.find(&TyKind::Unit).expect("unit is interned by the front end")
+    }
+
     // ---- constructors -----------------------------------------------------
 
     pub fn tuple(&mut self, elems: Vec<TyId>) -> TyId {
@@ -289,7 +314,15 @@ impl TyCtxt {
     pub fn is_signed(&self, ty: TyId) -> bool {
         matches!(
             self.kind(ty),
-            TyKind::I8 | TyKind::I16 | TyKind::I32 | TyKind::I64 | TyKind::I128 | TyKind::Isize
+            // An unconstrained integer literal defaults to `i32`, so codegen must
+            // treat it as signed; otherwise division picks the unsigned opcode.
+            TyKind::I8
+                | TyKind::I16
+                | TyKind::I32
+                | TyKind::I64
+                | TyKind::I128
+                | TyKind::Isize
+                | TyKind::IntVar(_)
         )
     }
 

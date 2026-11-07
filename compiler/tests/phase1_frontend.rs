@@ -781,3 +781,20 @@ fn documented_example_codes_exist() {
         );
     }
 }
+
+#[test]
+fn if_condition_brace_opens_the_body_not_a_struct_literal() {
+    // `if a > b { a }` must read the brace as the body. Parsing it as a struct
+    // literal swallowed the block and made the `else` a syntax error.
+    assert_clean("fn f(a: i32, b: i32) -> i32 { if a > b { a } else { b } }");
+}
+
+#[test]
+fn struct_literals_still_parse_outside_conditions() {
+    assert_clean("struct P { x: i32 }\nfn main() {\n    let p = P { x: 1 }\n}");
+}
+
+#[test]
+fn while_condition_brace_opens_the_body() {
+    assert_clean("fn f(c: bool) {\n    while c { let n = 1 }\n}");
+}

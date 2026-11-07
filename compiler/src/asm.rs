@@ -1,0 +1,268 @@
+//! Assembly printer: machine instructions to AT&T-syntax text.
+//!
+//! The output is assembled with the system `as`, which keeps this backend free
+//! of a machine-code encoder. That is the same trade the roadmap makes for the
+//! linker: the interesting work is selection and allocation, and re-implementing
+//! a proven assembler would add risk without adding capability.
+//!
+//! The printer is total: every instruction in [`Inst`] has an arm, so a new
+//! instruction cannot be added without deciding how it prints.
+
+use crate::machine::*;
+use std::fmt::Write as _;
+
+/// Prints a whole function, including its prologue and epilogue.
+pub fn print_function(function: &MachineFunction, spill_bytes: u64, callee_saved: &[u8]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "\n.globl {}", function.name);
+    let _ = writeln!(out, ".type {}, @function", function.name);
+    let _ = writeln!(out, "{}:", function.name);
+
+    // Prologue: establish the frame, then preserve the callee-saved registers
+    // this function actually uses.
+    let frame = align16(function.stack_size + spill_bytes);
+    let _ = writeln!(out, "    pushq %rbp");
+    let _ = writeln!(out, "    movq %rsp, %rbp");
+    // Callee-saved registers are pushed before the frame is reserved, so they
+    // sit directly below the saved `rbp` and `leave` can unwind past them only
+    // after the explicit `popq`s in the epilogue. Reserving the frame first and
+    // pushing afterwards would put them below `rsp`'s restoration point.
+    for reg in callee_saved {
+        let _ = writeln!(out, "    pushq %{}", register_name(*reg, RegWidth::W64));
+    }
+    if frame > 0 {
+        let _ = writeln!(out, "    subq ${frame}, %rsp");
+    }
+
+    // Move incoming register arguments into their stack slots. They are stored
+    // after the prologue because the prologue uses the same registers. Only the
+    // first `arg_count` locals are parameters, and each is stored at its own
+    // width so that a 4-byte argument does not overwrite its neighbour.
+    let arg_regs = [7u8, 6, 2, 1, 8, 9]; // rdi, rsi, rdx, rcx, r8, r9
+    for (index, (_, offset)) in function.local_slots.iter().take(6).enumerate() {
+        if index as u32 >= function.arg_count {
+            break;
+        }
+        // The store width comes from the parameter's own size, so a 4-byte
+        // argument does not overwrite the slot below it.
+        let width = function
+            .arg_widths
+            .get(index)
+            .copied()
+            .unwrap_or(RegWidth::W64);
+        let _ = writeln!(
+            out,
+            "    mov{} %{}, {}(%rbp)",
+            width.suffix(),
+            register_name(arg_regs[index], width),
+            offset
+        );
+    }
+    // Parameters past the sixth arrive on the stack, at fixed positions above
+    // the return address: `16(%rbp)` is the seventh, and so on. They are copied
+    // into ordinary slots so the rest of code generation never cares where an
+    // argument came from.
+    for (index, (_, offset)) in function.local_slots.iter().enumerate().skip(6) {
+        if index as u32 >= function.arg_count {
+            break;
+        }
+        let width = function
+            .arg_widths
+            .get(index)
+            .copied()
+            .unwrap_or(RegWidth::W64);
+        let _ = writeln!(
+            out,
+            "    mov{} {}(%rbp), %{}",
+            width.suffix(),
+            16 + (index as i64 - 6) * 8,
+            register_name(0, width)
+        );
+        let _ = writeln!(
+            out,
+            "    mov{} %{}, {}(%rbp)",
+            width.suffix(),
+            register_name(0, width),
+            offset
+        );
+    }
+
+    for block in &function.blocks {
+        for inst in &block.insts {
+            // Labels are printed flush left; instructions indented.
+            if let Inst::Label(label) = inst {
+                let _ = writeln!(out, ".L{}_{}:", function.name, label.0);
+            } else {
+                let line = print_inst(inst, &function.name);
+                if !line.is_empty() {
+                    let _ = writeln!(out, "    {line}");
+                }
+            }
+        }
+    }
+
+    // Every `ret` in the body jumps here instead of returning directly, so the
+    // epilogue runs exactly once regardless of how many paths leave the
+    // function. Without this a body's own `ret` would skip the callee-saved
+    // restores.
+    // The epilogue label is numbered past every block label in the function, so
+    // it cannot collide with one. See `Isel::epilogue_label`.
+    let _ = writeln!(out, ".L{}_{}:", function.name, function.block_count);
+    for reg in callee_saved.iter().rev() {
+        let _ = writeln!(out, "    popq %{}", register_name(*reg, RegWidth::W64));
+    }
+    let _ = writeln!(out, "    leave");
+    let _ = writeln!(out, "    ret");
+    let _ = writeln!(out, ".size {}, .-{}", function.name, function.name);
+    out
+}
+
+fn align16(n: u64) -> u64 {
+    if n == 0 {
+        0
+    } else {
+        n.div_ceil(16) * 16
+    }
+}
+
+/// Prints one instruction, or an empty string for pseudo-instructions.
+///
+/// `function` namespaces the block labels so that two functions in one assembly
+/// file cannot collide.
+pub fn print_inst(inst: &Inst, function: &str) -> String {
+    match inst {
+        Inst::Label(_) => String::new(),
+        Inst::Comment(text) => format!("# {text}"),
+        Inst::Move { kind, src, dst } => print_move(*kind, src, dst),
+        Inst::Alu { op, width, src, dst } => print_alu(*op, *width, src, dst),
+        Inst::Cmp { width, lhs, rhs } => format!("cmp{} {}, {}", width.suffix(), op_str(rhs, *width), op_str(lhs, *width)),
+        Inst::Test { width, lhs, rhs } => {
+            format!("test{} {}, {}", width.suffix(), op_str(rhs, *width), op_str(lhs, *width))
+        }
+        Inst::SetCc { cond, dst } => format!("set{} {}", cond.suffix(), op_str(dst, RegWidth::W8)),
+        Inst::Jmp(label) => format!("jmp .L{}_{}", function, label.0),
+        Inst::Jcc { cond, target } => format!("j{} .L{}_{}", cond.suffix(), function, target.0),
+        Inst::Call { target } => match target {
+            Operand::Mem(mem) => match &mem.symbol {
+                Some(sym) => format!("call {}", sym.name),
+                None => format!("callq *{}", op_str(target, RegWidth::W64)),
+            },
+            other => format!("callq *{}", op_str(other, RegWidth::W64)),
+        },
+        Inst::Ret => "ret".to_string(),
+        Inst::Push(op) => format!("pushq {}", op_str(op, RegWidth::W64)),
+        Inst::Pop(op) => format!("popq {}", op_str(op, RegWidth::W64)),
+        Inst::Lea { src, dst } => format!("leaq {}, {}", mem_str(src, RegWidth::W64), op_str(dst, RegWidth::W64)),
+        Inst::Load { kind, src, dst } => {
+            let width = match kind {
+                MoveKind::Move(w) | MoveKind::SignExtend { to: w, .. } | MoveKind::ZeroExtend { to: w, .. } => *w,
+            };
+            let mnemonic = match kind {
+                MoveKind::Move(_) => format!("mov{}", width.suffix()),
+                MoveKind::SignExtend { .. } => format!("movs{}", width.suffix()),
+                MoveKind::ZeroExtend { .. } => format!("movz{}", width.suffix()),
+            };
+            format!("{mnemonic} {}, {}", mem_str(src, width), op_str(dst, width))
+        }
+        Inst::Store { kind, src, dst } => {
+            let width = match kind {
+                MoveKind::Move(w) | MoveKind::SignExtend { to: w, .. } | MoveKind::ZeroExtend { to: w, .. } => *w,
+            };
+            let mnemonic = match kind {
+                MoveKind::Move(_) => format!("mov{}", width.suffix()),
+                // A store never extends; the selector does not emit these.
+                MoveKind::SignExtend { from, .. } => format!("movs{}", from.suffix()),
+                MoveKind::ZeroExtend { from, .. } => format!("movz{}", from.suffix()),
+            };
+            format!("{mnemonic} {}, {}", op_str(src, width), mem_str(dst, width))
+        }
+        Inst::SignExtendAcc { .. } => "cqto".to_string(),
+    }
+}
+
+fn print_move(kind: MoveKind, src: &Operand, dst: &Operand) -> String {
+    match kind {
+        MoveKind::Move(width) => {
+            format!("mov{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width))
+        }
+        MoveKind::SignExtend { from, to } => {
+            // `movsX` naming: source width first, then destination.
+            format!("movs{}{} {}, {}", from.suffix(), to.suffix(), op_str(src, from), op_str(dst, to))
+        }
+        MoveKind::ZeroExtend { from, to } => {
+            format!("movz{}{} {}, {}", from.suffix(), to.suffix(), op_str(src, from), op_str(dst, to))
+        }
+    }
+}
+
+fn print_alu(op: AluOp, width: RegWidth, src: &Operand, dst: &Operand) -> String {
+    match op {
+        AluOp::Add => format!("add{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
+        AluOp::Sub => format!("sub{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
+        AluOp::Imul => format!("imul{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
+        // Divisions read the accumulator implicitly; the selector has already set
+        // up the operand, so only the divisor is printed.
+        AluOp::Idiv => format!("idiv{} {}", width.suffix(), op_str(src, width)),
+        AluOp::Div => format!("div{} {}", width.suffix(), op_str(src, width)),
+        AluOp::And => format!("and{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
+        AluOp::Or => format!("or{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
+        AluOp::Xor => format!("xor{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
+        AluOp::Shl => format!("shl{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
+        AluOp::Shr => format!("shr{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
+        AluOp::Sar => format!("sar{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
+        AluOp::Neg => format!("neg{} {}", width.suffix(), op_str(dst, width)),
+        AluOp::Not => format!("not{} {}", width.suffix(), op_str(dst, width)),
+    }
+}
+
+/// Prints an operand with its width.
+pub fn op_str(op: &Operand, width: RegWidth) -> String {
+    match op {
+        // AT&T syntax prefixes registers with `%`.
+        Operand::Reg(reg) => format!("%{}", reg.name(width)),
+        Operand::Imm(v) => format!("${v}"),
+        Operand::Mem(mem) => mem_str(mem, width),
+        // A label operand only appears inside a `jmp`/`jcc`, which print their
+        // target themselves; printing a bare label here keeps `op_str` total.
+        Operand::Label(label) => format!(".L{}", label.0),
+    }
+}
+
+/// Prints a memory operand: `offset(%base,%index,scale)`.
+pub fn mem_str(mem: &Mem, _width: RegWidth) -> String {
+    let mut out = String::new();
+    if let Some(sym) = &mem.symbol {
+        out.push_str(&sym.name);
+        let total = mem.offset + sym.addend;
+        if total != 0 {
+            if total > 0 {
+                out.push('+');
+            }
+            let _ = write!(out, "{total}");
+        }
+        out.push_str("(%rip)");
+        return out;
+    }
+    if mem.offset != 0 || mem.base.is_none() {
+        let _ = write!(out, "{}", mem.offset);
+    }
+    out.push('(');
+    if let Some(base) = mem.base {
+        out.push('%');
+        out.push_str(&register_name_of(base));
+    }
+    if let Some((index, scale)) = mem.index {
+        out.push_str(",%");
+        out.push_str(&register_name_of(index));
+        let _ = write!(out, ",{}", 1u32 << scale);
+    }
+    out.push(')');
+    out
+}
+
+fn register_name_of(reg: Reg) -> String {
+    match reg {
+        Reg::Phys(code) => reg_name(code).to_string(),
+        Reg::Virtual(v) => format!("!v{v}"),
+    }
+}
