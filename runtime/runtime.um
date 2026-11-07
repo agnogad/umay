@@ -33,6 +33,19 @@ extern fn write(fd: i32, buf: *const u8, count: usize) -> isize
 // `exit(code)` terminates the process.
 extern fn exit(code: i32) -> ()
 
+// `lseek(fd, offset, whence)` moves the file position and returns the new one,
+// or -1. `whence` 2 is `SEEK_END`, which combined with an offset of 0 reports the
+// size of a regular file without reading a byte of it.
+extern fn lseek(fd: i32, offset: i64, whence: i32) -> i64
+
+// `getenv(name)` returns the value of an environment variable, or 0.
+extern fn getenv(name: *const u8) -> *const u8
+
+// `errno` is a macro over a function on glibc, so it cannot be declared directly.
+// This accessor is the portable spelling: glibc exports `__errno_location`, a
+// function returning the address of the thread's errno.
+extern fn __errno_location() -> *mut i32
+
 // POSIX file system calls. Each returns -1 on failure, which the wrappers below
 // turn into a result the caller can branch on.
 //
@@ -198,6 +211,51 @@ pub fn umay_rename(from: *const u8, to: *const u8) -> i32 {
 // Creates a directory.
 pub fn umay_mkdir(path: *const u8) -> i32 {
     return mkdir(path, 493)
+}
+
+// The size of a regular file in bytes, or -1 when it cannot be measured.
+//
+// This seeks to the end and back, so the cost does not depend on the file's size.
+pub fn umay_file_size(path: *const u8) -> i64 {
+    let fd = umay_open_read(path)
+    if fd < 0 {
+        return -1
+    }
+    let end = lseek(fd, 0, 2)
+    close(fd)
+    return end
+}
+
+// True when the path names a directory.
+pub fn umay_is_dir(path: *const u8) -> bool {
+    let fd = umay_open_read(path)
+    if fd < 0 {
+        return false
+    }
+    // A directory opens for reading on Linux but cannot be read from; the
+    // descriptor is still usable, so the check is whether reading is refused.
+    let scratch = malloc(1)
+    let refused = read(fd, scratch, 1) < 0
+    free(scratch)
+    close(fd)
+    return refused
+}
+
+// The value of an environment variable, or 0 when it is not set.
+pub fn umay_getenv(name: *const u8) -> *const u8 {
+    return getenv(name)
+}
+
+// Ends the process with `code`.
+pub fn umay_exit(code: i32) {
+    exit(code)
+}
+
+// The number the last failing call left in `errno`.
+pub fn umay_errno() -> i32 {
+    unsafe {
+        return *__errno_location()
+    }
 }
 
 // --- byte strings -----------------------------------------------------------

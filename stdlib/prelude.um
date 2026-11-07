@@ -37,6 +37,11 @@ extern fn umay_write(fd: i32, buf: *const u8, count: usize) -> isize
 extern fn umay_unlink(path: *const u8) -> i32
 extern fn umay_rename(from: *const u8, to: *const u8) -> i32
 extern fn umay_mkdir(path: *const u8) -> i32
+extern fn umay_file_size(path: *const u8) -> i64
+extern fn umay_is_dir(path: *const u8) -> bool
+extern fn umay_getenv(name: *const u8) -> *const u8
+extern fn umay_errno() -> i32
+extern fn umay_exit(code: i32) -> ()
 extern fn umay_read_u16(ptr: *const u8) -> u16
 extern fn umay_write_u16(ptr: *mut u8, value: u16) -> ()
 extern fn umay_read_u32(ptr: *const u8) -> u32

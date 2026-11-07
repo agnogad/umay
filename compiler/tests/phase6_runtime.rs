@@ -962,3 +962,166 @@ fn a_whole_file_is_read_into_a_byte_vector() {
         "3\n97\n98\n99\n",
     );
 }
+
+/// Builds `source` and runs it with `args`, returning what it printed.
+fn build_and_run_with_args(name: &str, source: &str, args: &[&str]) -> Run {
+    let dir = scratch(name);
+    let file = dir.join("main.um");
+    std::fs::write(&file, source).expect("write program");
+
+    let build = Command::new(compiler())
+        .arg("build")
+        .arg(&file)
+        .current_dir(&dir)
+        .output()
+        .expect("run umay build");
+    assert!(
+        build.status.success(),
+        "build failed for {name}:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let exe = dir.join("dist").join("main");
+    let out = Command::new(&exe)
+        .args(args)
+        .current_dir(&dir)
+        .output()
+        .expect("run built program");
+    Run {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        status: out.status.code().unwrap_or(-1),
+    }
+}
+
+#[test]
+fn the_arguments_a_program_was_given_are_readable() {
+    let run = build_and_run_with_args(
+        "args_read",
+        "fn main(argc: i32, argv: *mut *mut u8) -> i32 {\n\
+             let args = Args::new(argc, argv)\n\
+             println_i64(args.len() as i64)\n\
+             println(args.get(1))\n\
+             println(args.get(2))\n\
+             return 0\n\
+         }",
+        &["alpha", "beta"],
+    );
+    assert_eq!(run.stdout, "3\nalpha\nbeta\n");
+    assert_eq!(run.status, 0);
+}
+
+#[test]
+fn a_missing_argument_reads_as_empty_rather_than_crashing() {
+    let run = build_and_run_with_args(
+        "args_missing",
+        "fn main(argc: i32, argv: *mut *mut u8) -> i32 {\n\
+             let args = Args::new(argc, argv)\n\
+             println_i64(byte_len(args.get(9)) as i64)\n\
+             println_i64(if args.is_empty() { 1 } else { 0 })\n\
+             return 0\n\
+         }",
+        &[],
+    );
+    assert_eq!(run.stdout, "0\n1\n");
+    assert_eq!(run.status, 0);
+}
+
+#[test]
+fn a_flag_and_the_value_after_it_are_found() {
+    let run = build_and_run_with_args(
+        "args_flags",
+        "fn main(argc: i32, argv: *mut *mut u8) -> i32 {\n\
+             let args = Args::new(argc, argv)\n\
+             println_i64(if args.has_flag(\"--verbose\" as *const u8) { 1 } else { 0 })\n\
+             println(args.value_after(\"--output\" as *const u8))\n\
+             return 0\n\
+         }",
+        &["--verbose", "--output", "rapor.txt"],
+    );
+    assert_eq!(run.stdout, "1\nrapor.txt\n");
+    assert_eq!(run.status, 0);
+}
+
+#[test]
+fn an_explicit_exit_code_reaches_the_shell() {
+    let run = build_and_run(
+        "process_exit",
+        "fn main() -> i32 {\n\
+             println(\"bitti\")\n\
+             exit(7)\n\
+             return 0\n\
+         }",
+    );
+    assert_eq!(run.stdout, "bitti\n");
+    assert_eq!(run.status, 7);
+}
+
+#[test]
+fn the_size_of_a_file_is_read_without_reading_it() {
+    // The file is 417 bytes, written by the test itself, so a size read by
+    // seeking is checked against a size known independently.
+    let dir = scratch("fs_size_seek");
+    let data = vec![b'x'; 417];
+    std::fs::write(dir.join("blob.bin"), &data).expect("write blob");
+    let file = dir.join("main.um");
+    std::fs::write(
+        &file,
+        "fn main() -> i32 {\n\
+             println_i64(file_size(\"blob.bin\" as *const u8))\n\
+             println_i64(file_size(\"absent.bin\" as *const u8))\n\
+             return 0\n\
+         }",
+    )
+    .expect("write program");
+    let build = Command::new(compiler())
+        .arg("build")
+        .arg(&file)
+        .current_dir(&dir)
+        .output()
+        .expect("run umay build");
+    assert!(
+        build.status.success(),
+        "build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let out = Command::new(dir.join("dist").join("main"))
+        .current_dir(&dir)
+        .output()
+        .expect("run built program");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "417\n-1\n");
+}
+
+#[test]
+fn a_directory_is_told_apart_from_a_file() {
+    let dir = scratch("fs_is_dir");
+    std::fs::create_dir_all(dir.join("sub")).expect("sub directory");
+    std::fs::write(dir.join("plain.txt"), "x").expect("file");
+    let file = dir.join("main.um");
+    std::fs::write(
+        &file,
+        "fn main() -> i32 {\n\
+             println_i64(if is_dir(\"sub\" as *const u8) { 1 } else { 0 })\n\
+             println_i64(if is_dir(\"plain.txt\" as *const u8) { 1 } else { 0 })\n\
+             println_i64(if is_dir(\"absent\" as *const u8) { 1 } else { 0 })\n\
+             return 0\n\
+         }",
+    )
+    .expect("write program");
+    let build = Command::new(compiler())
+        .arg("build")
+        .arg(&file)
+        .current_dir(&dir)
+        .output()
+        .expect("run umay build");
+    assert!(
+        build.status.success(),
+        "build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let out = Command::new(dir.join("dist").join("main"))
+        .current_dir(&dir)
+        .output()
+        .expect("run built program");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1\n0\n0\n");
+}

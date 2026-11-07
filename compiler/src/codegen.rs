@@ -47,6 +47,20 @@ fn function_symbols(hir: &crate::hir::Hir, program: &MirProgram) -> HashMap<FnId
         // link time, and two types may each have their own.
         let name = match &f.owner {
             Some(owner) => format!("{owner}__{}", f.name),
+            // A definition the program itself contains carries a prefix, so it can
+            // never take over a C function of the same name: a plain `exit` would
+            // otherwise resolve to itself inside the runtime and recurse until the
+            // stack ran out. An `extern fn` has no body and keeps its exact name,
+            // because that name is the one the linker has to find.
+            // A name already reserved by the `umay_` prefix is the runtime's own
+            // surface, which the prelude declares as `extern fn` and therefore
+            // has to keep exactly.
+            None if f.body.is_some()
+                && f.name != "main"
+                && !f.name.starts_with("umay_") =>
+            {
+                format!("umay_user_{}", f.name)
+            }
             None => f.name.clone(),
         };
         map.insert(f.id, name);

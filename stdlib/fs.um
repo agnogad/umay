@@ -78,26 +78,15 @@ impl File {
 
 // The size of the file at `path` in bytes, or -1 when it cannot be read.
 //
-// The file is read to the end rather than asked its size, because the runtime
-// does not bind `stat` yet. For the sizes a program reads into memory that is the
-// same work it was going to do anyway.
+// The file is opened, sought to its end and closed, so the cost does not depend on
+// how large it is.
 fn file_size(path: *const u8) -> i64 {
-    let f = File::open_read(path)
-    if !f.is_open() {
-        return -1
-    }
-    let buf = alloc(4096)
-    let mut total = 0 as i64
-    while true {
-        let n = f.read(buf, 4096)
-        if n <= 0 {
-            break
-        }
-        total = total + n as i64
-    }
-    f.close()
-    dealloc(buf)
-    return total
+    return umay_file_size(path)
+}
+
+// True when `path` names a directory rather than a file.
+fn is_dir(path: *const u8) -> bool {
+    return umay_is_dir(path)
 }
 
 // Reads the whole file at `path` into a `Vec<u8>`.

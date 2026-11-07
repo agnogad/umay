@@ -252,10 +252,22 @@ resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
   `File` and a size of `-1` rather than an abort. A short write is retried until
   the whole buffer is out or an error comes back.
 - [ ] `Option`, `Result`, `Iterator` basics.
-- [ ] `process`: exit codes, arguments.
+- [x] `process` in `stdlib/process.um` — `Args` (from `main`'s `argc`/`argv`),
+  `len`, `is_empty`, `program`, `get`, `has_flag`, `value_after`; free functions
+  `env`, `env_is_set`, `exit`, `last_error`. A missing argument reads as an empty
+  string rather than null, so a caller need not check before printing it.
+  `file_size` now seeks to the end instead of reading the file, and `is_dir`
+  tells a directory from a file.
 - [ ] `net`: TCP basics, only once the memory model is stable.
 
-Wiring up `fs` exposed three defects that had nothing to do with files:
+Wiring up `fs` and `process` exposed four defects that had nothing to do with
+either:
+
+- A free function's symbol was its bare name, so the standard library's own
+  `exit` took over the C function `exit` and called itself until the stack ran
+  out. A definition the program contains now carries a `umay_user_` prefix;
+  `main`, the runtime's `umay_` surface and an `extern fn` (which must keep the
+  name the linker has to find) are exempt.
 
 - A method's symbol was its bare name, so `File::read` took over the C function
   `read` at link time and the first call to it crashed. A method's symbol now

@@ -59,9 +59,28 @@ fn main() -> i32 {
 }
 ```
 
+A command-line tool is an ordinary program: arguments arrive through `main`'s
+`argc`/`argv` and `Args` wraps them, so a flag has no global state behind it.
+
+```umay
+fn main(argc: i32, argv: *mut *mut u8) -> i32 {
+    let args = Args::new(argc, argv)
+    let path = args.value_after("--file" as *const u8)
+    if read_byte(path) == 0u8 {
+        eprintln("no --file given")
+        return 2
+    }
+    let bytes = read_file_bytes(path)
+    println_i64(bytes.len() as i64)
+    bytes.free()
+    return 0
+}
+```
+
 The runtime is UMAY source compiled with each program, not a binary blob, and
 assumes only the POSIX calls it declares itself — `malloc`, `free`, `write`,
-`exit`, `open`, `read`, `close`, `unlink`, `rename` and `mkdir`. See
+`exit`, `open`, `read`, `close`, `lseek`, `unlink`, `rename`, `mkdir` and
+`getenv`. See
 [ADR 0010](docs/adr/0010-runtime-in-umay.md). `String` lives in
 `stdlib/string.um` and is compiled into every program by the same path, which is
 why it is checked, borrowed and code-generated exactly like user code.
