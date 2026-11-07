@@ -1,0 +1,91 @@
+// A minimal HTTP server: one request per connection, one connection at a time.
+//
+// The point of this file is to show what the language and its runtime can do
+// today, not to be a framework. It binds port 8080, answers every request with
+// the same body, and exits after `MAX_REQUESTS` connections so it can be run
+// without a way to signal it.
+//
+// A real server would loop forever and handle each connection in a child process
+// (`fork` works) or a thread (not there yet). Routing, header parsing and a body
+// reader are the work a `net`/`http` library would take over.
+
+extern fn socket(domain: i32, kind: i32, protocol: i32) -> i32
+extern fn bind(fd: i32, addr: *const u8, len: i32) -> i32
+extern fn listen(fd: i32, backlog: i32) -> i32
+extern fn accept(fd: i32, addr: *mut u8, len: *mut i32) -> i32
+
+// How many connections to serve before exiting.
+const MAX_REQUESTS = 1
+
+// A port that is not in use.
+const PORT = 8080
+
+// An internet-family socket address holding `port`, in the byte order the kernel
+// wants: `AF_INET` (2) as a 16-bit value, then the port big-endian.
+fn make_sockaddr(port: u16) -> *mut u8 {
+    let p = alloc(16)
+    unsafe {
+        // `alloc` hands back whatever was in the heap, so every byte of the address
+        // is written: an uninitialised `sin_addr` is a wild address the kernel
+        // refuses.
+        let mut i = 0
+        while i < 16 {
+            write_byte((p as usize + i) as *mut u8, 0u8)
+            i = i + 1
+        }
+        write_u16(p, 2u16)
+        // The port's two bytes swapped, which is how a big-endian field is written
+        // on a little-endian machine.
+        let swapped = (port / 256u16) + (port % 256u16) * 256u16
+        write_u16((p as usize + 2) as *mut u8, swapped)
+    }
+    return p
+}
+
+fn main() -> i32 {
+    let server = socket(2, 1, 0)
+    if server < 0 {
+        eprintln("socket failed")
+        return 1
+    }
+    let address = make_sockaddr(PORT as u16)
+    if bind(server, address, 16) < 0 {
+        eprintln("bind failed")
+        return 1
+    }
+    if listen(server, 16) < 0 {
+        eprintln("listen failed")
+        return 1
+    }
+    println("listening on 8080")
+
+    let body = "hello from UMAY\n"
+    let response = "HTTP/1.1 200 OK\r\nContent-Length: 16\r\nContent-Type: text/plain\r\n\r\nhello from UMAY\n"
+
+    let mut served = 0
+    while served < MAX_REQUESTS {
+        let no_address = unsafe { 0 as usize as *mut u8 }
+        let no_length = unsafe { 0 as usize as *mut i32 }
+        let client = accept(server, no_address, no_length)
+        if client < 0 {
+            eprintln("accept failed")
+            return 1
+        }
+        // The request is read so the client's write completes and so a test can
+        // check it arrived; nothing is parsed out of it yet.
+        let request = alloc(4096)
+        let received = umay_read(client, request, 4096)
+        println_i64(received as i64)
+        unsafe {
+            umay_write(client, response as *const u8, byte_len(response))
+        }
+        umay_close(client)
+        dealloc(request)
+        served = served + 1
+    }
+
+    umay_close(server)
+    dealloc(address)
+    let _ = body
+    return 0
+}
