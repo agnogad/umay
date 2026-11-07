@@ -39,6 +39,8 @@ pub const PRELUDE_SOURCE: &str = concat!(
     include_str!("../../stdlib/process.um"),
     "\n",
     include_str!("../../stdlib/hashmap.um"),
+    "\n",
+    include_str!("../../stdlib/bytes.um"),
 );
 
 /// The name the prelude's file is registered under in the source map.

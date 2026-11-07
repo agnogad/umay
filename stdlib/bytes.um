@@ -1,0 +1,150 @@
+// A borrowed run of bytes: an address and a length.
+//
+// A `&str` cannot carry this job. A request body contains a NUL, a binary
+// payload contains any byte at all, and neither may be measured by scanning for
+// a terminator. `Bytes` therefore stores its length beside its address, so the
+// only operation it needs is bounds checking.
+//
+// It borrows: nothing here allocates, and nothing here frees. The buffer must
+// outlive every `Bytes` made from it.
+
+// An address and a length. Copying one copies the borrow, not the buffer.
+struct Bytes {
+    data: *const u8,
+    len: usize,
+}
+
+impl Bytes {
+    // A view over the `n` bytes at `data`.
+    fn view(data: *const u8, len: usize) -> Bytes {
+        return Bytes { data: data, len: len }
+    }
+
+    // A view over a `&str`, without its terminator.
+    fn from_str(text: &str) -> Bytes {
+        return Bytes { data: text as *const u8, len: byte_len(text as *const u8) }
+    }
+
+    // The number of bytes in the view.
+    fn len(&self) -> usize {
+        return self.len
+    }
+
+    // True when the view holds no bytes.
+    fn is_empty(&self) -> bool {
+        return self.len == 0
+    }
+
+    // The byte at `index`, or `0` past the end.
+    //
+    // Returning zero instead of trapping keeps this usable from an event loop
+    // and a request parser without a panic path, and a caller that cares checks
+    // `len` first. A parser that trusts a length it did not check is a bug in
+    // the parser, not in this accessor.
+    fn get(&self, index: usize) -> u8 {
+        if index >= self.len {
+            return 0u8
+        }
+        return unsafe { read_byte((self.data as usize + index) as *const u8) }
+    }
+
+    // A view of the first `n` bytes, or of the whole view when `n` is past the end.
+    fn prefix(&self, n: usize) -> Bytes {
+        let count = if n < self.len { n } else { self.len }
+        return Bytes { data: self.data, len: count }
+    }
+
+    // The bytes from `start` to the end, or an empty view when `start` is past it.
+    fn from(&self, start: usize) -> Bytes {
+        if start >= self.len {
+            return Bytes { data: self.data, len: 0usize }
+        }
+        return Bytes { data: unsafe { (self.data as usize + start) as *const u8 }, len: self.len - start }
+    }
+
+    // The bytes in `[start, end)`, clamped to this view.
+    fn range(&self, start: usize, end: usize) -> Bytes {
+        if start >= self.len || end <= start {
+            return Bytes { data: self.data, len: 0usize }
+        }
+        let stop = if end < self.len { end } else { self.len }
+        return Bytes { data: unsafe { (self.data as usize + start) as *const u8 }, len: stop - start }
+    }
+
+    // The first index at or after `from` holding `needle`.
+    //
+    // A parser needs this for a header's `:` and a request line's space, so it
+    // is the workhorse of the type. `None` means absent: a sentinel like `-1`
+    // would not fit `usize` and would force every caller through a narrowing
+    // cast, so the absence is in the type instead.
+    fn find_byte(&self, needle: u8, from: usize) -> Option<usize> {
+        let mut i = from
+        while i < self.len {
+            if unsafe { read_byte((self.data as usize + i) as *const u8) } == needle {
+                return Option::Some(i)
+            }
+            i = i + 1
+        }
+        return Option::None
+    }
+
+    // The first index of `needle` at or after `from`.
+    fn find_slice(&self, needle: Bytes, from: usize) -> Option<usize> {
+        if needle.len == 0 {
+            return Option::Some(from)
+        }
+        if needle.len > self.len {
+            return Option::None
+        }
+        let last = self.len - needle.len
+        if from > last {
+            return Option::None
+        }
+        let mut i = from
+        while i <= last {
+            if unsafe { same_bytes(self.data as usize + i, needle.data as usize, needle.len) } {
+                return Option::Some(i)
+            }
+            i = i + 1
+        }
+        return Option::None
+    }
+
+    // True when both views hold the same bytes, in the same order and count.
+    fn equals(&self, other: &Bytes) -> bool {
+        if self.len != other.len {
+            return false
+        }
+        return unsafe { same_bytes(self.data as usize, other.data as usize, self.len) }
+    }
+
+    // True when the view starts with `prefix`.
+    fn starts_with(&self, prefix: Bytes) -> bool {
+        if prefix.len > self.len {
+            return false
+        }
+        return self.prefix(prefix.len).equals(&prefix)
+    }
+
+    // The index of the first `\r\n` at or after `from`.
+    fn end_of_line(&self, from: usize) -> Option<usize> {
+        return self.find_slice(Bytes { data: "\r\n" as *const u8, len: 2usize }, from)
+    }
+}
+
+// True when the `count` bytes at `a` equal the `count` bytes at `b`.
+//
+// A free function rather than a method so that a caller can compare a window of
+// a larger buffer without first building a `Bytes` for it.
+fn same_bytes(a: usize, b: usize, count: usize) -> bool {
+    let mut i: usize = 0
+    while i < count {
+        let left = unsafe { read_byte((a + i) as *const u8) }
+        let right = unsafe { read_byte((b + i) as *const u8) }
+        if left != right {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}

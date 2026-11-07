@@ -20,34 +20,40 @@ fn sockaddr(port: u16) -> *mut u8 {
     return p
 }
 
-fn request_path(buf: *mut u8) -> *mut u8 {
-    let out = alloc(128)
-    unsafe {
-        let mut i: usize = 0
-        while read_byte((buf as usize + i) as *const u8) != 32u8 { i = i + 1 }
-        i = i + 1
-        let mut j: usize = 0
-        while true {
-            let c = read_byte((buf as usize + i) as *const u8)
-            if c == 32u8 || c == 0u8 { break }
-            write_byte((out as usize + j) as *mut u8, c)
-            i = i + 1
-            j = j + 1
-        }
-        write_byte((out as usize + j) as *mut u8, 0u8)
+// The request target from the request line, as a view into the buffer.
+//
+// `read` gives the byte count, so the request is a `Bytes` and the target is a
+// range of it: no scan for a terminator, and a body holding a NUL is fine.
+fn request_target(request: Bytes) -> Bytes {
+    let empty = Bytes::view(request.data, 0usize)
+    let line_end = match request.end_of_line(0) {
+        Option::Some(i) => i,
+        Option::None => return empty,
     }
-    return out
+    let line = request.prefix(line_end)
+    let first = match line.find_byte(' ' as u8, 0) {
+        Option::Some(i) => i,
+        Option::None => return empty,
+    }
+    let rest = line.from(first + 1)
+    return match rest.find_byte(' ' as u8, 0) {
+        Option::Some(i) => rest.prefix(i),
+        Option::None => rest,
+    }
 }
 
 // Walk the route table as a slice: the cast gives a pointer to its first
 // element, and sizeof(Route) steps to the next.
-fn route_body(table: *const Route, count: usize, path: *const u8) -> *const u8 {
-    let want = unsafe { path as &str }
+// The body registered for `want`, or a null pointer when no route matches.
+//
+// The target is a `Bytes` view, so the match compares counted bytes: a request
+// line is not a `&str` and does not have to be NUL-terminated.
+fn route_body(table: *const Route, count: usize, want: Bytes) -> *const u8 {
     let mut i: usize = 0
     while i < count {
         let r = unsafe { (table as usize + i * sizeof(Route)) as *const Route }
-        let have = unsafe { (*r).path as &str }
-        if have == want { return unsafe { (*r).body } }
+        let have = Bytes::from_str(unsafe { (*r).path as &str })
+        if have.equals(&want) { return unsafe { (*r).body } }
         i = i + 1
     }
     return unsafe { 0 as *const u8 }
@@ -73,9 +79,10 @@ fn send(fd: i32, status: *const u8, body: *const u8) {
 // Answers one connection. Run in a child, so it owns what it allocates.
 fn serve_one(conn: i32, table: *const Route, ok: *const u8, nf: *const u8) {
     let buf = alloc(2048)
-    read(conn, buf, 2048)
-    let path = request_path(buf)
-    let body = route_body(table, 3, path)
+    let got = read(conn, buf, 2048)
+    let request = Bytes::view(buf as *const u8, got as usize)
+    let target = request_target(request)
+    let body = route_body(table, 3, target)
     if unsafe { body as usize } == 0 {
         send(conn, nf, "not found")
     } else {
@@ -83,7 +90,6 @@ fn serve_one(conn: i32, table: *const Route, ok: *const u8, nf: *const u8) {
     }
     close(conn)
     dealloc(buf)
-    dealloc(path)
 }
 
 fn main() -> i32 {

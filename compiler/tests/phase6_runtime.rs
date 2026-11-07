@@ -1508,3 +1508,77 @@ fn a_child_writes_to_a_pipe_and_the_parent_reads_it() {
         "merhaba\n",
     );
 }
+
+#[test]
+fn bytes_carry_their_length_and_parse_a_request_line() {
+    // A `&str` cannot hold a request: the body may contain a NUL, and scanning
+    // for a terminator would read past the end. `Bytes` carries the byte count
+    // that `read` returned, so every access is bounded.
+    expect_stdout(
+        "bytes_request_line",
+        "fn main() -> i32 {\n\
+             let raw = \"GET /about HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n\"\n\
+             let request = Bytes::from_str(raw)\n\
+             println_i64(if request.len == 32usize { 1 } else { 0 })\n\
+             let line_end = match request.end_of_line(0) {\n\
+                 Option::Some(i) => i,\n\
+                 Option::None => { println(\"no line\"); return 1 }\n\
+             }\n\
+             let line = request.prefix(line_end)\n\
+             let first = match line.find_byte(' ' as u8, 0) {\n\
+                 Option::Some(i) => i,\n\
+                 Option::None => { println(\"no space\"); return 1 }\n\
+             }\n\
+             let rest = line.from(first + 1)\n\
+             let second = match rest.find_byte(' ' as u8, 0) {\n\
+                 Option::Some(i) => i,\n\
+                 Option::None => rest.len\n\
+             }\n\
+             let target = rest.prefix(second)\n\
+             println_i64(if target.len == 6usize { 1 } else { 0 })\n\
+             let about = Bytes::from_str(\"/about\")\n\
+             let other = Bytes::from_str(\"/other\")\n\
+             let blank = Bytes::from_str(\"\\r\\n\\r\\n\")\n\
+             println_i64(if target.equals(&about) { 1 } else { 0 })\n\
+             println_i64(if target.equals(&other) { 1 } else { 0 })\n\
+             println_i64(if request.find_slice(blank, 0).is_some() { 1 } else { 0 })\n\
+             return 0\n\
+         }",
+        "1\n1\n1\n0\n1\n",
+    );
+}
+
+#[test]
+fn bytes_equality_is_bounded_by_the_shorter_length() {
+    // Without the length check, comparing a 6-byte view with a 1-byte view reads
+    // past the smaller one and can report equality it should not.
+    expect_stdout(
+        "bytes_bounded_equality",
+        "fn main() -> i32 {\n\
+             let a = Bytes::from_str(\"/about\")\n\
+             let b = Bytes::from_str(\"/\")\n\
+             let c = Bytes::from_str(\"/about\")\n\
+             println_i64(if a.equals(&b) { 1 } else { 0 })\n\
+             println_i64(if a.equals(&c) { 1 } else { 0 })\n\
+             println_i64(if b.equals(&a) { 1 } else { 0 })\n\
+             return 0\n\
+         }",
+        "0\n1\n0\n",
+    );
+}
+
+#[test]
+fn let_else_is_refused_rather_than_silently_miscompiled() {
+    // The parser accepts `let ... else`, but nothing runs the block. Reporting it
+    // is the only honest answer: a silent miscompile would bind the tag.
+    build_fails_with(
+        "let_else_refused",
+        "fn main() -> i32 {\n\
+             let value: Option<i64> = Option::None\n\
+             let Option::Some(x) = value else { return 1 }\n\
+             println_i64(x)\n\
+             return 0\n\
+         }",
+        "E3001",
+    );
+}

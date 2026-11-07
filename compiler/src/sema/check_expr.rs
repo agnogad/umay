@@ -209,6 +209,25 @@ impl<'c, 's> FnChecker<'c, 's> {
 
     /// Checks a `let`, introducing locals for every binding in its pattern.
     fn check_let(&mut self, l: &ast::LetStmt) -> (Vec<LocalId>, Option<Box<HirExpr>>) {
+        // `let PATTERN = EXPR else { ... }` parses, but nothing downstream reads
+        // the `else` block, so its body would never run and a refutable pattern
+        // would bind whatever the payload happened to be. Refusing is the only
+        // honest answer until the statement has a lowering.
+        if l.else_block.is_some() {
+            let d = Diagnostic::error(
+                "E3001",
+                "`let ... else` is not implemented",
+            )
+            .at(l.span)
+            .with_cause("the parser accepts the `else` block, but no later stage runs it")
+            .with_suggestion(Suggestion::new(
+                "use `match` on the value and handle the absent case in its own arm",
+                l.span,
+                "match value { Option::Some(v) => { .. } Option::None => { .. } }
+}",
+            ));
+            self.push(d);
+        }
         let annotation = l.ty.as_ref().map(|t| {
             let generics = self.generics.clone();
             self.cx.resolve_type(t, &generics)
