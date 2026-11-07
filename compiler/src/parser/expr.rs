@@ -76,7 +76,10 @@ impl Parser {
             self.advance();
             let rhs = self.parse_assign();
             let span = start.to(rhs.span);
-            return Expr { kind: ExprKind::Binary { op: BinaryOp::Eq, lhs: Box::new(lhs), rhs: Box::new(rhs) }, span };
+            // Plain assignment is not a binary operator: `a == b` compares and
+            // `a = b` stores. They use different AST nodes so that the checker
+            // cannot confuse them.
+            return Expr { kind: ExprKind::Assign { place: Box::new(lhs), value: Box::new(rhs) }, span };
         }
         lhs
     }

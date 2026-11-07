@@ -60,20 +60,35 @@ milestone and in §13 of the language specification.
 
 ---
 
-## Phase 2 — Semantic Analysis · planned
+## Phase 2 — Semantic Analysis · done
 
-- Scopes, symbol tables, module resolution from the entry point.
-- Type representations and local inference (defaults: `i32`, `f64`).
-- Struct/enum/tuple/array/slice/reference typing.
-- `Option`/`Result` as ordinary enums in the standard library.
-- Exhaustiveness checking for `match`.
-- Operator typing; `as` cast validation.
-- Trait declaration and impl collection (bounds checking minimal).
-- `pub` visibility enforcement.
-- Diagnostics: `E1001`–`E1015`.
+- [x] Scopes and symbol tables: `ItemScope` (items + prelude, duplicate
+      detection) and `ValueScopes` (frames, shadowing, same-scope warnings).
+- [x] Interning `TyCtxt` with all primitive types plus tuple, array, slice,
+      reference, raw pointer, ADT, function pointer, parameter and literal
+      inference variables.
+- [x] Three-pass checking: name collection, signature resolution, body
+      checking, so declaration order never matters (ADR 0006).
+- [x] Local inference: integer and float literals adopt the first concrete type
+      they meet and otherwise default to `i32`/`f64`.
+- [x] Struct, enum, tuple, array, slice and reference typing, including
+      recursive types such as `struct Node { next: Option<Node> }`.
+- [x] `Option` and `Result` as ordinary enums, with `Some`/`None`/`Ok`/`Err`
+      resolving as values and in patterns.
+- [x] Exhaustiveness checking for `match` over enums, `bool` and catch-all arms.
+- [x] Operator typing, assignment and mutability, `as` cast validation with a
+      narrowing warning, and compound assignment desugaring.
+- [x] Method resolution with automatic borrows, plus built-in methods on `str`,
+      `String` and slices.
+- [x] Diagnostics `E1001`–`E1015` and warnings `W0101`–`W0103`, each with an
+      `umay explain` entry.
+- [x] `umay check` runs semantic analysis and reports schema-v1 JSON.
 
-Exit criteria: a suite of accept/reject program pairs exists for every rule; no
-invalid program is accepted; every valid fixture produces an HIR.
+Not yet: `pub` visibility enforcement, module resolution from an entry point,
+trait bound checking. These arrive with the module system and Phase 6.
+
+Exit criteria: 91 accept/reject tests cover every rule; no invalid program in
+the suite is accepted; every accepted program produces an HIR.
 
 ---
 

@@ -19,10 +19,13 @@ pub mod ast;
 pub mod cache;
 pub mod diagnostics;
 pub mod explain;
+pub mod hir;
 pub mod lexer;
 pub mod parser;
+pub mod sema;
 pub mod source;
 pub mod token;
+pub mod types;
 
 use diagnostics::{Diagnostic, Diagnostics};
 use source::{FileId, SourceMap};
@@ -64,10 +67,42 @@ pub fn parse_file(map: &SourceMap, id: FileId) -> FrontendOutput {
     FrontendOutput { program: parsed.program, diagnostics }
 }
 
-/// Convenience for tests: runs the frontend and returns the diagnostics.
+/// Convenience for tests: runs the frontend only and returns the diagnostics.
+///
+/// This stops after parsing. Use [`analyze_source`] to include semantic
+/// analysis, which is what `umay check` runs.
 pub fn check_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
     let (out, map) = parse_source(name.to_string(), text.to_string());
     (out.diagnostics, map)
+}
+
+/// Runs the full frontend through semantic analysis.
+///
+/// Parsing stops at the first fatal error: reporting name-resolution errors for
+/// a program the parser could not read would bury the real problem. When
+/// parsing succeeds, semantic diagnostics are appended.
+pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
+    let mut map = SourceMap::new();
+    let id = map.add(name, text);
+    let out = parse_file(&map, id);
+    let mut diagnostics = out.diagnostics;
+    if !diagnostics.has_errors() {
+        let sema = sema::analyze(&out.program, &map);
+        for d in sema.diagnostics.items() {
+            let mut d = d.clone();
+            if let Some(entry) = explain::lookup(d.code) {
+                if d.cause.is_none() {
+                    d.cause = Some(entry.summary.to_string());
+                }
+                if d.explanation.is_none() {
+                    d.explanation = Some(entry.explanation.to_string());
+                }
+            }
+            diagnostics.push(d);
+        }
+        diagnostics.sort();
+    }
+    (diagnostics, map)
 }
 
 /// Renders all diagnostics of a compilation for humans.

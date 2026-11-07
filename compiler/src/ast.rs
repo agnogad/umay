@@ -346,6 +346,8 @@ pub enum ExprKind {
     Ref { mutable: bool, operand: Box<Expr> },
     /// `expr as Type`
     Cast { expr: Box<Expr>, ty: TypeExpr },
+    /// Plain assignment: `place = value`.
+    Assign { place: Box<Expr>, value: Box<Expr> },
     /// Compound assignment: `place op= value`.
     AssignOp { op: BinaryOp, place: Box<Expr>, value: Box<Expr> },
     /// `expr(args)`, `path::fn(args)`
@@ -445,6 +447,14 @@ pub enum BinaryOp {
 }
 
 impl BinaryOp {
+    /// True for `&`, `|`, `^`, `<<` and `>>`, which require integer operands.
+    pub fn is_bitwise(self) -> bool {
+        matches!(
+            self,
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr
+        )
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             BinaryOp::Add => "+",

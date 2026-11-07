@@ -208,7 +208,150 @@ pub static EXPLAIN: &[ExplainEntry] = &[
     e("E0364", "malformed variant pattern", "Variant patterns are `Enum::Variant(...)` or `Enum::Variant { .. }`.", None),
     e("E0365", "expected a pattern field name", "Struct pattern fields are `name` or `name: pattern`.", None),
     e("E0366", "malformed struct pattern", "A struct pattern must be closed with `}`.", None),
+    // ---- name resolution and type checking (Phase 2) ----------------------
+    e(
+        "E1001",
+        "type mismatch",
+        "The checker found two types that must be identical but are not. UMAY performs no implicit \
+         conversion: not from integer literals to a wider type, not from `&T` to `&U`, and not \
+         from `T` to `Box<T>`. Fix the expression, add `as` for a deliberate numeric conversion, \
+         or change the annotation.",
+        Some("let x: i64 = 1      // ok: the literal adopts the annotation\nlet y: i64 = 1i32   // error: i32 is not i64"),
+    ),
+    e(
+        "E1002",
+        "cannot infer this type",
+        "Inference is local to a function body and flows only from annotations and concrete \
+         expressions. A `_` placeholder with nothing to infer from, or a value whose only use is \
+         itself, cannot be resolved. Add an explicit type annotation.",
+        Some("let v: Vec<i32> = Vec::new()"),
+    ),
+    e(
+        "E1003",
+        "unknown type",
+        "No struct, enum, trait or type alias with this name is in scope. Types are resolved before \
+         function bodies, so a typo in a signature is reported here rather than as a cascade of \
+         errors inside the body.",
+        Some("fn f(count: u32) { }   // not: fn f(count: unt32)"),
+    ),
+    e(
+        "E1004",
+        "wrong number of arguments",
+        "The call supplies a different number of arguments than the function or method declares. \
+         UMAY has no optional parameters and no variadic functions, so the count must match exactly.",
+        Some("fn add(a: i32, b: i32) -> i32 { a + b }\nlet n = add(1, 2)"),
+    ),
+    e(
+        "E1005",
+        "wrong enum variant arity",
+        "The variant was declared with a different shape than the pattern or constructor uses: a \
+         unit variant takes nothing, a tuple variant takes a fixed number of values, and a struct \
+         variant takes named fields.",
+        Some("enum E { A, B(i32) }\nlet b = E::B(1)   // E::A takes nothing"),
+    ),
+    e(
+        "E1006",
+        "no such field",
+        "The field name does not exist on this struct, variant or tuple. Field names are resolved \
+         against the declaration, so a typo is reported at the access site with the nearest field \
+         name as a suggestion.",
+        Some("struct P { x: i32, y: i32 }\nlet p = P { x: 1, y: 2 }\nlet _ = p.x"),
+    ),
+    e(
+        "E1007",
+        "no such enum variant",
+        "The enum does not declare this variant. The available variants are listed in the \
+         explanation, and the closest name is suggested.",
+        Some("enum Color { Red, Green }\nlet c = Color::Red"),
+    ),
+    e(
+        "E1008",
+        "non-exhaustive `match`",
+        "Every possible value of the scrutinee must be handled. UMAY proves exhaustiveness for \
+         enums, `bool`, and any type reached through a catch-all arm. This turns a newly added \
+         enum variant into a compile error at every `match` site instead of a silent runtime \
+         fallthrough.",
+        Some("match color {\n    Color::Red => 1,\n    Color::Green => 2,\n    Color::Blue => 3,\n}"),
+    ),
+    e(
+        "E1009",
+        "struct field not initialised",
+        "A struct literal must provide a value for every field. Partial initialisation is rejected \
+         because the omitted field would be left in an undefined state. Copy the remaining fields \
+         from an existing value with `..base`.",
+        Some("let p = Point { x: 1, y: 2 }\nlet q = Point { x: 5, ..p }"),
+    ),
+    e(
+        "E1010",
+        "duplicate definition",
+        "Two items in the same scope use the same name. Item names are collected before any body \
+         is checked so that declaration order does not matter, which means duplicates are reported \
+         regardless of where they appear.",
+        Some("struct User { id: u64 }\n// a second `struct User` in the same module is an error"),
+    ),
+    e(
+        "E1011",
+        "method has no `self` parameter",
+        "A function called as `receiver.method()` must declare a receiver. An associated function \
+         declared without `self` is called with a path instead: `Type::name(...)`.",
+        Some("impl Counter {\n    fn new() -> Counter { Counter { n: 0 } }\n}\nlet c = Counter::new()"),
+    ),
+    e(
+        "E1012",
+        "value cannot be interpolated into a string",
+        "String interpolation formats its values through the `Display` trait. Numbers, `bool`, \
+         `char`, `str` and `String` implement it out of the box; other types need an \
+         `impl Display for YourType`.",
+        Some("let s = \"count={n}\"      // n: i32\nlet t = \"user={u}\"       // needs `impl Display for User`"),
+    ),
+    e(
+        "E1013",
+        "invalid `as` cast",
+        "`as` performs a total, deterministic conversion: between numeric types, between `char` \
+         and integers, and between pointers and `usize`. Casting *to* `char` is never allowed \
+         because most integers are not valid Unicode scalar values; use `char::from_u32`, which \
+         returns `Option<char>`.",
+        Some("let big = small as i64\nlet c = char::from_u32(code)   // not: code as char"),
+    ),
+    e(
+        "E1014",
+        "operation not defined for this type",
+        "The operator or operation does not exist for the operand type. Arithmetic and bitwise \
+         operators require numeric types, comparisons require an ordering, and `for` requires an \
+         iterable. There are no implicit trait implementations.",
+        Some("let n = 1 + 2        // integers\nlet s = a.len()      // methods, not operators"),
+    ),
+    e(
+        "E1015",
+        "`?` in a function that cannot propagate",
+        "`expr?` returns early with `None` or `Err`. The enclosing function must therefore return \
+         a type that can carry that failure, otherwise the early return would have nowhere to go.",
+        Some("fn parse(s: str) -> Option<i32> {\n    let n = read_number(s)?\n    Some(n)\n}"),
+    ),
     // ---- warnings ---------------------------------------------------------
+    e(
+        "W0101",
+        "binding shadows an earlier binding in the same scope",
+        "Two `let` statements in one block introduced the same name. Unlike Rust, UMAY treats \
+         same-scope shadowing as a probable mistake; use an inner block if the shadow is \
+         intentional.",
+        Some("let x = 1\n{\n    let x = 2   // ok: inner scope\n}"),
+    ),
+    e(
+        "W0102",
+        "narrowing cast can truncate",
+        "The destination type cannot represent every value of the source type, so the cast may \
+         silently discard information. This is a warning rather than an error because narrowing is \
+         sometimes exactly what is wanted.",
+        Some("let small = big as i32   // warns when `big` is i64"),
+    ),
+    e(
+        "W0103",
+        "`if` without `else` discards a value",
+        "The `then` branch produces a value, but there is no `else` branch to produce a matching \
+         one, so the result is dropped. End the block with `;` if discarding is intended.",
+        Some("if ready { do_work() }   // result discarded"),
+    ),
     e(
         "W0010",
         "attribute has no effect yet",

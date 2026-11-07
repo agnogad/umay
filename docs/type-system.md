@@ -161,25 +161,47 @@ v0.1 rules:
 `if let` and `while let` are sugar over match and are exhaustive by
 construction.
 
-## 8. Error codes (reserved for Phase 2)
+## 8. Error codes (as implemented in Phase 2)
+
+The table below is the authoritative meaning of each code. A test asserts that
+every code the compiler can emit has an `umay explain` entry, so this section
+and `compiler/src/explain.rs` cannot drift apart silently.
 
 | Code | Meaning |
 |------|---------|
-| `E1001` | type mismatch |
-| `E1002` | cannot infer type |
+| `E1001` | type mismatch (also: literal out of range, assignment, mutability, `if`/`match` arm disagreement) |
+| `E1002` | cannot infer type from `_` |
 | `E1003` | unknown type |
-| `E1004` | wrong number of generic arguments |
-| `E1005` | arity mismatch in call |
-| `E1006` | unknown field |
-| `E1007` | unknown method |
-| `E1008` | non-exhaustive match |
-| `E1009` | unreachable pattern |
-| `E1010` | duplicate definition in scope |
-| `E1011` | missing trait bound |
-| `E1012` | trait not implemented |
+| `E1004` | wrong number of arguments |
+| `E1005` | wrong enum variant arity |
+| `E1006` | no such field |
+| `E1007` | no such enum variant |
+| `E1008` | non-exhaustive `match` (also: or-pattern binding mismatch) |
+| `E1009` | struct field not initialised |
+| `E1010` | duplicate definition |
+| `E1011` | method has no `self` parameter |
+| `E1012` | value cannot be interpolated into a string |
 | `E1013` | invalid `as` cast |
-| `E1014` | operator not defined for type |
-| `E1015` | recursion limit exceeded during monomorphisation |
+| `E1014` | operation not defined for this type |
+| `E1015` | `?` in a function that cannot propagate |
+| `W0101` | binding shadows an earlier binding in the same scope |
+| `W0102` | narrowing cast can truncate |
+| `W0103` | `if` without `else` discards a value |
 
-These codes are reserved now so that documentation, tests and editor
-integrations can refer to them stably before they are emitted.
+Name-resolution failures reuse `E0101` from Phase 1 rather than introducing a
+second "unknown name" code, so the same mistake always reports the same code
+regardless of which phase noticed it.
+
+Codes reserved for later phases: `E1016`+ for generic and trait rules (Phase 3
+and 6), `E0201`–`E0213` for ownership and borrowing (Phase 4), and
+`E3001`–`E3999` for code generation (Phase 5).
+
+## 9. What is checked today, and what is not
+
+Ownership is not checked yet. Reading from a moved value, aliasing `&mut`, and
+dangling references are all accepted by the current checker and will be rejected
+in Phase 4. The type system is complete enough to catch shape errors — wrong
+types, wrong arity, missing fields, non-exhaustive matches — before any of that
+runs.
+
+Visibility is parsed but not enforced: `pub` currently has no effect.

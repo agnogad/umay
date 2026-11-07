@@ -24,16 +24,17 @@ fn main() {
 
 ## Status
 
-UMAY is under active development. This repository currently contains **Phase 1**
-of the roadmap: a complete lexer and parser with the AI-first diagnostics
-infrastructure. There is no code generator yet, so `umay build` and `umay run`
-exist as commands but report that they are not implemented.
+UMAY is under active development. This repository currently contains **Phases 0
+through 2** of the roadmap: a complete lexer, parser and semantic analyser with
+the AI-first diagnostics infrastructure. There is no code generator yet, so
+`umay build` and `umay run` exist as commands but report that they are not
+implemented.
 
 | Phase | Area | Status |
 |-------|------|--------|
 | 0 | Architecture and specification | **complete** |
 | 1 | Lexer and parser | **complete** |
-| 2 | Semantic analysis and type checking | not started |
+| 2 | Semantic analysis and type checking | **complete** |
 | 3 | HIR and MIR | not started |
 | 4 | Ownership and borrow checking | not started |
 | 5 | Custom x86_64 backend | not started |
@@ -51,7 +52,7 @@ See [ROADMAP.md](ROADMAP.md) for the detailed milestone plan and
 cargo build --release          # build the compiler (produces target/release/umay)
 
 umay new my-project            # scaffold a project (umay.toml, src/main.um, dist/)
-umay check src/main.um         # lex + parse, report diagnostics
+umay check src/main.um         # lex, parse, type-check, report diagnostics
 umay check src/*.um --format json
 umay check src/main.um --explain   # include full explanations
 umay ast src/main.um           # dump the syntax tree as JSON

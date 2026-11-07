@@ -181,7 +181,7 @@ fn cmd_check(args: &[String]) -> u8 {
                 continue;
             }
         };
-        let (diags, map) = umayc::check_source(path.to_string_lossy().as_ref(), &text);
+        let (diags, map) = umayc::analyze_source(path.to_string_lossy().as_ref(), &text);
         if diags.has_errors() {
             any_error = true;
         }

@@ -10,6 +10,7 @@ consequences, alternatives.
 | [0003](0003-diagnostics-are-data.md) | Diagnostics are pure data with two renderers | accepted |
 | [0004](0004-optional-semicolons.md) | Optional semicolons with newline-aware termination | accepted |
 | [0005](0005-blocking-on-init.md) | `let` always initializes; deferred init rejected | accepted |
+| [0006](0006-semantic-analysis.md) | Three passes over items, body-local inference, conservative exhaustiveness | accepted |
 
 ## Template
 
