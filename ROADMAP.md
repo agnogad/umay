@@ -269,7 +269,28 @@ resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
   string rather than null, so a caller need not check before printing it.
   `file_size` now seeks to the end instead of reading the file, and `is_dir`
   tells a directory from a file.
-- [ ] `net`: TCP basics, only once the memory model is stable.
+- [ ] `net`: TCP basics in the standard library. **Not needed for a server
+  today** — `socket`/`bind`/`listen`/`accept`/`read`/`write` work through
+  `extern fn`, and `examples/http-server.um` plus a `HashMap`-routed probe both
+  answer real `curl` requests. What a library would add is the boilerplate in
+  `request_path`-style helpers, not capability.
+
+### What a web backend needs that is still missing
+
+Measured against a working router probe, in the order the gaps bite:
+
+- [ ] Array to raw-pointer conversion (`routes as *const Route`) — E1013 today,
+  so a table of routes has to be walked with `sizeof` arithmetic by hand.
+- [ ] `str`/`*const u8` bridging in both directions. A string literal cannot be
+  handed to a C-shaped API without a cast, and a C string cannot be printed
+  except byte by byte.
+- [ ] A byte-slice type that carries its length, so a request body is one value
+  instead of a pointer plus a manual length.
+- [ ] Header parsing and a request/response type — library work, not language
+  work.
+- [ ] `Iterator`, so a caller can loop over a collection without an index.
+- [ ] Concurrency. `fork` works; threads do not exist. One connection at a time
+  is the limit until an ADR decides the model.
 
 Wiring up `fs` and `process` exposed four defects that had nothing to do with
 either:
