@@ -20,28 +20,6 @@ fn sockaddr(port: u16) -> *mut u8 {
     return p
 }
 
-// The request target from the request line, as a view into the buffer.
-//
-// `read` gives the byte count, so the request is a `Bytes` and the target is a
-// range of it: no scan for a terminator, and a body holding a NUL is fine.
-fn request_target(request: Bytes) -> Bytes {
-    let empty = Bytes::view(request.data, 0usize)
-    let line_end = match request.end_of_line(0) {
-        Option::Some(i) => i,
-        Option::None => return empty,
-    }
-    let line = request.prefix(line_end)
-    let first = match line.find_byte(' ' as u8, 0) {
-        Option::Some(i) => i,
-        Option::None => return empty,
-    }
-    let rest = line.from(first + 1)
-    return match rest.find_byte(' ' as u8, 0) {
-        Option::Some(i) => rest.prefix(i),
-        Option::None => rest,
-    }
-}
-
 // Walk the route table as a slice: the cast gives a pointer to its first
 // element, and sizeof(Route) steps to the next.
 // The body registered for `want`, or a null pointer when no route matches.
@@ -59,34 +37,65 @@ fn route_body(table: *const Route, count: usize, want: Bytes) -> *const u8 {
     return unsafe { 0 as *const u8 }
 }
 
-fn send(fd: i32, status: *const u8, body: *const u8) {
-    write(fd, status as *const u8, strlen(status))
-    let body_len = strlen(body)
-    write(fd, "Content-Length: " as *const u8, 16)
-    let digits = alloc(24)
-    let mut n = body_len
-    unsafe {
-        let mut d: usize = 0
-        if n == 0 { write_byte(digits, 48u8); d = 1 }
-        while n > 0 { write_byte((digits as usize + d) as *mut u8, (48u8 + (n % 10) as u8)); n = n / 10; d = d + 1 }
-        while d > 0 { d = d - 1; write(fd, (digits as usize + d) as *const u8, 1) }
+// Writes a response: a status line, a length, the headers, then the body.
+//
+// The status line is assembled from the stdlib's `status_text` and `reason`, so
+// every route answers with a code the library knows rather than a hand-written
+// string that can drift from the number.
+fn send(fd: i32, response: Response) {
+    let status = response.status()
+    let body = response.body()
+    write(fd, "HTTP/1.1 " as *const u8, byte_len("HTTP/1.1 " as *const u8))
+    let text = status_text(status)
+    write(fd, text as *const u8, byte_len(text as *const u8))
+    write(fd, " " as *const u8, byte_len(" " as *const u8))
+    let why = reason(status)
+    write(fd, why as *const u8, byte_len(why as *const u8))
+    write(fd, "\r\nContent-Length: " as *const u8, byte_len("\r\nContent-Length: " as *const u8))
+    write_decimal(fd, body.len)
+    write(fd, "\r\nConnection: close\r\n\r\n" as *const u8, byte_len("\r\nConnection: close\r\n\r\n" as *const u8))
+    if body.len > 0 {
+        write(fd, body.data, body.len)
     }
-    write(fd, "\r\nConnection: close\r\n\r\n" as *const u8, 23)
-    write(fd, body, body_len)
+}
+
+// Writes `value` in decimal, least significant digit last.
+fn write_decimal(fd: i32, value: usize) {
+    let digits = alloc(24)
+    let mut n = value
+    let mut d: usize = 0
+    unsafe {
+        if n == 0 {
+            write_byte(digits, 48u8)
+            d = 1
+        }
+        while n > 0 {
+            write_byte((digits as usize + d) as *mut u8, 48u8 + (n % 10) as u8)
+            n = n / 10
+            d = d + 1
+        }
+        while d > 0 {
+            d = d - 1
+            write(fd, (digits as usize + d) as *const u8, 1)
+        }
+    }
     dealloc(digits)
 }
 
 // Answers one connection. Run in a child, so it owns what it allocates.
-fn serve_one(conn: i32, table: *const Route, ok: *const u8, nf: *const u8) {
+fn serve_one(conn: i32, table: *const Route, count: usize) {
     let buf = alloc(2048)
     let got = read(conn, buf, 2048)
-    let request = Bytes::view(buf as *const u8, got as usize)
-    let target = request_target(request)
-    let body = route_body(table, 3, target)
-    if unsafe { body as usize } == 0 {
-        send(conn, nf, "not found")
+    let request = parse_request(Bytes::view(buf as *const u8, got as usize))
+    if request.target().is_empty() {
+        send(conn, Response::new(400))
     } else {
-        send(conn, ok, body)
+        let body = route_body(table, count, request.target())
+        if unsafe { body as usize } == 0 {
+            send(conn, Response::new(404))
+        } else {
+            send(conn, Response::new(200).with_body(Bytes::from_str(unsafe { body as &str })))
+        }
     }
     close(conn)
     dealloc(buf)
@@ -103,8 +112,6 @@ fn main() -> i32 {
     bind(server, sockaddr(8080u16) as *const u8, 16)
     listen(server, 4)
     println("listening")
-    let ok = "HTTP/1.1 200 OK\r\n"
-    let nf = "HTTP/1.1 404 Not Found\r\n"
     let mut served = 0
     while served < 4 {
         let conn = accept(server, unsafe { 0 as *mut u8 }, unsafe { 0 as *mut i32 })
@@ -115,7 +122,7 @@ fn main() -> i32 {
         // the parent.
         let pid = spawn()
         if is_child(pid) {
-            serve_one(conn, table, ok, nf)
+            serve_one(conn, table, 3usize)
             close(server)
             exit(0)
         }

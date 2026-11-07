@@ -564,6 +564,17 @@ fn parse_constant(s: &str, strings: &mut Vec<String>, n: usize) -> Result<Consta
     if s == "false" {
         return Ok(Constant::Bool(false));
     }
+    // A character constant is printed with `{:?}`, so it arrives quoted. The
+    // escapes are the same ones a string literal uses.
+    if s.starts_with('\'') && s.len() >= 3 && s.ends_with('\'') {
+        let body = &s[1..s.len() - 1];
+        let text = unescape(body);
+        let mut chars = text.chars();
+        if let (Some(ch), None) = (chars.next(), chars.next()) {
+            return Ok(Constant::Char(ch));
+        }
+        return Err(ParseError { line: n, message: format!("bad character constant `{s}`") });
+    }
     if s.starts_with('"') {
         // `"text"#3`
         let end = s

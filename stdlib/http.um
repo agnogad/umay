@@ -1,0 +1,228 @@
+// Just enough HTTP/1.1 to read a request and write a response.
+//
+// A request arrives as a counted run of bytes, so the parser takes a `Bytes`
+// and never scans for a terminator: the count `read` returned is the boundary,
+// and a body holding a NUL is ordinary data. Nothing here allocates a copy of
+// the request; a `Request` is a set of views into the buffer that was read.
+
+// The request line and its headers, borrowed from the buffer that was read.
+struct Request {
+    method: Bytes,
+    target: Bytes,
+    version: Bytes,
+    headers: Bytes,
+    body: Bytes,
+}
+
+// A status code and the body that goes with it.
+struct Response {
+    status: i32,
+    body: Bytes,
+}
+
+impl Request {
+    // The method, e.g. `GET`. Empty when the request line was malformed.
+    fn method(&self) -> Bytes {
+        return self.method
+    }
+
+    // The request target, e.g. `/about`.
+    fn target(&self) -> Bytes {
+        return self.target
+    }
+
+    // The protocol version, e.g. `HTTP/1.1`.
+    fn version(&self) -> Bytes {
+        return self.version
+    }
+
+    // The body, counted from the `Content-Length` header.
+    fn body(&self) -> Bytes {
+        return self.body
+    }
+}
+
+impl Response {
+    // A response with no body.
+    fn new(status: i32) -> Response {
+        return Response { status: status, body: Bytes::from_str("") }
+    }
+
+    // The same response with `body` attached.
+    fn with_body(self, body: Bytes) -> Response {
+        return Response { status: self.status, body: body }
+    }
+
+    // The number that goes on the status line.
+    fn status(&self) -> i32 {
+        return self.status
+    }
+
+    // The body.
+    fn body(&self) -> Bytes {
+        return self.body
+    }
+}
+
+// Parses a request. A malformed one yields a `Request` whose parts are empty,
+// which a handler detects with `target().is_empty()`.
+fn parse_request(raw: Bytes) -> Request {
+    let empty = Bytes::view(raw.data, 0usize)
+    let head_end = match raw.find_slice(Bytes::from_str("\r\n\r\n"), 0) {
+        Option::Some(i) => i,
+        Option::None => raw.len,
+    }
+    let line_end = match raw.end_of_line(0) {
+        Option::Some(i) => i,
+        Option::None => return Request { method: empty, target: empty, version: empty, headers: empty, body: empty },
+    }
+    let line = raw.prefix(line_end)
+
+    let first = match line.find_byte(' ' as u8, 0) {
+        Option::Some(i) => i,
+        Option::None => return Request { method: empty, target: empty, version: empty, headers: empty, body: empty },
+    }
+    let method = line.prefix(first)
+    let rest = line.from(first + 1)
+    let second = match rest.find_byte(' ' as u8, 0) {
+        Option::Some(i) => i,
+        Option::None => return Request { method: empty, target: empty, version: empty, headers: empty, body: empty },
+    }
+    let target = rest.prefix(second)
+    let version = rest.from(second + 1)
+
+    // The header block sits between the request line's terminator and the blank
+    // line that ends it, so its length is what remains of the head after the
+    // line and its two-byte terminator.
+    let headers = raw.range(line_end + 2, head_end)
+
+    let body_start = if head_end + 4 <= raw.len { head_end + 4 } else { raw.len }
+    let mut body = raw.from(body_start)
+    let declared = content_length(&headers)
+    if declared < 0 {
+        body = Bytes::view(raw.data, 0usize)
+    } else {
+        let want = declared as usize
+        if body.len > want {
+            body = body.prefix(want)
+        }
+    }
+
+    return Request { method: method, target: target, version: version, headers: headers, body: body }
+}
+
+// The declared body length from the `Content-Length` header, or `-1` when it is
+// absent. Absent is `-1` here rather than an `Option` because the caller also
+// needs to know that a declared zero differs from no declaration at all, and a
+// `usize` cannot say both.
+fn content_length(headers: &Bytes) -> i64 {
+    let mut rest = *headers
+    while rest.len > 0 {
+        let end = match rest.end_of_line(0) {
+            Option::Some(i) => i,
+            Option::None => rest.len,
+        }
+        let line = rest.prefix(end)
+        let colon = match line.find_byte(':' as u8, 0) {
+            Option::Some(i) => i,
+            Option::None => {
+                rest = if end + 2 <= rest.len { rest.from(end + 2) } else { Bytes::view(rest.data, 0usize) }
+                continue
+            }
+        }
+        let name = trim(line.prefix(colon))
+        if name_equals(name, "content-length") {
+            return parse_decimal(trim(line.from(colon + 1)))
+        }
+        rest = if end + 2 <= rest.len { rest.from(end + 2) } else { Bytes::view(rest.data, 0usize) }
+    }
+    return -1i64
+}
+
+// True when two views hold the same ASCII letters, ignoring case, so that
+// `Content-Length` and `content-length` are one header.
+fn name_equals(a: Bytes, b: &str) -> bool {
+    let other = Bytes::from_str(b)
+    if a.len != other.len {
+        return false
+    }
+    let mut i: usize = 0
+    while i < a.len {
+        if lower(a.get(i)) != lower(other.get(i)) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// An ASCII letter folded to lower case; every other byte is unchanged.
+fn lower(c: u8) -> u8 {
+    if c >= 65u8 && c <= 90u8 {
+        return c + 32u8
+    }
+    return c
+}
+
+// A view with leading and trailing spaces and tabs removed.
+fn trim(value: Bytes) -> Bytes {
+    let mut start: usize = 0
+    while start < value.len {
+        let c = value.get(start)
+        if c != 32u8 && c != 9u8 {
+            break
+        }
+        start = start + 1
+    }
+    let mut end = value.len
+    while end > start {
+        let c = value.get(end - 1)
+        if c != 32u8 && c != 9u8 {
+            break
+        }
+        end = end - 1
+    }
+    return value.range(start, end)
+}
+
+// A decimal number, or `-1` when the view holds anything else.
+fn parse_decimal(value: Bytes) -> i64 {
+    if value.len == 0 {
+        return -1i64
+    }
+    let mut n: i64 = 0
+    let mut i: usize = 0
+    while i < value.len {
+        let c = value.get(i)
+        if c < 48u8 || c > 57u8 {
+            return -1i64
+        }
+        n = n * 10i64 + (c - 48u8) as i64
+        i = i + 1
+    }
+    return n
+}
+
+// The reason phrase that goes with a status code.
+fn reason(status: i32) -> &str {
+    if status == 200 { return "OK" }
+    if status == 201 { return "Created" }
+    if status == 204 { return "No Content" }
+    if status == 400 { return "Bad Request" }
+    if status == 404 { return "Not Found" }
+    if status == 405 { return "Method Not Allowed" }
+    if status == 500 { return "Internal Server Error" }
+    return "Unknown"
+}
+
+// The status code as three ASCII digits, most significant first.
+fn status_text(status: i32) -> &str {
+    if status == 200 { return "200" }
+    if status == 201 { return "201" }
+    if status == 204 { return "204" }
+    if status == 400 { return "400" }
+    if status == 404 { return "404" }
+    if status == 405 { return "405" }
+    if status == 500 { return "500" }
+    return "500"
+}

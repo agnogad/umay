@@ -1582,3 +1582,69 @@ fn let_else_is_refused_rather_than_silently_miscompiled() {
         "E3001",
     );
 }
+
+#[test]
+fn http_request_parts_are_parsed_from_counted_bytes() {
+    expect_stdout(
+        "http_parse_request",
+        "fn main() -> i32 {\n\
+             let raw = Bytes::from_str(\"POST /items HTTP/1.1\\r\\nContent-Length: 5\\r\\nHost: x\\r\\n\\r\\nhello\")\n\
+             let req = parse_request(raw)\n\
+             let post = Bytes::from_str(\"POST\")\n\
+             let items = Bytes::from_str(\"/items\")\n\
+             let v11 = Bytes::from_str(\"HTTP/1.1\")\n\
+             println_i64(if req.method().equals(&post) { 1 } else { 0 })\n\
+             println_i64(if req.target().equals(&items) { 1 } else { 0 })\n\
+             println_i64(if req.version().equals(&v11) { 1 } else { 0 })\n\
+             println_i64(if req.body().len == 5usize { 1 } else { 0 })\n\
+             println_i64(req.body().get(0) as i64)\n\
+             return 0\n\
+         }",
+        "1\n1\n1\n1\n104\n",
+    );
+}
+
+#[test]
+fn content_length_is_read_case_insensitively() {
+    expect_stdout(
+        "http_content_length",
+        "fn main() -> i32 {\n\
+             let a = Bytes::from_str(\"Content-Length: 42\\r\\nHost: x\")\n\
+             let b = Bytes::from_str(\"content-length:7\\r\\nHost: x\")\n\
+             let c = Bytes::from_str(\"Host: x\\r\\nAccept: */*\")\n\
+             println_i64(content_length(&a))\n\
+             println_i64(content_length(&b))\n\
+             println_i64(content_length(&c))\n\
+             return 0\n\
+         }",
+        "42\n7\n-1\n",
+    );
+}
+
+#[test]
+fn a_body_without_a_content_length_is_empty_not_the_rest_of_the_buffer() {
+    expect_stdout(
+        "http_no_content_length",
+        "fn main() -> i32 {\n\
+             let raw = Bytes::from_str(\"GET / HTTP/1.1\\r\\nHost: x\\r\\n\\r\\njunk\")\n\
+             let req = parse_request(raw)\n\
+             println_i64(if req.body().len == 0usize { 1 } else { 0 })\n\
+             return 0\n\
+         }",
+        "1\n",
+    );
+}
+
+#[test]
+fn a_malformed_request_line_is_reported_as_an_empty_target() {
+    expect_stdout(
+        "http_malformed",
+        "fn main() -> i32 {\n\
+             let raw = Bytes::from_str(\"GARBAGE\\r\\n\\r\\n\")\n\
+             let req = parse_request(raw)\n\
+             println_i64(if req.target().is_empty() { 1 } else { 0 })\n\
+             return 0\n\
+         }",
+        "1\n",
+    );
+}
