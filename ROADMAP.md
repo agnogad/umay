@@ -295,8 +295,12 @@ Measured against a working router probe, in the order the gaps bite:
 - [ ] Header parsing and a request/response type — library work, not language
   work.
 - [ ] `Iterator`, so a caller can loop over a collection without an index.
-- [ ] Concurrency. `fork` works; threads do not exist. One connection at a time
-  is the limit until an ADR decides the model.
+- [x] Concurrency, process-based (ADR 0011). `spawn`, `is_child` and `wait` in
+  `stdlib/process.um`. `examples/http-router.um` accepts in one process and
+  hands each connection to a child, so connections are served at once. A pipe
+  carries a result back.
+- [ ] `Send`/`Sync` markers, so a thread can be a language feature rather than
+  an `extern fn` with an unchecked hand-off.
 
 Wiring up `fs` and `process` exposed four defects that had nothing to do with
 either:

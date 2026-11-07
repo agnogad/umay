@@ -1446,3 +1446,65 @@ fn a_route_table_walks_by_pointer_arithmetic() {
         "about us\n",
     );
 }
+
+#[test]
+fn a_child_process_runs_its_own_copy_of_the_program() {
+    // `spawn` is the whole of UMAY's concurrency today: the child gets a copy of
+    // the address space, so a write in the child is invisible to the parent.
+    // That is what makes a child a safe worker with no lock, and it is why the
+    // parent's own value survives.
+    expect_stdout(
+        "fork_child_copy",
+        "fn main() -> i32 {\n\
+             let mut shared = 1i64\n\
+             let pid = spawn()\n\
+             if is_child(pid) {\n\
+                 shared = 99i64\n\
+                 exit(0)\n\
+             }\n\
+             let child = wait()\n\
+             println_i64(if child > 0 { 1 } else { 0 })\n\
+             println_i64(shared)\n\
+             return 0\n\
+         }",
+        "1\n1\n",
+    );
+}
+
+#[test]
+fn a_child_writes_to_a_pipe_and_the_parent_reads_it() {
+    // A pipe is the one channel a child and its parent share, so it is how a
+    // worker reports a result back.
+    expect_stdout(
+        "fork_pipe",
+        "extern fn pipe(fds: *mut i32) -> i32\n\
+         extern fn read(fd: i32, buf: *mut u8, n: usize) -> i64\n\
+         extern fn write(fd: i32, buf: *const u8, n: usize) -> i64\n\
+         extern fn close(fd: i32) -> i32\n\
+         fn main() -> i32 {\n\
+             let fds = alloc(8)\n\
+             let as_i = fds as *mut i32\n\
+             unsafe { pipe(as_i) }\n\
+             let rfd = unsafe { *(as_i as *const i32) }\n\
+             let wfd = unsafe { *((as_i as usize + 4) as *const i32) }\n\
+             let pid = spawn()\n\
+             if is_child(pid) {\n\
+                 close(rfd)\n\
+                 write(wfd, \"merhaba\" as *const u8, 7)\n\
+                 close(wfd)\n\
+                 exit(0)\n\
+             }\n\
+             close(wfd)\n\
+             let buf = alloc(16)\n\
+             unsafe {\n\
+                 let n = read(rfd, buf, 15) as usize\n\
+                 write_byte((buf as usize + n) as *mut u8, 0u8)\n\
+                 println(buf as *const u8 as &str)\n\
+             }\n\
+             close(rfd)\n\
+             wait()\n\
+             return 0\n\
+         }",
+        "merhaba\n",
+    );
+}

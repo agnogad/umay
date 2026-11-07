@@ -140,3 +140,26 @@ fn exit(code: i32) {
 fn last_error() -> i32 {
     return umay_errno()
 }
+
+// The id of a fresh child process, or `-1` when the system refuses.
+//
+// The child receives a copy of this program's memory: writes it makes are not
+// seen here, and writes here are not seen there. That is what makes a child a
+// safe worker — there is no shared mutable cell to race on — and it is why a
+// server can hand one connection to each child without a lock.
+fn spawn() -> i32 {
+    return umay_fork()
+}
+
+// Waits for any child to finish and returns its id, or `-1`.
+fn wait() -> i32 {
+    let status = alloc(4)
+    let pid = umay_waitpid(-1, status as *mut i32, 0)
+    dealloc(status)
+    return pid
+}
+
+// True for the child's side of `spawn`: the id it got back is zero.
+fn is_child(pid: i32) -> bool {
+    return pid == 0
+}

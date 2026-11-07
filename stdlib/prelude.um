@@ -42,6 +42,8 @@ extern fn umay_is_dir(path: *const u8) -> bool
 extern fn umay_getenv(name: *const u8) -> *const u8
 extern fn umay_errno() -> i32
 extern fn umay_exit(code: i32) -> ()
+extern fn umay_fork() -> i32
+extern fn umay_waitpid(pid: i32, status: *mut i32, options: i32) -> i32
 extern fn umay_read_u16(ptr: *const u8) -> u16
 extern fn umay_write_u16(ptr: *mut u8, value: u16) -> ()
 extern fn umay_str_eq(a: *const u8, b: *const u8) -> bool

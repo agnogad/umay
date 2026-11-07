@@ -46,6 +46,12 @@ extern fn getenv(name: *const u8) -> *const u8
 // function returning the address of the thread's errno.
 extern fn __errno_location() -> *mut i32
 
+// Creates a child process that shares this address space copy-on-write.
+extern fn fork() -> i32
+
+// Waits for a child to change state.
+extern fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32
+
 // POSIX file system calls. Each returns -1 on failure, which the wrappers below
 // turn into a result the caller can branch on.
 //
@@ -401,4 +407,19 @@ pub fn umay_str_eq(a: *const u8, b: *const u8) -> bool {
         }
     }
     return false
+}
+
+// The process id of a fresh child, which shares this address space until it
+// writes to it, or `-1` when the system refuses.
+//
+// This is the whole of UMAY's concurrency today: a child has its own copy of
+// every variable, so there is no shared mutable cell to race on, and a server
+// gets its parallelism from one process per connection instead of a thread.
+pub fn umay_fork() -> i32 {
+    return fork()
+}
+
+// Waits for any child to finish and returns its id, or `-1`.
+pub fn umay_waitpid(pid: i32, status: *mut i32, options: i32) -> i32 {
+    return waitpid(pid, status, options)
 }
