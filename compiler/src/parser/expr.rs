@@ -184,6 +184,12 @@ impl Parser {
         loop {
             match self.kind().clone() {
                 TokenKind::LParen => {
+                    // A number is never called: `1` followed by `(` on the next
+                    // line is the end of one statement and the start of the next,
+                    // not a call, because semicolons are optional.
+                    if matches!(expr.kind, ExprKind::IntLit { .. } | ExprKind::FloatLit { .. }) {
+                        break;
+                    }
                     let start = expr.span;
                     self.advance();
                     let mut args = Vec::new();

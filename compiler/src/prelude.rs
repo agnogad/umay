@@ -28,6 +28,8 @@ use crate::source::{FileId, SourceMap};
 pub const PRELUDE_SOURCE: &str = concat!(
     include_str!("../../stdlib/prelude.um"),
     "\n",
+    include_str!("../../stdlib/option.um"),
+    "\n",
     include_str!("../../stdlib/string.um"),
     "\n",
     include_str!("../../stdlib/vec.um"),

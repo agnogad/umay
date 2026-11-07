@@ -1,0 +1,83 @@
+// The two types a fallible computation returns, and the operations that make
+// them usable without writing a `match` every time.
+//
+// They are ordinary enums in ordinary source: the compiler knows nothing special
+// about them, which is why their constructors infer like any other variant's and
+// why a user may declare its own `Option` without breaking anything else.
+
+// A value that may be absent.
+//
+// `None` carries nothing, so an expression producing it takes its type parameter
+// from the binding or return type it is assigned to:
+//
+//     let empty: Option<i64> = Option::None
+//
+// The type is spelled out like that rather than being guessed, because a guess
+// would pick a type silently and be wrong later.
+enum Option<T> {
+    None,
+    Some(T),
+}
+
+impl<T> Option<T> {
+    // True when there is a value.
+    fn is_some(&self) -> bool {
+        return match self {
+            Option::Some(_) => true,
+            Option::None => false,
+        }
+    }
+
+    // True when there is no value.
+    fn is_none(&self) -> bool {
+        return !self.is_some()
+    }
+
+    // The value, or `fallback` when there is none.
+    fn unwrap_or(self, fallback: T) -> T {
+        return match self {
+            Option::Some(value) => value,
+            Option::None => fallback,
+        }
+    }
+}
+
+// A value that is either a success or an error.
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+impl<T, E> Result<T, E> {
+    // True when the computation succeeded.
+    fn is_ok(&self) -> bool {
+        return match self {
+            Result::Ok(_) => true,
+            Result::Err(_) => false,
+        }
+    }
+
+    // True when it failed.
+    fn is_err(&self) -> bool {
+        return !self.is_ok()
+    }
+
+    // The success value, or `fallback` when the computation failed.
+    fn unwrap_or(self, fallback: T) -> T {
+        return match self {
+            Result::Ok(value) => value,
+            Result::Err(_) => fallback,
+        }
+    }
+
+    // The success value, or the error, whichever there is.
+    //
+    // This is what turns a failure into a single value the caller can return,
+    // which is the shape a function that can fail wants.
+    fn ok(self) -> Option<T> {
+        return match self {
+            Result::Ok(value) => Option::Some(value),
+            Result::Err(_) => Option::None,
+        }
+    }
+}

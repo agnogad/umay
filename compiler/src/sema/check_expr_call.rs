@@ -25,7 +25,7 @@ impl FnChecker<'_, '_> {
         // `Type::Variant(...)` constructs an enum variant.
         if let ast::ExprKind::Path(path) = &callee.kind {
             if path.segments.len() == 2 {
-                if let Some(e) = self.try_variant_ctor(path, args, span) {
+                if let Some(e) = self.try_variant_ctor(path, args, span, hint) {
                     return e;
                 }
                 // `Type::fn(args)` reaches a function defined in the type's `impl`
@@ -172,6 +172,7 @@ impl FnChecker<'_, '_> {
         path: &ast::Path,
         args: &[ast::Expr],
         span: crate::source::Span,
+        hint: Option<crate::types::TyId>,
     ) -> Option<HirExpr> {
         let enum_name = &path.segments[0].name;
         let def = *self.cx.def_by_name.get(enum_name)?;
@@ -206,11 +207,27 @@ impl FnChecker<'_, '_> {
                 inferred.entry(name).or_insert(ty);
             }
         }
+        // What the payload does not say comes from the type the expression is
+        // being given. `Result::Err(e)` names `E` and nothing names `T`, so a
+        // return type of `Result<i64, i64>` has to supply it.
+        let mut from_hint: Vec<crate::types::TyId> = Vec::new();
+        if let Some(hint_ty) = hint {
+            if let crate::types::TyKind::Adt { def: hdef, args: hargs } = self.cx.cx.kind(hint_ty) {
+                if *hdef == def && hargs.len() == info.generics.len() {
+                    from_hint = hargs.clone();
+                }
+            }
+        }
         let mut ty_args: Vec<crate::types::TyId> = Vec::with_capacity(info.generics.len());
-        for g in &info.generics {
+        for (position, g) in info.generics.iter().enumerate() {
             // A parameter no payload mentions stays an error: guessing would pick
             // the wrong type silently, and an annotation is the way to say it.
-            match inferred.get(g).copied() {
+            match inferred.get(g).copied().or_else(|| {
+                // A hint only fills what inference left open, so a payload that
+                // names a different type is still an error rather than being
+                // silently overruled.
+                from_hint.get(position).copied()
+            }) {
                 Some(t) => ty_args.push(t),
                 None => {
                     self.push(
@@ -473,8 +490,25 @@ impl FnChecker<'_, '_> {
         let mut subst = std::collections::HashMap::new();
         let base = self.strip_refs(ty);
         if let crate::types::TyKind::Adt { def, args } = self.cx.cx.kind(base).clone() {
-            if let Some(info) = self.cx.hir.structs.iter().find(|s| s.def_id == def) {
-                let generics = info.generics.clone();
+            // Both kinds of type definition are looked up: an enum may have an
+            // `impl` block just as a struct does, and its arguments are what name
+            // the parameters used in its methods' signatures.
+            let generics = self
+                .cx
+                .hir
+                .structs
+                .iter()
+                .find(|s| s.def_id == def)
+                .map(|s| s.generics.clone())
+                .or_else(|| {
+                    self.cx
+                        .hir
+                        .enums
+                        .iter()
+                        .find(|e| e.def_id == def)
+                        .map(|e| e.generics.clone())
+                });
+            if let Some(generics) = generics {
                 for (name, arg) in generics.iter().zip(args.iter()) {
                     subst.insert(name.clone(), *arg);
                 }

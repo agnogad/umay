@@ -694,8 +694,7 @@ fn a_generic_enum_payload_binds_its_concrete_type() {
     // and the backend would refuse to lay it out.
     expect_stdout(
         "generic_enum",
-        "enum Option<T> { None, Some(T) }\n\
-         fn unwrap_or(o: Option<i64>, fallback: i64) -> i64 {\n\
+        "fn unwrap_or(o: Option<i64>, fallback: i64) -> i64 {\n\
              return match o { Option::Some(v) => v, Option::None => fallback }\n\
          }\n\
          fn main() -> i32 {\n\
@@ -1124,4 +1123,179 @@ fn a_directory_is_told_apart_from_a_file() {
         .output()
         .expect("run built program");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1\n0\n0\n");
+}
+
+#[test]
+fn an_option_says_whether_it_holds_a_value() {
+    // `is_some` matches on `&self`, so the receiver is inspected through a
+    // reference rather than consumed.
+    expect_stdout(
+        "option_is_some",
+        "fn half(n: i64) -> Option<i64> {\n\
+             if n % 2 != 0 { return Option::None }\n\
+             return Option::Some(n / 2)\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let even = half(8i64)\n\
+             let odd = half(7i64)\n\
+             println_i64(if even.is_some() { 1 } else { 0 })\n\
+             println_i64(if odd.is_none() { 1 } else { 0 })\n\
+             println_i64(even.unwrap_or(-1i64))\n\
+             println_i64(odd.unwrap_or(-1i64))\n\
+             return 0\n\
+         }",
+        "1\n1\n4\n-1\n",
+    );
+}
+
+#[test]
+fn a_result_carries_either_a_value_or_an_error() {
+    expect_stdout(
+        "result_ok_err",
+        "fn parse_digit(text: *const u8) -> Result<i64, i64> {\n\
+             let byte = read_byte(text)\n\
+             if byte < 48u8 || byte > 57u8 {\n\
+                 return Result::Err(-1i64)\n\
+             }\n\
+             return Result::Ok((byte - 48u8) as i64)\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let good = parse_digit(\"7\")\n\
+             let bad = parse_digit(\"x\")\n\
+             println_i64(if good.is_ok() { 1 } else { 0 })\n\
+             println_i64(if bad.is_err() { 1 } else { 0 })\n\
+             println_i64(good.unwrap_or(0i64))\n\
+             println_i64(bad.unwrap_or(0i64))\n\
+             return 0\n\
+         }",
+        "1\n1\n7\n0\n",
+    );
+}
+
+#[test]
+fn a_result_converts_to_an_option_of_its_success() {
+    // The `Ok` arm settles the type of the match, so the `Err` arm's
+    // `Option::None` takes its `T` from that arm rather than needing an
+    // annotation of its own.
+    expect_stdout(
+        "result_to_option",
+        "fn checked(n: i64) -> Result<i64, i64> {\n\
+             if n < 0 { return Result::Err(1i64) }\n\
+             return Result::Ok(n)\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let good = checked(5i64).ok()\n\
+             let bad = checked(-5i64).ok()\n\
+             println_i64(good.unwrap_or(0i64))\n\
+             println_i64(bad.unwrap_or(0i64))\n\
+             return 0\n\
+         }",
+        "5\n0\n",
+    );
+}
+
+#[test]
+fn an_option_without_a_type_is_rejected_rather_than_guessed() {
+    // `None` holds nothing, so nothing says what `T` is. Guessing would pick a
+    // type silently and be wrong later, so the program is refused instead.
+    build_fails_with(
+        "option_no_hint",
+        "fn main() -> i32 {\n\
+             let empty = Option::None\n\
+             return 0\n\
+         }",
+        "E1001",
+    );
+}
+
+#[test]
+fn matching_a_reference_inspects_the_value_behind_it() {
+    // `&self` gives a reference, and matching on it must look through to the
+    // enum rather than report that `&Option<i64>` is not an `Option<i64>`.
+    expect_stdout(
+        "match_through_ref",
+        "fn describe(value: &Option<i64>) -> i64 {\n\
+             return match value {\n\
+                 Option::Some(n) => n,\n\
+                 Option::None => -1,\n\
+             }\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let full = Option::Some(9i64)\n\
+             let empty: Option<i64> = Option::None\n\
+             println_i64(describe(&full))\n\
+             println_i64(describe(&empty))\n\
+             return 0\n\
+         }",
+        "9\n-1\n",
+    );
+}
+
+#[test]
+fn a_method_calls_another_on_its_own_receiver() {
+    // `&mut self` inside a `&mut self` method: the receiver is reborrowed, not
+    // moved, so the value is still usable after the inner call.
+    expect_stdout(
+        "reborrow_self",
+        "struct Counter { n: i64 }\n\
+         impl Counter {\n\
+             fn bump(&mut self) { self.n = self.n + 1 }\n\
+             fn twice(&mut self) { self.bump()\n self.bump() }\n\
+             fn read(&self) -> i64 { return self.n }\n\
+             fn read_via(&mut self) -> i64 { return self.read() }\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let mut c = Counter { n: 0 }\n\
+             c.twice()\n\
+             println_i64(c.read())\n\
+             println_i64(c.read_via())\n\
+             return 0\n\
+         }",
+        "2\n2\n",
+    );
+}
+
+#[test]
+fn two_assignments_in_one_block_stay_separate() {
+    // Semicolons are optional, so `self.n = self.n + 1` followed by another
+    // assignment must end the first statement: a number is never called.
+    expect_stdout(
+        "two_assignments",
+        "struct Pair { a: i64, b: i64 }\n\
+         impl Pair {\n\
+             fn fill(&mut self) {\n\
+                 self.a = self.a + 1\n\
+                 self.b = self.b + 2\n\
+             }\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let mut p = Pair { a: 0, b: 0 }\n\
+             p.fill()\n\
+             println_i64(p.a)\n\
+             println_i64(p.b)\n\
+             return 0\n\
+         }",
+        "1\n2\n",
+    );
+}
+
+#[test]
+fn an_enum_method_sees_its_type_arguments() {
+    // `instance_of` looks the receiver's arguments up for structs and enums
+    // alike, so a method on `Result<i64, i64>` may return `Option<T>`.
+    expect_stdout(
+        "enum_method_args",
+        "fn checked(n: i64) -> Result<i64, i64> {\n\
+             if n < 0 { return Result::Err(1i64) }\n\
+             return Result::Ok(n)\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let good = checked(4i64).ok()\n\
+             let bad = checked(-4i64).ok()\n\
+             println_i64(good.unwrap_or(0i64))\n\
+             println_i64(bad.unwrap_or(0i64))\n\
+             return 0\n\
+         }",
+        "4\n0\n",
+    );
 }

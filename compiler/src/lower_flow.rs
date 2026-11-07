@@ -205,12 +205,30 @@ impl Lowering<'_> {
             return self.lower_expr(receiver);
         }
         // An expression that is already a reference of the right mutability is
-        // passed through unchanged.
-        let already = matches!(
-            (self.types.kind(receiver.ty), mutable),
-            (TyKind::Ref(_), _) | (TyKind::RefMut(_), true)
-        );
+        // passed through unchanged. A `&mut T` satisfies a `&self` receiver too:
+        // reborrowing it as `&&mut T` would be a different type, and moving it
+        // would make the value unusable after the call.
+        let already = match self.types.kind(receiver.ty) {
+            TyKind::Ref(_) => true,
+            TyKind::RefMut(_) => true,
+            _ => false,
+        };
         if already {
+            // A variable holding the reference is borrowed rather than moved: the
+            // callee sees a fresh borrow that ends with the call.
+            if let HirExprKind::Local(_) = &receiver.kind {
+                let ty = receiver.ty;
+                let tmp = self.temp_place(ty);
+                // A reborrow reads through the reference: the callee wants a `&T`
+                // pointing at the same value, not a `&&T` pointing at the local.
+                let place = self.lower_place(receiver).deref();
+                let is_mut = matches!(self.types.kind(ty), TyKind::RefMut(_));
+                let target_ty = if is_mut { self.types.ref_mut_to(ty) } else { self.types.ref_to(ty) };
+                let slot = self.temp_place(target_ty);
+                self.assign(slot.clone(), Rvalue::Reborrow { mutable: is_mut, place }, e.span);
+                let _ = tmp;
+                return Operand::Copy(slot);
+            }
             return self.lower_expr(receiver);
         }
         let place = self.lower_place(receiver);

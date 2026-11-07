@@ -251,7 +251,20 @@ resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
   `remove_file`, `rename_path`, `create_dir`. A missing file yields a closed
   `File` and a size of `-1` rather than an abort. A short write is retried until
   the whole buffer is out or an error comes back.
-- [ ] `Option`, `Result`, `Iterator` basics.
+- [x] `Option` and `Result` in `stdlib/option.um` — `is_some`, `is_none`,
+  `unwrap_or` on `Option<T>`; `is_ok`, `is_err`, `unwrap_or`, `ok` on
+  `Result<T, E>`. An `Option` with no way to name `T` is a compile error rather
+  than a guess, and a `Result` may name only one of its two parameters.
+- [ ] `Iterator` basics.
+- [ ] `HashMap` in `stdlib/hashmap.um` — written (open addressing, FNV-1a,
+  linear probing, `insert`/`get_or`/`has_key`/`grow`), but **not** in the prelude
+  yet: two parser gaps below still stop it from checking.
+- [ ] Parser: a `let` whose initialiser is `(*p).field as usize == 0` and is
+  followed by `if` on the next line is not separated from the `if`.
+- [ ] Parser: the last two assignments in an `unsafe { .. }` block that ends a
+  function body are read as one statement unless each carries a `;`. An
+  expression statement at the end of a block should be a tail expression only
+  when it can be one; an assignment cannot, so the `;` must not be required.
 - [x] `process` in `stdlib/process.um` — `Args` (from `main`'s `argc`/`argv`),
   `len`, `is_empty`, `program`, `get`, `has_flag`, `value_after`; free functions
   `env`, `env_is_set`, `exit`, `last_error`. A missing argument reads as an empty

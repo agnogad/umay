@@ -52,6 +52,7 @@ impl FnChecker<'_, '_> {
             }
             Some(e) => {
                 let else_ty = e.ty;
+                let _ = &else_ty;
                 if self.cx.cx.is_error(then_ty) || self.cx.cx.is_error(else_ty) {
                     self.cx.cx.error()
                 } else if is_never(&self.cx.cx, then_ty) {
@@ -59,7 +60,19 @@ impl FnChecker<'_, '_> {
                 } else if is_never(&self.cx.cx, else_ty) {
                     then_ty
                 } else if self.cx.types_compatible(then_ty, else_ty) {
-                    then_ty
+                    // A branch that is only a literal has no type of its own to
+                    // keep: `if n == 0 { 8 } else { n * 2 }` is the type of
+                    // `n * 2`, and keeping the literal's `i32` would truncate the
+                    // other branch's value to make the two agree.
+                    let then_var_ty = self.cx.cx.is_integer_var(then_ty);
+                    let else_var_ty = self.cx.cx.is_integer_var(else_ty);
+                    if then_var_ty && !else_var_ty {
+                        else_ty
+                    } else if else_var_ty && !then_var_ty {
+                        then_ty
+                    } else {
+                        then_ty
+                    }
                 } else {
                     let a = self.cx.ty_name(then_ty);
                     let b = self.cx.ty_name(else_ty);
@@ -127,7 +140,18 @@ impl FnChecker<'_, '_> {
     // ---- match -----------------------------------------------------------
 
     pub fn check_match(&mut self, scrutinee: &ast::Expr, arms: &[ast::MatchArm], span: crate::source::Span) -> HirExpr {
-        let scrut = self.check_expr(scrutinee);
+        let mut scrut = self.check_expr(scrutinee);
+        // Matching on a reference inspects the value behind it. Without this a
+        // method taking `&self` could not match on its own receiver, which is the
+        // shape `Option::is_some` has.
+        let pointee = match self.cx.cx.kind(scrut.ty) {
+            crate::types::TyKind::Ref(inner) | crate::types::TyKind::RefMut(inner) => Some(*inner),
+            _ => None,
+        };
+        if let Some(ty) = pointee {
+            let span = scrut.span;
+            scrut = HirExpr { kind: HirExprKind::Deref(Box::new(scrut)), ty, span };
+        }
         let scrut_ty = self.resolve_scrutinee_ty(scrut.ty);
 
         if arms.is_empty() {
@@ -145,7 +169,10 @@ impl FnChecker<'_, '_> {
             self.scopes.push_frame();
             let hir_pattern = self.bind_pattern(&arm.pattern, scrut_ty, false);
             let guard_hir = arm.guard.as_ref().map(|g| self.check_expr(g));
-            let body = self.check_expr(&arm.body);
+            // The type the earlier arms settled on is the best hint the later ones
+            // can have: `Result::Err(_) => Option::None` reads its `T` from the
+            // `Ok` arm above it.
+            let body = self.check_expr_hinted(&arm.body, result_ty);
             self.scopes.pop_frame();
             let body_ty = body.ty;
             result_ty = Some(match result_ty {
@@ -323,8 +350,16 @@ impl FnChecker<'_, '_> {
     // ---- jumps -----------------------------------------------------------
 
     pub fn check_return(&mut self, value: Option<&ast::Expr>, span: crate::source::Span) -> HirExpr {
-        let v = value.map(|e| Box::new(self.check_expr(e)));
         let ret = self.ret_ty;
+        // The return type is a hint: it is what tells `Option::None` which `T` it
+        // is, since the variant itself carries no value to name one.
+        let v = value.map(|e| Box::new(self.check_expr_hinted(e, Some(ret))));
+        // A return type settles a literal: `let x = 8` followed by `return x` from
+        // a function returning `i64` gives `x` the width it is returned at, rather
+        // than leaving it `i32` and letting the call read past it.
+        if let Some(expr) = &v {
+
+        }
         match &v {
             Some(expr) => {
                 if !self.cx.cx.is_error(ret) && !self.cx.cx.is_error(expr.ty) && !self.cx.types_compatible(ret, expr.ty) {

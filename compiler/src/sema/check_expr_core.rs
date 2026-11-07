@@ -44,7 +44,7 @@ impl FnChecker<'_, '_> {
                 HirExpr { kind: HirExprKind::BoolLit(*b), ty, span }
             }
             ast::ExprKind::Ident(name) => self.check_ident(name, span),
-            ast::ExprKind::Path(path) => self.check_path_expr(path, span),
+            ast::ExprKind::Path(path) => self.check_path_expr_hinted(path, span, hint),
             ast::ExprKind::Assign { place, value } => self.check_assign(place, value, span),
             ast::ExprKind::AssignOp { op, place, value } => {
                 // Desugar `x op= y` into `x = x op y`; the binary form carries
@@ -324,6 +324,18 @@ impl FnChecker<'_, '_> {
     }
 
     fn check_path_expr(&mut self, path: &ast::Path, span: crate::source::Span) -> HirExpr {
+        self.check_path_expr_hinted(path, span, None)
+    }
+
+    /// `check_path_expr` with a hint for the case that needs one: a unit variant
+    /// of a generic enum. `Option::None` carries no value, so the only thing that
+    /// can name its `T` is the type the expression is being given.
+    fn check_path_expr_hinted(
+        &mut self,
+        path: &ast::Path,
+        span: crate::source::Span,
+        hint: Option<crate::types::TyId>,
+    ) -> HirExpr {
         // Only enum variants and associated function paths are valid here.
         if path.segments.len() == 2 {
             let second = &path.segments[1];
@@ -348,7 +360,27 @@ impl FnChecker<'_, '_> {
                             );
                             return self.error_hir(span);
                         }
-                        let ty = self.variant_type(def, i as u32);
+                        let enum_name = info.name.clone();
+                        let ty = self.variant_type_hinted(def, hint);
+                        if self.cx.cx.is_error(ty) {
+                            let name = enum_name;
+                            self.push(
+                                Diagnostic::error(
+                                    "E1001",
+                                    format!("cannot infer the type parameter of `{name}`"),
+                                )
+                                .at(span)
+                                .with_cause(
+                                    "this variant carries no value that could name the parameter",
+                                )
+                                .with_explanation(
+                                    "A variant like `Option::None` holds no data, so nothing in \
+                                     the expression says what `T` is. Give the binding or the \
+                                     return type an annotation, as in \
+                                     `let empty: Option<i64> = Option::None`.",
+                                ),
+                            );
+                        }
                         return HirExpr { kind: HirExprKind::UnitVariant { def, index: i as u32 }, ty, span };
                     }
                 }
@@ -381,6 +413,31 @@ impl FnChecker<'_, '_> {
 
     pub(crate) fn variant_type(&mut self, def: crate::types::DefId, _index: u32) -> TyId {
         self.cx.cx.adt(def, Vec::new())
+    }
+
+    /// The type of a unit variant, taking its arguments from `hint` when that is
+    /// the same enum. A non-generic enum needs no hint and ignores one.
+    fn variant_type_hinted(
+        &mut self,
+        def: crate::types::DefId,
+        hint: Option<crate::types::TyId>,
+    ) -> TyId {
+        let Some(info) = self.cx.hir.enums.iter().find(|e| e.def_id == def) else {
+            return self.cx.cx.error();
+        };
+        let arity = info.generics.len();
+        if arity == 0 {
+            return self.cx.cx.adt(def, Vec::new());
+        }
+        if let Some(ty) = hint {
+            if let crate::types::TyKind::Adt { def: hdef, args } = self.cx.cx.kind(ty) {
+                if *hdef == def && args.len() == arity {
+                    let args = args.clone();
+                    return self.cx.cx.adt(def, args);
+                }
+            }
+        }
+        self.cx.cx.error()
     }
 }
 

@@ -1,0 +1,252 @@
+// A string-keyed hash map.
+//
+// Hash maps matter more than they look: without one, every lookup in a program is
+// a loop over a list, and a web handler that reads three headers writes three
+// loops. This one is open addressing with linear probing — the simplest scheme
+// that is not a linked list, and the one whose failure mode is easiest to see.
+//
+// Keys are NUL-terminated byte strings compared by content, so `"GET"` and a key
+// read out of a request buffer are the same key. Values are `i64`, which covers an
+// index, a length, a count and a pointer all at once.
+
+// A slot is empty when its key pointer is null.
+struct Entry {
+    key: *const u8,
+    value: i64,
+}
+
+struct HashMap {
+    // `capacity` slots of `Entry`, allocated as one block.
+    slots: *mut u8,
+    capacity: usize,
+    len: usize,
+    // Starts at 2 and doubles, so a full table is never reached.
+    mask: usize,
+}
+
+impl HashMap {
+    // An empty map. No memory is allocated until the first insertion.
+    fn new() -> HashMap {
+        return HashMap {
+            slots: unsafe { 0 as usize as *mut u8 },
+            capacity: 0 as usize,
+            len: 0 as usize,
+            mask: 0 as usize,
+        }
+    }
+
+    // How many keys are stored.
+    fn len(&self) -> usize {
+        return self.len
+    }
+
+    // True when the map holds no keys.
+    fn is_empty(&self) -> bool {
+        return self.len == 0
+    }
+
+    // Associates `key` with `value`, replacing any value already stored.
+    fn insert(&mut self, key: *const u8, value: i64) {
+        if self.capacity == 0 {
+            self.grow()
+        }
+        // Keep the load factor under one half: with linear probing a full table
+        // makes every miss walk the whole array.
+        if (self.len + 1) * 2 > self.capacity {
+            self.grow()
+        }
+        let index = self.find_slot(key)
+        let entry = self.entry_at(index)
+        unsafe {
+            let empty = (*entry).key as usize == 0;
+            if empty {
+                self.len = self.len + 1;
+                (*entry).key = key;
+            }
+            (*entry).value = value;
+        }
+    }
+
+    // The value stored for `key`, or `fallback` when the key is absent.
+    fn get_or(&self, key: *const u8, fallback: i64) -> i64 {
+        return match self.find(key) {
+            Option::Some(index) => self.value_at(index),
+            Option::None => fallback,
+        }
+    }
+
+    // The value stored in the entry at `index`.
+    fn value_at(&self, index: usize) -> i64 {
+        let entry = self.entry_at(index)
+        unsafe {
+            return (*entry).value
+        }
+    }
+
+    // True when `key` is present.
+    fn has_key(&self, key: *const u8) -> bool {
+        return match self.find(key) {
+            Option::Some(_) => true,
+            Option::None => false,
+        }
+    }
+
+    // The number of slots the table has.
+    fn slot_count(&self) -> usize {
+        return self.capacity
+    }
+
+    // Releases the storage. The map must not be used afterwards.
+    fn release(&self) {
+        if self.capacity > 0 {
+            dealloc(self.slots)
+        }
+    }
+
+    // The index holding `key`, or `None`.
+    //
+    // A missing key and a slot holding a different key are told apart by the slot
+    // being empty: with linear probing an absent key always ends at an empty slot,
+    // which is why a table may never be completely full.
+    fn find(&self, key: *const u8) -> Option<usize> {
+        if self.capacity == 0 {
+            return Option::None
+        }
+        let mut index = hash_key(key) & self.mask
+        let mut probes = 0
+        while probes < self.capacity {
+            let entry = self.entry_at(index)
+            let occupied = unsafe { (*entry).key as usize != 0 }
+            if !occupied {
+                return Option::None
+            }
+            let stored = unsafe { (*entry).key }
+            if keys_equal(stored, key) {
+                return Option::Some(index)
+            }
+            index = (index + 1) & self.mask
+            probes = probes + 1
+        }
+        return Option::None
+    }
+
+    // The index where `key` is stored or where it would be inserted.
+    //
+    // An empty table is refused: growing happens before this is called.
+    fn find_slot(&self, key: *const u8) -> usize {
+        let mut index = hash_key(key) & self.mask
+        while true {
+            let entry = self.entry_at(index)
+            let occupied = unsafe { (*entry).key as usize != 0 }
+            if !occupied {
+                return index
+            }
+            let stored = unsafe { (*entry).key }
+            if keys_equal(stored, key) {
+                return index
+            }
+            index = (index + 1) & self.mask
+        }
+        return 0 as usize
+    }
+
+    // The entry at `index`.
+    fn entry_at(&self, index: usize) -> *mut Entry {
+        unsafe {
+            return (self.slots as usize + index * sizeof(Entry)) as *mut Entry
+        }
+    }
+
+    // Doubles the table and moves every live key into it.
+    fn grow(&mut self) {
+        // Written as an `if` statement rather than an `if` expression: an `if`
+        // whose branches are both bare literals has no width of its own yet, and a
+        // binding that takes one and later meets a wider type reads past it.
+        let mut new_capacity = self.capacity * 2
+        if self.capacity == 0 {
+            new_capacity = 8
+        }
+        let new_slots = alloc(new_capacity * sizeof(Entry))
+        unsafe {
+            let mut i = 0
+            while i < new_capacity * sizeof(Entry) {
+                write_byte((new_slots as usize + i) as *mut u8, 0u8)
+                i = i + 1
+            }
+        }
+        let old_slots = self.slots
+        let old_capacity = self.capacity
+        self.slots = new_slots
+        self.capacity = new_capacity
+        self.mask = new_capacity - 1
+        // `len` is recomputed as the old keys are reinserted; the old count is not
+        // trusted because `insert` increments it.
+        let carried = self.len
+        self.len = 0
+        if old_capacity > 0 {
+            let mut i = 0
+            while i < old_capacity {
+                let old = unsafe { (old_slots as usize + i * sizeof(Entry)) as *mut Entry }
+                let key = unsafe { (*old).key }
+                let present = unsafe { key as usize != 0 }
+                if present {
+                    let value = unsafe { (*old).value }
+                    let index = self.find_slot(key)
+                    let fresh = self.entry_at(index)
+                    unsafe {
+                        (*fresh).key = key;
+                        (*fresh).value = value;
+                    }
+                    self.len = self.len + 1
+                }
+                i = i + 1
+            }
+            dealloc(old_slots)
+        }
+        let _ = carried
+    }
+}
+
+// A hash of a NUL-terminated string.
+//
+// FNV-1a: one multiply and one xor per byte, which is cheap and spreads
+// short keys — the ones a header table holds — well enough that linear probing
+// stays short.
+fn hash_key(text: *const u8) -> usize {
+    let mut hash: usize = 2166136261
+    let mut i: usize = 0
+    while true {
+        let byte = read_byte_at(text, i)
+        if byte == 0u8 {
+            return hash
+        }
+        hash = hash ^ (byte as usize)
+        hash = hash * 16777619
+        i = i + 1
+    }
+    return hash
+}
+
+// Byte `index` of a NUL-terminated string.
+fn read_byte_at(text: *const u8, index: usize) -> u8 {
+    unsafe {
+        return read_byte((text as usize + index) as *const u8)
+    }
+}
+
+// True when two NUL-terminated strings hold the same bytes.
+fn keys_equal(a: *const u8, b: *const u8) -> bool {
+    let mut i: usize = 0
+    while true {
+        let left = read_byte_at(a, i)
+        let right = read_byte_at(b, i)
+        if left != right {
+            return false
+        }
+        if left == 0u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
