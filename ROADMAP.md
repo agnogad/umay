@@ -279,11 +279,15 @@ resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
 
 Measured against a working router probe, in the order the gaps bite:
 
-- [ ] Array to raw-pointer conversion (`routes as *const Route`) — E1013 today,
-  so a table of routes has to be walked with `sizeof` arithmetic by hand.
-- [ ] `str`/`*const u8` bridging in both directions. A string literal cannot be
-  handed to a C-shaped API without a cast, and a C string cannot be printed
-  except byte by byte.
+- [x] Array to raw-pointer conversion (`routes as *const Route`). Lowering
+  takes the array's address rather than trying to move the value.
+- [x] `str`/`*const u8` bridging. `&str` to a byte pointer needs nothing special
+  (it already is one); the reverse needs `unsafe`, because nothing checks that
+  the bytes are NUL-terminated UTF-8.
+- [ ] Array pointer arithmetic with `sizeof` in a loop (`(p as usize + i *
+  sizeof(Route)) as *const Route`) still crashes when the resulting pointer is
+  read through a helper function. Worked around in probes by walking a
+  `HashMap` of paths instead.
 - [ ] A byte-slice type that carries its length, so a request body is one value
   instead of a pointer plus a manual length.
 - [ ] Header parsing and a request/response type — library work, not language

@@ -397,6 +397,12 @@ impl FnChecker<'_, '_> {
             // `&str` is a NUL-terminated byte pointer, so viewing it as one is
             // a real conversion rather than a reinterpretation.
             || (is_str_ref(&self.cx.cx, from_concrete) && is_byte_ptr(&self.cx.cx, to))
+            // The reverse: a byte pointer whose bytes are NUL-terminated UTF-8
+            // may be viewed as a `&str`. Nothing checks either condition, so it
+            // needs `unsafe`.
+            || (is_byte_ptr(&self.cx.cx, from_concrete)
+                && is_str_ref(&self.cx.cx, to)
+                && self.unsafe_depth > 0)
             // An integer may be turned into a pointer, which is how a null or a
             // known address is written. Like the reverse, it needs `unsafe`.
             || (is_pointer_like(&self.cx.cx, to)
@@ -409,7 +415,11 @@ impl FnChecker<'_, '_> {
             // permission change, not a layout change, and C APIs are the usual
             // reason to need it. No `unsafe` here, because the cast itself cannot
             // break any rule the pointer already had.
-            || (is_raw_ptr(&self.cx.cx, from_concrete) && is_raw_ptr(&self.cx.cx, to));
+            || (is_raw_ptr(&self.cx.cx, from_concrete) && is_raw_ptr(&self.cx.cx, to))
+            // An array may be viewed as a pointer to its first element, which is
+            // how a static table of routes or a byte buffer reaches an API that
+            // takes a pointer.
+            || (is_raw_ptr(&self.cx.cx, to) && is_array_of(&self.cx.cx, from_concrete, to));
         if !allowed {
             let f = self.cx.ty_name(from_concrete);
             let t = self.cx.ty_name(to);
@@ -462,6 +472,17 @@ fn is_pointer_like(types: &crate::types::TyCtxt, ty: TyId) -> bool {
 
 /// True for `&str`, which the backend represents as a NUL-terminated byte
 /// pointer.
+fn is_array_of(types: &crate::types::TyCtxt, from: TyId, to: TyId) -> bool {
+    let TyKind::Array { elem, .. } = types.kind(from) else {
+        return false;
+    };
+    let pointed = match types.kind(to) {
+        TyKind::RawPtr(inner) | TyKind::RawPtrMut(inner) => *inner,
+        _ => return false,
+    };
+    *elem == pointed
+}
+
 fn is_str_ref(types: &crate::types::TyCtxt, ty: TyId) -> bool {
     match types.kind(ty) {
         TyKind::Ref(inner) | TyKind::RefMut(inner) => matches!(types.kind(*inner), TyKind::Str),

@@ -1364,3 +1364,25 @@ fn a_hash_map_grows_past_its_first_capacity() {
         "6\n1\n6\n",
     );
 }
+
+
+#[test]
+fn a_byte_pointer_round_trips_through_a_string() {
+    // `&str` is a NUL-terminated byte pointer, so both directions are real
+    // conversions rather than reinterpretations.
+    expect_stdout(
+        "pointer_string_roundtrip",
+        "extern fn strlen(s: *const u8) -> usize\n\
+         fn length_of(p: *const u8) -> usize { return strlen(p) }\n\
+         fn show(p: *const u8) { println(unsafe { p as &str }) }\n\
+         fn main() -> i32 {\n\
+             let text = \"merhaba\"\n\
+             let bytes = text as *const u8\n\
+             println_i64(length_of(bytes) as i64)\n\
+             show(bytes)\n\
+             return 0\n\
+         }",
+        "7\nmerhaba\n",
+    );
+}
+
