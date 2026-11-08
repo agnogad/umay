@@ -77,7 +77,16 @@ impl CacheKey {
         // The compiler's own identity. A change to the backend must not reuse the
         // previous backend's output, and a cache shared between two compiler
         // versions would do exactly that.
+        //
+        // The semantic version alone is not enough: editing the backend without
+        // bumping the version left the two sharing every key, so a working
+        // compiler served the broken assembly of the one before it. That is
+        // exactly the failure this field exists to prevent, and it happened
+        // because a `CARGO_PKG_VERSION` string only changes when someone
+        // remembers to change it. Folding in a fingerprint of the running binary
+        // makes any code change observable, whether or not the version moved.
         field("compiler", env!("CARGO_PKG_VERSION").as_bytes());
+        field("compiler_binary", compiler_fingerprint().as_bytes());
         field("artifact", artifact.tag().as_bytes());
         field("target", target_triple().as_bytes());
         field("opt_level", opt_level.as_bytes());
@@ -96,6 +105,7 @@ impl CacheKey {
     pub fn derivation() -> Vec<&'static str> {
         vec![
             "compiler version",
+            "compiler binary fingerprint",
             "artifact kind",
             "target triple",
             "optimisation level",
@@ -104,6 +114,46 @@ impl CacheKey {
             "named extra inputs (the runtime's source, for a link)",
         ]
     }
+}
+
+/// A fingerprint of the running compiler binary.
+///
+/// The semantic version is a claim about what the compiler is; this is what it
+/// actually is on disk. Two builds of the same version number that differ in
+/// code must not share a cache entry, and they will not if their binaries
+/// differ in length or modification time. The value is computed once and
+/// cached: `derive` runs for every artifact of every build, and hashing the
+/// whole binary each time would cost more than the build it protects.
+fn compiler_fingerprint() -> &'static str {
+    use std::sync::OnceLock;
+    static FINGERPRINT: OnceLock<String> = OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        // The running executable is the compiler: the library and the binary are
+        // built together, so the binary's identity is the code's identity. If the
+        // path cannot be read (an unusual embedding), fall back to the version
+        // string's own bytes with a marker so the value is still stable and
+        // distinct from a real fingerprint.
+        let path = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(_) => return format!("version-only:{}", env!("CARGO_PKG_VERSION")),
+        };
+        match std::fs::metadata(&path) {
+            Ok(meta) => {
+                // Length and modification time, as nanoseconds since the epoch.
+                // Either changing means the binary was relinked, which after any
+                // edit to the compiler's source it was.
+                let len = meta.len();
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                format!("{}:{}", len, mtime)
+            }
+            Err(_) => format!("version-only:{}", env!("CARGO_PKG_VERSION")),
+        }
+    })
 }
 
 /// What the backend targets. Only one exists today; the field is in the key so
@@ -232,6 +282,23 @@ mod tests {
         let a = CacheKey::derive(Artifact::ProgramAsm, "O2", b"same", &[]);
         let b = CacheKey::derive(Artifact::RuntimeAsm, "O2", b"same", &[]);
         assert_ne!(a.hash, b.hash);
+    }
+
+    #[test]
+    fn the_compiler_binary_fingerprint_is_present_and_stable() {
+        // The semantic version alone left two builds of the same version sharing
+        // every cache key even when their code differed, so a fixed compiler
+        // served the broken assembly of the one before it. The fingerprint is
+        // what makes a code change observable. It must be non-empty and the same
+        // across calls within one process.
+        let first = compiler_fingerprint();
+        let second = compiler_fingerprint();
+        assert!(!first.is_empty(), "the fingerprint must not be empty");
+        assert_eq!(first, second, "the fingerprint must be stable within a process");
+        assert!(
+            CacheKey::derivation().contains(&"compiler binary fingerprint"),
+            "doctor must list the fingerprint among the key's inputs"
+        );
     }
 
     #[test]

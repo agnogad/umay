@@ -539,6 +539,16 @@ pub struct MachineFunction {
     /// True when the function has a `ret` in the ordinary flow, so a trailing
     /// `ret` is not needed.
     pub ret_ty: TyId,
+    /// Physical registers the allocator must not hand to any virtual register.
+    ///
+    /// A shift whose count is a variable places that count in `%cl` and then
+    /// shifts a result register by it. If the allocator gives the result register
+    /// `%rcx`, the result overwrites the count before the shift reads it. The
+    /// selector does not know which virtual register the result will become, so
+    /// it reserves `%rcx` for the whole function instead, which costs one
+    /// register in functions that shift by a variable and nothing in functions
+    /// that do not.
+    pub reserved: Vec<u8>,
     /// The MIR local each stack slot belongs to, for debugging.
     pub local_slots: Vec<(LocalId, i64)>,
     /// Symbols this function references, for the object file's relocations.

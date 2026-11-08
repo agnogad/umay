@@ -326,11 +326,28 @@ fn print_alu(op: AluOp, width: RegWidth, src: &Operand, dst: &Operand) -> String
         AluOp::And => format!("and{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
         AluOp::Or => format!("or{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
         AluOp::Xor => format!("xor{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
-        AluOp::Shl => format!("shl{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
-        AluOp::Shr => format!("shr{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
-        AluOp::Sar => format!("sar{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
+        // A shift's count is the only operand x86_64 reads from `cl`: even at a
+        // wider operation (`sarl`), the low byte `%cl` is the register the CPU
+        // consults, and `sarl %ecx, %ecx` is rejected by the assembler. Printing
+        // the count as `%cl` regardless of the operation width is what makes the
+        // instruction legal.
+        AluOp::Shl => format!("shl{} {}, {}", width.suffix(), shift_count_str(src), op_str(dst, width)),
+        AluOp::Shr => format!("shr{} {}, {}", width.suffix(), shift_count_str(src), op_str(dst, width)),
+        AluOp::Sar => format!("sar{} {}, {}", width.suffix(), shift_count_str(src), op_str(dst, width)),
         AluOp::Neg => format!("neg{} {}", width.suffix(), op_str(dst, width)),
         AluOp::Not => format!("not{} {}", width.suffix(), op_str(dst, width)),
+    }
+}
+
+/// Prints a shift's count operand.
+///
+/// A shift count is an immediate or the low byte of `%rcx`: the hardware reads
+/// `%cl` whatever the operation's width, so a register count must never be
+/// printed at the operation's width (`%ecx` is not a legal shift count).
+fn shift_count_str(op: &Operand) -> String {
+    match op {
+        Operand::Reg(reg) => format!("%{}", reg.name(RegWidth::W8)),
+        other => op_str(other, RegWidth::W8),
     }
 }
 

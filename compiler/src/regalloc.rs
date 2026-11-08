@@ -110,7 +110,11 @@ pub fn allocate(function: &mut MachineFunction) -> Allocation {
     // The classic scan: `active` holds intervals currently occupying a register,
     // kept sorted by end point so the longest one is easy to evict.
     let mut active: Vec<(usize, u32, u8)> = Vec::new(); // (end, vreg, reg)
-    let mut free: Vec<u8> = ALLOCATABLE.to_vec();
+    let mut free: Vec<u8> = ALLOCATABLE
+        .iter()
+        .copied()
+        .filter(|r| !function.reserved.contains(r))
+        .collect();
     let mut locations: BTreeMap<u32, Location> = BTreeMap::new();
     let mut spilled: Vec<u32> = Vec::new();
     let mut used_callee_saved: BTreeSet<u8> = BTreeSet::new();

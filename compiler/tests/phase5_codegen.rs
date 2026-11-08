@@ -113,6 +113,49 @@ fn multiplication_and_subtraction() {
     expect_exit("mul_sub", "fn main() -> i32 { return 6 * 7 - 2 }", 40);
 }
 
+#[test]
+fn a_constant_shift_count_becomes_an_immediate() {
+    // `sar`/`shl`/`shr` take a constant count as an immediate. The count used to
+    // be materialised into `%rcx` and printed at the operation's width --
+    // `sarl %ecx, %ecx` -- which the assembler rejects outright, so a program
+    // that merely shifted by a literal failed to assemble.
+    expect_exit("shr_const", "fn main() -> i32 { return (1000 >> 8) & 0xff }", 3);
+}
+
+#[test]
+fn a_variable_shift_count_lives_in_cl() {
+    // A variable count must be in `%cl`, and the result register must not be
+    // allocated to `%rcx` or it overwrites the count before the shift reads it.
+    let src = "fn main() -> i32 {\n    let x: i32 = 1000\n    let n: i32 = 8\n    return (x >> n) & 0xff\n}";
+    expect_exit("shr_var", src, 3);
+}
+
+#[test]
+fn a_variable_left_shift_does_not_lose_its_count() {
+    // `12 << 3` is 96. This exact shape put the count in `%cl`, then allocated the
+    // result to `%rcx`, which overwrote the count with `12`, so the machine
+    // shifted by `12 & 31` instead of 3 and the result was zero. The whole value
+    // is returned rather than masked, so the shift amount is checked, not just
+    // the low byte.
+    let src = "fn main() -> i32 {\n    let a: i32 = 12\n    let b: i32 = 3\n    return a << b\n}";
+    expect_exit("shl_var_collision", src, 96);
+}
+
+#[test]
+fn shifts_in_both_directions_keep_their_values() {
+    // Left and right shifts sharing their count, so a wrong register allocation
+    // in one is visible in the other.
+    let src = "fn main() -> i32 {\n    let x: i32 = 4096\n    let n: i32 = 4\n    let a: i32 = x >> n\n    let b: i32 = x << n\n    return (a + b) & 0xff\n}";
+    expect_exit("shift_both", src, 0);
+}
+
+#[test]
+fn an_arithmetic_shift_keeps_the_sign() {
+    // A negative value shifted right is an arithmetic shift, so it stays
+    // negative: `-16 >> 2` is -4, and `-4 + 10` is 6.
+    expect_exit("shr_signed", "fn main() -> i32 { return (-16 >> 2) + 10 }", 6);
+}
+
 // ---------------------------------------------------------------------------
 // Control flow
 // ---------------------------------------------------------------------------

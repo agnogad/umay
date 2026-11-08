@@ -43,6 +43,10 @@ pub struct Isel<'a, 't> {
     /// The symbol each function id is called by, so a `Constant::Fn` callee
     /// becomes a direct call instead of an unsupported indirect one.
     pub(crate) fn_symbols: &'a std::collections::HashMap<crate::hir::FnId, String>,
+    /// Physical registers the allocator must keep clear of virtual registers.
+    /// `%rcx` is added when the function shifts by a variable count, which places
+    /// the count in `%cl`.
+    pub(crate) reserved: Vec<u8>,
 }
 
 /// Selects instructions for `body`.
@@ -62,6 +66,7 @@ pub fn select<'t>(
         block_labels,
         symbols: Vec::new(),
         fn_symbols,
+        reserved: Vec::new(),
     };
     for (index, block) in body.blocks.iter().enumerate() {
         // Unreachable blocks were emptied by optimisation. Emitting them would
@@ -135,6 +140,7 @@ pub fn select<'t>(
         }
     }
 
+    let reserved = isel.reserved_registers();
     Ok(MachineFunction {
         // The body's name is unqualified; the symbol is what reaches the linker,
         // and a method's carries its type's name so it cannot take over a C
@@ -148,6 +154,7 @@ pub fn select<'t>(
         virtual_regs: Vec::new(),
         stack_size: isel.frame.local_bytes,
         ret_ty: body.ret_ty,
+        reserved,
         local_slots: isel
             .frame
             .slots
@@ -175,6 +182,17 @@ impl<'a, 't> Isel<'a, 't> {
         let r = Reg::Virtual(self.next_vreg);
         self.next_vreg += 1;
         r
+    }
+
+    /// Physical registers the allocator must not hand to a virtual register.
+    ///
+    /// `%rcx` is reserved when the function shifts by a variable count: the count
+    /// is placed in `%cl`, and the shift's result register must not be `%rcx` or
+    /// it would overwrite the count before the shift read it. The allocator picks
+    /// the result's register later, so the only safe place to rule `%rcx` out is
+    /// here, before allocation runs.
+    pub(crate) fn reserved_registers(&self) -> Vec<u8> {
+        self.reserved.clone()
     }
 
     pub(crate) fn emit(&mut self, inst: Inst) {

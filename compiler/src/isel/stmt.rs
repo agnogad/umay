@@ -437,6 +437,36 @@ impl<'a, 't> Isel<'a, 't> {
 
     /// Selects a shift, moving the count into `cl` first.
     fn shift(&mut self, dst: &Place, alu: AluOp, left: Reg, rhs: &Operand, width: RegWidth) -> Result<(), String> {
+        // A constant count needs no register at all, and x86_64 spells it as an
+        // immediate (`sarl $8, %ecx`). Routing it through `cl` was not just
+        // wasteful: the count is copied into `cl` and then `result` can be
+        // allocated to `%rcx`, which overwrites the count before the shift reads
+        // it. The immediate path has neither problem.
+        if let Operand::Constant(c) = rhs {
+            let (value, _) = crate::isel::constant_value(c)?;
+            let result = self.vreg();
+            self.emit(Inst::Move {
+                kind: MoveKind::Move(width),
+                src: MOperand::Reg(left),
+                dst: MOperand::Reg(result),
+            });
+            self.emit(Inst::Alu {
+                op: alu,
+                width,
+                src: MOperand::Imm(value),
+                dst: MOperand::Reg(result),
+            });
+            return self.store_place(dst, MOperand::Reg(result));
+        }
+
+        // A variable count must live in `cl`. The result register must not be
+        // `%rcx`, or moving `left` into it overwrites the count before the shift
+        // reads it -- `12 << n` became a shift by `12 & 31`. The allocator decides
+        // the result's register after this point, so `%rcx` is reserved for the
+        // whole function; the selector cannot pin a virtual register here.
+        self.reserved.push(1);
+        self.reserved.sort_unstable();
+        self.reserved.dedup();
         let count = self.operand_to_reg(rhs)?;
         let cl = Reg::Phys(1);
         self.emit(Inst::Move {
