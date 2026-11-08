@@ -50,6 +50,9 @@ pub struct Parser {
     /// ambiguity the same way; without it, `y { a }` parses as a struct literal
     /// and the `else` that follows becomes a syntax error.
     no_struct_literal: bool,
+    /// Set once the nesting limit has been reported, so the cascade of recovery
+    /// errors that follows is not printed on top of it.
+    too_deep: bool,
 }
 
 const MAX_DEPTH: usize = 256;
@@ -68,6 +71,7 @@ impl Parser {
             diagnostics: Vec::new(),
             depth: 0,
             no_struct_literal: false,
+            too_deep: false,
         }
     }
 
@@ -193,6 +197,11 @@ impl Parser {
         } else {
             let found = self.kind().describe();
             let sp = self.span();
+            // Past the nesting limit every expected delimiter is a consequence
+            // of the one error already reported, not a second problem.
+            if self.too_deep {
+                return None;
+            }
             self.diagnostics.push(
                 Diagnostic::error(code, format!("expected {} {}, found {}", kind.describe(), context, found))
                     .at(sp)
@@ -315,12 +324,22 @@ impl Parser {
 
     fn enter(&mut self, span: Span) -> bool {
         if self.depth >= MAX_DEPTH {
-            self.diagnostics.push(
-                Diagnostic::error("E0052", "expression or type nesting is too deep")
-                    .at(span)
-                    .with_cause(format!("nesting exceeded {} levels", MAX_DEPTH))
-                    .with_explanation("UMAY limits nesting depth to keep compilation bounded and predictable."),
-            );
+            // Reported once. The remaining input is still full of closing
+            // delimiters that no longer match anything, so reporting recovery
+            // errors too would print one real complaint followed by hundreds of
+            // consequences of it -- 256 of them for 5000 nested parentheses,
+            // burying the one line the author needs to read.
+            if !self.too_deep {
+                self.too_deep = true;
+                self.diagnostics.push(
+                    Diagnostic::error("E0052", "expression or type nesting is too deep")
+                        .at(span)
+                        .with_cause(format!("nesting exceeded {} levels", MAX_DEPTH))
+                        .with_explanation(
+                            "UMAY limits nesting depth to keep compilation bounded and predictable.",
+                        ),
+                );
+            }
             return false;
         }
         self.depth += 1;

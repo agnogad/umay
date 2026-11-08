@@ -592,7 +592,18 @@ the same input produce identical artifacts.
 
 ## Phase 9 — Stabilization · planned
 
-- Extended test corpora, property-based and fuzz testing at each phase boundary.
+- [x] Extended test corpora and fuzzing of the parser. Random token soup, deep
+  nesting, unterminated literals and multi-megabyte numbers are all diagnostics,
+  never panics -- which matters because the language server checks a file on
+  every keystroke and therefore sees every half-typed state.
+- [x] Two problems the fuzzing found. Past the nesting limit the parser kept
+  reporting every unclosed delimiter as it unwound: 5000 nested parentheses gave
+  one real error followed by 256 consequences of it. And a program with no
+  `main` built cleanly until `collect2` said "undefined reference to `main`",
+  which names an object file rather than the author's program and arrives
+  several stages too late. Both are now one clear message.
+- [ ] Property-based testing beyond the parser. The type checker and the backend
+  have no equivalent harness yet.
 - [x] Benchmarks of clean time, incremental time, compiler RSS and binary size,
   recorded in `docs/measurements.md` with the command that produced them. The
   numbers changed a decision: the cache saves about 0.01s of a 0.21s build

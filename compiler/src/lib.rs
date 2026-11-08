@@ -108,6 +108,19 @@ pub fn metadata_source(
     Ok(symbols)
 }
 
+/// Whether a parsed program declares a function called `main` at the top level.
+///
+/// A program needs one to be linked, and the linker's way of saying so is
+/// "undefined reference to `main`" from `collect2`, several stages after the
+/// author could do anything about it. Asking here turns that into a diagnostic
+/// about their source.
+pub fn declares_main(program: &ast::Program) -> bool {
+    program.items.iter().any(|item| match item {
+        ast::Item::Fn(f) => f.name == "main",
+        _ => false,
+    })
+}
+
 /// Runs the lexer and parser over one in-memory source file.
 pub fn parse_source(name: impl Into<String>, text: impl Into<String>) -> (FrontendOutput, SourceMap) {
     let mut map = SourceMap::new();

@@ -790,6 +790,25 @@ fn report_warnings(diags: &Diagnostics, map: &SourceMap, opts: &Options) {
     }
 }
 
+/// Whether `text` declares `main`, directly or in a module it includes.
+///
+/// Best-effort in the same way the cache key is: a source that does not parse has
+/// a parse error to report, and that error is the one worth printing.
+fn names_a_main(text: &str, path: &Path) -> bool {
+    let (out, mut map) = umayc::parse_source(path.to_string_lossy().into_owned(), text.to_string());
+    if out.diagnostics.has_errors() {
+        // The parse error is the real problem; let codegen report it with its
+        // usual care rather than adding a second complaint about `main`.
+        return true;
+    }
+    let (program, module_diagnostics) =
+        umayc::modules::load_from_entry(out.program, path, &mut map);
+    if module_diagnostics.has_errors() {
+        return true;
+    }
+    umayc::declares_main(&program)
+}
+
 /// The source text of every module `text` would load, for the cache key.
 ///
 /// Best-effort on purpose: the frontend reports the error properly, and a cache
@@ -871,6 +890,18 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     // the previous compile's exact answer. A miss is the normal first build.
     let cache = umayc::build::Cache::open();
     let level = opt_level_name(opts.opt_level);
+    // A program with no `main` cannot be linked, and the linker's way of saying
+    // so is "undefined reference to `main`" from `collect2` after the assembler
+    // has already run. Asking about the source here makes it a diagnostic about
+    // the program instead of a message about an object file.
+    if !names_a_main(&text, path) {
+        eprintln!(
+            "umay: `{}` has no `main` function\n  a program needs one to be linked and run",
+            file
+        );
+        return exit::COMPILE_ERROR;
+    }
+
     // The key covers every file that goes into the assembly, not just the entry
     // point. Keying on the entry alone let an edited module reuse the previous
     // assembly: the program silently kept its old behaviour.
