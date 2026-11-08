@@ -189,15 +189,16 @@ a code example. The database is a static table with a unit test asserting:
 | `1` | at least one error diagnostic |
 | `2` | usage error (bad flags, missing arguments, unknown command) |
 | `3` | I/O error (unreadable file, unwritable cache) |
-| `4` | command recognised but not implemented in this build |
+| `4` | retired (no command exits with it any more) |
+| `5` | code generation failed (backend error, assembler rejected the output) |
 
 Warnings never change the exit code.
 
 ## 9. Not yet implemented
 
 - `--output-format github` / `sarif` emitters,
-- diagnostics on multi-file compilation with entry-point resolution,
-- LSP diagnostic publication (Phase 7),
 - rustc-style `--error-format=short`.
 
-These are additive and do not affect the version 1 schema.
+These are additive and do not affect the version 1 schema. Multi-file
+compilation with entry-point resolution (modules) and LSP diagnostic publication
+are implemented and covered by tests.

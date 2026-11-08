@@ -123,7 +123,7 @@ umay clean                     # remove dist/ and the external cache
 ```
 
 Exit codes are stable: `0` success, `1` compile error, `2` usage error,
-`3` I/O error, `4` not implemented (used by `build`, `run`, `fmt`, `lint`, `lsp`).
+`3` I/O error, `4` retired (no command uses it), `5` code generation failed.
 
 ## Project layout
 
@@ -168,13 +168,15 @@ Cranelift.
 
 | Document | Contents |
 |----------|----------|
-| [docs/language-specification.md](docs/language-specification.md) | Normative syntax and semantics, v0.1 |
+| [docs/language-specification.md](docs/language-specification.md) | Normative syntax and semantics, v1.0 |
 | [docs/type-system.md](docs/type-system.md) | Types, inference, generics, traits |
 | [docs/memory-model.md](docs/memory-model.md) | Ownership, borrowing, lifetimes, destruction |
 | [docs/compiler-architecture.md](docs/compiler-architecture.md) | Pipeline, modules, interfaces |
 | [docs/diagnostics.md](docs/diagnostics.md) | Codes, schema, JSON contract |
 | [docs/build-system.md](docs/build-system.md) | Manifest, caching, incremental builds |
 | [docs/measurements.md](docs/measurements.md) | Recorded timings, sizes, and what they say |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in each release |
+| [RELEASING.md](RELEASING.md) | How a release is cut and verified |
 | [docs/adr/](docs/adr/) | Architecture Decision Records |
 
 ## Building and testing
@@ -194,6 +196,12 @@ on truncated input, and never panics on mutated input.
 See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: no phase may claim a
 feature is implemented unless tests verify it, and memory safety is never
 weakened to simplify an implementation.
+
+## Releasing
+
+See [RELEASING.md](RELEASING.md). `scripts/release.sh` refuses to build an
+artifact from a dirty tree, a failing test suite or a draft specification, and
+produces a stripped, checksummed tarball under `out/`.
 
 ## License
 

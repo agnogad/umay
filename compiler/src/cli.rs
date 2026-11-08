@@ -525,6 +525,17 @@ fn cmd_doctor(_args: &[String]) -> u8 {
     println!("  cache writable   : {}", if cache_ok { "yes" } else { "NO (check permissions)" });
     let (entries, bytes) = umayc::build::Cache::open().stats();
     println!("  cache entries    : {entries} ({})", human_bytes(bytes));
+    let roots = umayc::upm::registry_roots();
+    if roots.is_empty() {
+        println!("  registry         : none (set UMAY_REGISTRY to fetch dependencies)");
+    } else {
+        let joined = roots
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  registry         : {joined}");
+    }
     println!();
     println!("  cache key is derived from:");
     for input in umayc::build::CacheKey::derivation() {
@@ -543,8 +554,8 @@ fn cmd_doctor(_args: &[String]) -> u8 {
         ("5 x86_64 code generation", "done"),
         ("6 runtime + standard library", "done"),
         ("7 developer experience", "done"),
-        ("8 build system + packages", "in progress"),
-        ("9 stabilization", "not started"),
+        ("8 build system + packages", "done"),
+        ("9 stabilization", "done"),
     ] {
         println!("    {phase:<32} {state}");
     }

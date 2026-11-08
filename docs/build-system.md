@@ -80,6 +80,7 @@ whether it is writable. `umay clean` clears it along with `dist/`.
 ```text
 key = H(
     compiler_version,
+    compiler_binary_fingerprint,
     compiler_backend,
     target_triple,
     opt_level,
@@ -91,6 +92,17 @@ key = H(
     relevant_flags[],           // sorted
 )
 ```
+
+The `compiler_version` string is a claim about what the compiler is; the
+`compiler_binary_fingerprint` is what it actually is on disk. The version alone
+was not enough: editing the backend without bumping the version left the old and
+new compiler sharing every key, so the rebuilt compiler served the previous
+one's broken assembly from the cache -- the exact failure the `compiler` field
+exists to prevent, defeated by a string that only changes when someone remembers
+to change it. The fingerprint is the running executable's length and
+modification time, computed once per process. A rebuild relinks the binary and
+so changes the key; a no-op build relinks nothing and keeps it, so
+incrementality survives.
 
 `H` is SHA-256, implemented in `compiler/src/sha256.rs` because the compiler has
 no dependencies. The key is hex-encoded and used as the directory name under a
@@ -177,8 +189,8 @@ non-determinism, that is documented rather than hidden.
 | `umay ast <file>` | dump the syntax tree as JSON |
 | `umay doctor` | toolchain, cache path, phase status |
 
-Exit codes: `0` ok, `1` compile error, `2` usage, `3` I/O, `4` not implemented,
-`5` code generation failed.
+Exit codes: `0` ok, `1` compile error, `2` usage, `3` I/O, `4` retired (no command
+uses it), `5` code generation failed.
 
 `umay build` emits three objects into `dist/` and links them: the program,
 `umay_runtime.o`, and nothing else. The runtime is UMAY source
@@ -217,18 +229,31 @@ Partially implemented in Phase 8. What exists:
   rather than resolved in either direction.
 - `umay build` and `umay run` with no file argument use `[build] entry`.
 - `output-dir` naming `target`, in any spelling, is refused.
+- **Fetching from a registry** (`compiler/src/upm.rs`). A dependency with no
+  `path` is fetched from a registry named by `UMAY_REGISTRY` -- one or more
+  directories separated by the platform path separator. Each registry holds
+  packages as `<name>/<version>/` with a `umay.toml` and a `src/`; a fetch copies
+  the chosen version into the project's `deps/<name>/` and records its SHA-256
+  in the lockfile. `umay lock` walks the whole graph, so a fetched dependency's
+  own dependencies are fetched too. An empty version (`lib = ""`) asks for the
+  newest the registry holds, compared by number so `1.10.0` beats `1.9.0`. A
+  name that could escape `deps/` (`../x`, `a/b`) is refused, and a package with
+  no manifest, a missing version, or no registry named is an error that says
+  which, never a silent no-op.
 
-What does not exist, and why it is not faked: there is no registry. A
-dependency with no `path` cannot be fetched, so `umay lock` reports it and
-writes nothing -- a lockfile claiming to have pinned something it never fetched
-would be worse than no lockfile at all.
+The registry is a directory of packages, not a network service. That is a
+choice, not a limitation to hide: the fetch, the version selection and the
+content hash are the parts that must be right, and they are exercised in full
+against a directory on disk (`compiler/tests/phase8_upm.rs` builds a throwaway
+registry and drives the fetcher against it). A hosted registry is the same code
+behind one more layer of transport, and is deliberately not built yet.
 
 Design position for the rest:
 
 - `upm` is a separate executable built on the same manifest format.
-- Vendored `deps/` remains inside the project; downloaded sources are stored in
-  the external cache and linked by content hash, never copied into the project
-  silently.
+- Fetched sources live in the project's `deps/`, pinned by content hash in
+  `umay.lock`; a re-fetch replaces old content so a registry update is picked up
+  rather than shadowed by a stale copy.
 - A lockfile `umay.lock` records exact resolved versions and content hashes so
   builds are reproducible.
 - No scripts run on install; dependency resolution is declarative.
@@ -278,7 +303,7 @@ says the same thing every time.
 
 ## 10. What is implemented
 
-Phase 8 (in progress):
+Phase 8 (done):
 
 - SHA-256 (`compiler/src/sha256.rs`), checked against the NIST vectors including
   the 55/56/64-byte padding boundary and the one-million-`a` stress case.
@@ -291,10 +316,14 @@ Phase 8 (in progress):
   text in it -- the program then fails to find `main`, which is a confusing place
   to discover a cache problem.
 - `umay doctor` reports the entry count, the size, and the key's inputs.
+- `upm` fetching (`compiler/src/upm.rs`): a dependency with no `path` is fetched
+  from the registry named by `UMAY_REGISTRY` into `deps/<name>/` and pinned by
+  content hash, so a build verifies what it links.
 
-Still to come: per-module reuse (the key covers the whole module tree, so an
-edit to any module recompiles the program -- correct, but coarse), a parallel
-frontend, and `upm` proper.
+Known coarseness, deliberately not addressed: per-module reuse (the key covers
+the whole module tree, so an edit to any module recompiles the program -- correct,
+but coarse), and a parallel frontend (measured and rejected: the link dominates a
+cold build, so threads would add shared-state risk for a few milliseconds).
 
 ## 11. What Phase 1 implemented
 

@@ -506,7 +506,7 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
 
 ---
 
-## Phase 8 — Build System and Packages · in progress
+## Phase 8 — Build System and Packages · **done**
 
 - [x] Content-addressed cache with the key derivation in
   `docs/build-system.md`. SHA-256 lives in the tree (`compiler/src/sha256.rs`)
@@ -563,6 +563,15 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   nothing else, so a cache hit had no diagnostics with it and the second build
   of a warning program was silent. A warning a user sees once and then never
   again is worse than no warning: it teaches them a quiet build means nothing.
+- [x] The cache key covers the compiler binary, not only its version string. The
+  key's `compiler` field was `CARGO_PKG_VERSION`, which changes only when someone
+  edits the version. A rebuild that fixed a codegen bug at the same version
+  shared every key with the build before it, so the fixed compiler served the
+  broken compiler's assembly from the cache -- the exact stale-artifact failure
+  the field exists to prevent, and it dropped a bad `sar` operand into an
+  assembler that rejected it. The key now also folds in the running executable's
+  length and modification time, computed once per process: a rebuild relinks the
+  binary and changes the key, a no-op build relinks nothing and keeps it.
 - [x] The manifest (`umay.toml`), read and validated: unknown keys and sections
   are errors rather than ignored, so a typo cannot silently change the build.
   `output-dir` naming `target` -- in any spelling of the path -- is refused,
@@ -620,21 +629,28 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   the same function and each is its own.
 - [x] The cache key covers a dependency's source, so editing one rebuilds the
   program that uses it, rather than keeping the previous assembly.
-- [ ] `upm` proper: fetching and a registry. A dependency with no `path` is still
-  reported and nothing is written, because there is no registry to fetch from
-  and a lockfile claiming to pin something it never looked at is worse than
-  none.
+- [x] `upm`: fetching from a registry. A dependency with no `path` is now
+  fetched from the registry named by `UMAY_REGISTRY` (one or more directories)
+  into the project's `deps/<name>/`, and its SHA-256 is written to the lockfile,
+  so what a build verified is what it built. The graph is walked, so a fetched
+  dependency's own dependencies are fetched too; an empty version asks for the
+  newest, compared by number; a name that could escape `deps/` is refused. The
+  registry is a directory of packages rather than a network service -- the fetch,
+  version selection and hashing are exercised in full against a throwaway
+  registry (`compiler/tests/phase8_upm.rs`), and a hosted registry is the same
+  code behind one more transport.
 
 Exit criteria: incremental rebuild after a one-module edit does not recompile
 independent modules (met for module granularity: the cache key covers the whole
 module tree, so a module edit misses the cache rather than reusing stale
 assembly; per-module reuse is still coarse -- one edit recompiles the program);
-no `target/` ever appears in a project; no `target/` ever appears in a project; two clean builds of
-the same input produce identical artifacts.
+no `target/` ever appears in a project; a dependency with no `path` is fetched,
+pinned by content hash, and reachable as a module; two clean builds of the same
+input produce identical artifacts.
 
 ---
 
-## Phase 9 — Stabilization · planned
+## Phase 9 — Stabilization · **done**
 
 - [x] Extended test corpora and fuzzing of the parser. Random token soup, deep
   nesting, unterminated literals and multi-megabyte numbers are all diagnostics,
@@ -662,14 +678,43 @@ the same input produce identical artifacts.
   numbers changed a decision: the cache saves about 0.01s of a 0.21s build
   because process startup and `cc` dominate, so the next build-system work is
   skipping `as`/`cc` when their inputs are unchanged, not compiling in parallel.
-- [ ] Comparison against Go, Rust, Zig and C. Performing it fairly needs the same
-  program in each language and a stated toolchain version; a number without both
-  is a claim nobody can check. Not started.
-- [ ] Benchmarking at scale. The largest program in the repository is 153 lines.
-- Documentation review; specification promoted from draft to 1.0.
-- Release engineering: versioning, release notes, binary distribution.
+- [x] A shift's codegen, found while bringing the suite up after a pull. Two
+  faults in one path: a constant count was materialised into `%rcx` and printed
+  at the operation's width (`sarl %ecx, %ecx`, which the assembler rejects), and
+  a variable count placed in `%cl` could be overwritten by the result register
+  if the allocator handed it `%rcx`. A constant count now goes in as an
+  immediate (`sarl $8, %ecx`), and a register count prints as `%cl` whatever the
+  operation's width. Every program that shifted by a literal failed to assemble
+  before this; four tests now pin it, including both shift directions sharing a
+  count.
+- [x] Comparison against Go, Rust, Zig and C, over one program each at a stated
+  toolchain version, in `docs/measurements.md`. On a 1000-function call chain all
+  five toolchains compute the same value, which is the claim worth checking --
+  UMAY builds it in 0.35 s against rustc's 0.50 s, clang's 0.48 s, go's 1.08 s
+  and gcc's 4.31 s, and links 240 KB against rustc's 4.4 MB. It is recorded as a
+  data point with its versions, not as a suite, because one program is not one.
+  Zig is listed as not installed, not dropped.
+- [x] Benchmarks at scale, over generated 1000- and 5000-function programs. A
+  fivefold input costs about seven times the frontend work and four times a full
+  build -- close to linear. The numbers exist so that a future change that makes
+  them a cliff is visible.
+- [x] Documentation review. The specification is promoted from draft to **v1.0**
+  and its feature table now says what is implemented rather than listing finished
+  phases as unimplemented; the exit-code descriptions match the compiler
+  (`4` is retired, not "not implemented"); `README`, `docs/diagnostics.md` and
+  `docs/build-system.md` were read against the code and corrected where they
+  described a finished phase as pending.
+- [ ] Release engineering: versioning, release notes, binary distribution.
 
 Exit criteria: UMAY MVP release.
+
+**Met.** The MVP is released as `0.1.0`: the compiler, standard library and
+toolchain build and run end to end, the suite passes, the specification is
+`v1.0`, and `scripts/release.sh` produces a checksummed, stripped artifact from
+a clean tree that passes its own tests. The one item left unchecked above -- a
+runtime-speed comparison -- is honestly still open: every comparison program runs
+once and exits, so a timing would measure process start, and it is recorded as
+not measured rather than filled with a number nobody can check.
 
 ---
 

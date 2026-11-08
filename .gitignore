@@ -13,3 +13,6 @@ dist/*
 /compiler/*.bin
 /compiler/note.txt
 /compiler/log.txt
+
+# Release packaging output.
+/out/

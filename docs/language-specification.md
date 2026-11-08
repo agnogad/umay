@@ -1,13 +1,15 @@
-# UMAY Language Specification — v0.1
+# UMAY Language Specification — v1.0
 
-Status: **draft**. This document is normative for the reference compiler. The
+Status: **stable**. This document is normative for the reference compiler. The
 compiler is the final arbiter; where the compiler and this document disagree,
 fix the one that is wrong (by our own rule: diagnostics-first, and the
 compiler must never silently diverge from documented behaviour).
 
-Versioning: `0.1` — this is the first frozen slice of syntax. Syntax is frozen
-for the scope of this version; semantics that are not yet implemented are
-explicitly marked **unimplemented**.
+Versioning: `1.0` — the first released slice of the language. The syntax is
+frozen for this version. Every semantic feature this document describes is
+implemented and covered by tests; the few constructs that are parsed but have no
+semantics yet are listed in §13 and are errors or warnings, never silently
+accepted.
 
 ---
 
@@ -489,18 +491,23 @@ The full contract is in [diagnostics.md](diagnostics.md).
 The full contract is in [build-system.md](build-system.md).
 
 - `umay new | check | ast | explain | doctor | clean | build | run | fmt | lint | lsp`
-- Exit codes: `0` ok, `1` compile error, `2` usage, `3` I/O, `4` not implemented.
+- Exit codes: `0` ok, `1` compile error, `2` usage, `3` I/O, `4` retired (no command uses it), `5` code generation failed.
 - No `target/` in projects; cache lives in the OS user cache directory.
 
-## 13. Known gaps in v0.1
+## 13. What is not in v1.0
 
 | Feature | Status |
 |---------|--------|
-| Type checking, inference, generics | Phase 2, unimplemented |
-| Ownership / borrow checking | Phase 4, unimplemented |
-| Code generation | Phase 5, unimplemented |
-| Runtime + stdlib | Phase 6, unimplemented |
-| Attributes with real semantics | Phase 7 (currently `W0010`) |
-| `pub` visibility semantics | Phase 2 |
-| `where` clause semantics | Phase 2 |
-| let-else semantics | Phase 2 |
+| Type checking, inference, generics | Implemented (Phase 2). |
+| Ownership / borrow checking | Implemented (Phase 4). |
+| Code generation (x86_64) | Implemented (Phase 5). |
+| Runtime + standard library | Implemented (Phase 6). |
+| `pub` visibility | Parsed, and `pub fn` in an `impl` and at item level is accepted; there is no cross-module visibility enforcement yet. |
+| `where` clauses | Not parsed: a `where` clause is a syntax error. Use an inline bound (`<T: Trait>`) instead. |
+| let-else (`let Some(x) = e else { ... }`) | Not implemented; it is a syntax error. Use `match`. |
+| Attributes with real semantics | Parsed but carry no semantics; an unused attribute is `W0010`. |
+| Async/await, proc-macros, dynamic dispatch, a formal concurrency model | Non-goals for v1.0 (§1). |
+
+These are gaps a reader can rely on: each one is either a clear error at the
+point of use or documented here, so a program that compiles does not depend on
+half-implemented behaviour.
