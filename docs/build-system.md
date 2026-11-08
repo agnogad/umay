@@ -219,6 +219,18 @@ Design position for the rest:
   builds are reproducible.
 - No scripts run on install; dependency resolution is declarative.
 
+### What runs in parallel
+
+The program object and the runtime object are assembled at the same time. They do
+not read each other, and `as` prints nothing unless it fails, so the two runs
+cannot interleave their output; the caller prints the failure after both finish.
+That ordering matters more than the speedup: without it the same build could say
+different things on different runs.
+
+Compiling the two programs in parallel was measured and rejected: a cold build is
+around 0.18s, dominated by the link through `cc`, so it would buy milliseconds in
+exchange for shared mutable state.
+
 ### Modules in the key
 
 The key covers every module file that went into the assembly, not only the entry

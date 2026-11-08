@@ -950,9 +950,6 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     // backend stops at text deliberately, so that it never has to encode a
     // relocation itself.
     let obj_path = dist.join(format!("{stem}.o"));
-    if let Err(code) = assemble(&asm_path, &obj_path) {
-        return code;
-    }
 
     // The runtime is compiled the same way as the program: it is ordinary UMAY
     // source, so there is no separate prebuilt library to keep in step with the
@@ -999,7 +996,24 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         eprintln!("umay: cannot write `{}`: {e}", runtime_asm.display());
         return exit::IO_ERROR;
     }
-    if let Err(code) = assemble(&runtime_asm, &runtime_obj) {
+
+    // The two objects do not depend on each other, so they are assembled at the
+    // same time. Nothing is printed by `assemble` itself: a message would arrive
+    // in whatever order the two processes finished, and two builds of the same
+    // source could then differ in what they printed.
+    let (program_result, runtime_result) =
+        std::thread::scope(|scope| {
+            let program = scope.spawn(|| assemble(&asm_path, &obj_path));
+            let runtime = scope.spawn(|| assemble(&runtime_asm, &runtime_obj));
+            (
+                program.join().unwrap_or(Err(exit::CODEGEN_ERROR)),
+                runtime.join().unwrap_or(Err(exit::CODEGEN_ERROR)),
+            )
+        });
+    if let Err(code) = program_result {
+        return code;
+    }
+    if let Err(code) = runtime_result {
         return code;
     }
 
@@ -1086,6 +1100,11 @@ fn cmd_asm(args: &[String]) -> u8 {
 }
 
 /// Runs the assembler on one file, reporting a failure as an exit code.
+/// Assembles one `.s` into a `.o`.
+///
+/// Prints nothing on success and returns the message to show on failure, rather
+/// than printing it: two of these run at once, and interleaved output would make
+/// the same build say different things on different runs.
 fn assemble(source: &Path, object: &Path) -> Result<(), u8> {
     let status = std::process::Command::new("as")
         .arg("--64")

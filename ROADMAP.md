@@ -539,8 +539,16 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   so the checker resolves `mod name;` against the directory the buffer is really
   in; without it every module looked like a missing file in the editor and fine
   on the command line, which is the least useful place for that disagreement.
-- [ ] Parallel compilation. There is one unit of work per build today, so there
-  is nothing to run in parallel yet.
+- [x] Parallel compilation, to the extent there is work to parallelise. The
+  program object and the runtime object do not read each other, so they are
+  assembled at the same time. Each `as` is quiet and the caller prints, because
+  two processes writing to the same stderr would make the same build say
+  different things on different runs -- pinned by a test.
+- [ ] Compiling program and runtime codegen in parallel. Measured first: a cold
+  build is about 0.18s, of which the link through `cc` dominates, so splitting
+  codegen across threads would add shared-state risk for a few milliseconds.
+  Worth revisiting when there is a second real unit of work -- a parallel
+  compiler frontend over modules, not two calls.
 - [x] Reproducible builds, checked: two clean builds of the same source in two
   different directories produce byte-identical assembly, object files and
   executable (including the linker's build id). Pinned by tests, because an
@@ -568,8 +576,10 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   claiming to have pinned something it never fetched.
 
 Exit criteria: incremental rebuild after a one-module edit does not recompile
-independent modules (met: the cache key covers the whole module tree, so a
-module edit misses the cache rather than reusing stale assembly); no `target/` ever appears in a project; two clean builds of
+independent modules (met for module granularity: the cache key covers the whole
+module tree, so a module edit misses the cache rather than reusing stale
+assembly; per-module reuse is still coarse -- one edit recompiles the program);
+no `target/` ever appears in a project; no `target/` ever appears in a project; two clean builds of
 the same input produce identical artifacts.
 
 ---
