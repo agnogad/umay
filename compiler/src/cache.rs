@@ -44,18 +44,31 @@ pub fn clear_cache() -> std::io::Result<usize> {
     if !Path::new(&dir).exists() {
         return Ok(0);
     }
+    // Count the files removed, not the top-level directories: the cache is one
+    // tree under `v1/`, so counting the root reported "cleared 1 cache entry"
+    // while removing two hundred. `doctor` counts files, and the two numbers
+    // have to agree or the pair is useless.
     let mut count = 0;
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
+        count += count_files(&path);
         if path.is_dir() {
             std::fs::remove_dir_all(&path)?;
         } else {
             std::fs::remove_file(&path)?;
         }
-        count += 1;
     }
     Ok(count)
+}
+
+/// How many files are under `path`, counting `path` itself if it is a file.
+fn count_files(path: &Path) -> usize {
+    if !path.is_dir() {
+        return 1;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else { return 0 };
+    entries.flatten().map(|e| count_files(&e.path())).sum()
 }
 
 // ---------------------------------------------------------------------------

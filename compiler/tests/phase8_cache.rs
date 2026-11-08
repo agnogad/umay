@@ -269,3 +269,35 @@ fn an_unreadable_cache_entry_costs_a_rebuild_not_a_failure() {
     let assembly = std::fs::read_to_string(project.dir.join("dist/main.s")).expect("assembly");
     assert!(!assembly.is_empty(), "the assembly should have been regenerated");
 }
+
+#[test]
+fn clean_reports_the_entries_it_removed() {
+    // The two numbers have to agree. `clean` counted the top-level directory and
+    // said "cleared 1 cache entry" while removing two hundred, next to a `doctor`
+    // that counted files -- a pair of numbers that disagree teaches the reader to
+    // stop trusting both.
+    if !have_toolchain() {
+        eprintln!("skipping clean_reports_the_entries_it_removed: `cc` is not available");
+        return;
+    }
+    let project = Project::new("clean_count", HELLO);
+    assert_eq!(project.build().0, 0);
+    let cached = project.cache_entries().len();
+    assert!(cached > 0, "the build should have cached something");
+
+    let output = Command::new(compiler())
+        .current_dir(&project.dir)
+        .env("UMAY_CACHE_DIR", &project.cache)
+        .arg("clean")
+        .output()
+        .expect("run umay clean");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("cleared {cached}")),
+        "clean removed {cached} files but said:\n{stdout}"
+    );
+    assert!(
+        project.cache_entries().is_empty(),
+        "clean should have emptied the cache"
+    );
+}
