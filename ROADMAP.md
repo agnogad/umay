@@ -589,6 +589,11 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   same reason: a program cannot have two `lib`s.
 - [x] Locked paths are relative to the project, so a lockfile does not depend on
   the machine that wrote it.
+- [x] A build warns when the lockfile no longer matches. `verify` existed and
+  nothing called it, so a lockfile was documentation rather than a guarantee. The
+  check now runs at the start of `build`, names the dependency that changed, and
+  says to run `umay lock`. It covers transitive dependencies, which the first
+  shape of the check would have missed.
 - [ ] `upm` proper: fetching and a registry. A dependency with no `path` is still
   reported and nothing is written, because there is no registry to fetch from
   and a lockfile claiming to pin something it never looked at is worse than

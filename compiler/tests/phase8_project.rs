@@ -369,11 +369,18 @@ impl Tree {
     fn package(&self, name: &str, version: &str, deps: &[(&str, &str, &str)]) -> &Self {
         let dir = self.root.join(name);
         std::fs::create_dir_all(dir.join("src")).expect("create the package");
+        // Every package gets both shapes of source: a library file for one that
+        // is depended on, and an entry point for one that is built and run.
         std::fs::write(
             dir.join("src/lib.um"),
             format!("// {name}\nfn value() -> i64 {{\n    return 1i64\n}}\n"),
         )
         .expect("write the source");
+        std::fs::write(
+            dir.join("src/main.um"),
+            "fn main() -> i32 {\n    return 0\n}\n",
+        )
+        .expect("write the entry point");
         let mut manifest = format!(
             "[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2026\"\n"
         );
@@ -583,4 +590,63 @@ fn locking_a_graph_twice_produces_the_same_bytes() {
     let first = tree.lockfile("app");
     assert_eq!(tree.lock("app").0, 0);
     assert_eq!(first, tree.lockfile("app"), "re-locking the same graph changed the file");
+}
+
+#[test]
+fn a_build_warns_when_the_lockfile_no_longer_matches()
+{
+    // `verify` existed and nothing called it, so a lockfile was documentation
+    // rather than a guarantee. The check has to happen somewhere the author
+    // actually runs, and `build` is where they run.
+    if !have_toolchain() {
+        eprintln!("skipping a_build_warns_when_the_lockfile_no_longer_matches: `cc` is not available");
+        return;
+    }
+    let tree = Tree::new("stale_lock");
+    tree.package("base", "1.0.0", &[]);
+    tree.package("lib", "1.0.0", &[("base", "1.0.0", "../base")]);
+    tree.package("app", "0.1.0", &[("lib", "1.0.0", "../lib")]);
+    let build = |tree: &Tree| {
+        let output = Command::new(compiler())
+            .current_dir(tree.root.join("app"))
+            .env("UMAY_CACHE_DIR", tree.root.join(".cache"))
+            .arg("build")
+            .output()
+            .expect("run umay build");
+        (
+            output.status.code().unwrap_or(-1),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+    };
+
+    assert_eq!(tree.lock("app").0, 0);
+    let (status, report) = build(&tree);
+    assert_eq!(status, 0, "a matching lockfile should not stop a build:\n{report}");
+    assert!(
+        !report.contains("no longer matches"),
+        "a fresh lockfile should be quiet:\n{report}"
+    );
+
+    // Change the transitive dependency, which is the case the first version of
+    // the check would have missed: it only looked at direct dependencies.
+    std::fs::write(
+        tree.root.join("base").join("src/lib.um"),
+        "fn value() -> i64 {\n    return 99i64\n}\n",
+    )
+    .expect("change the dependency");
+
+    let (status, report) = build(&tree);
+    assert_eq!(status, 0, "a stale lockfile is a warning, not an error:\n{report}");
+    assert!(
+        report.contains("base"),
+        "the changed dependency should be named:\n{report}"
+    );
+    assert!(
+        report.contains("umay lock"),
+        "the message should say what to do:\n{report}"
+    );
 }

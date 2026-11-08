@@ -837,6 +837,26 @@ fn module_sources_for(text: &str, path: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Warns when a project's lockfile no longer matches what is on disk.
+///
+/// A lockfile nobody checks is documentation. The check has to happen somewhere
+/// the author actually runs, and `build` is that place: a dependency that changed
+/// under a pinned lockfile is exactly the situation the file exists for, and
+/// finding out at link time -- or never -- is too late to be useful.
+fn warn_if_lock_is_stale() {
+    if !Path::new("umay.lock").is_file() {
+        return;
+    }
+    let Ok(lockfile) = umayc::lock::read_project(Path::new(".")) else {
+        // An unreadable lockfile is `umay lock`'s problem to report clearly; a
+        // second, vaguer complaint from `build` only obscures it.
+        return;
+    };
+    for problem in umayc::lock::verify(Path::new("."), &lockfile) {
+        eprintln!("warning: {problem}");
+    }
+}
+
 /// The entry point named by `umay.toml` in the current directory.
 fn entry_from_manifest() -> Result<String, u8> {
     if !Path::new("umay.toml").exists() {
@@ -889,6 +909,8 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     // the previous compile's exact answer. A miss is the normal first build.
     let cache = umayc::build::Cache::open();
     let level = opt_level_name(opts.opt_level);
+    warn_if_lock_is_stale();
+
     // A program with no `main` cannot be linked, and the linker's way of saying
     // so is "undefined reference to `main`" from `collect2` after the assembler
     // has already run. Asking about the source here makes it a diagnostic about
