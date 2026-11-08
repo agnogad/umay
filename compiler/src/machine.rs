@@ -423,10 +423,23 @@ impl Inst {
                 }
             }
             Inst::Alu { src, dst, .. } => {
+                // `src` can be a memory operand when the value is read through
+                // a pointer (`total + *p` -> `addq (%base), %dst`). Its base is
+                // read just as much as a register operand, and leaving it out
+                // lets the allocator reuse that base for the destination.
+                if let Operand::Mem(m) = src {
+                    from_mem(m, &mut out);
+                }
                 from_operand(src, &mut out);
                 from_operand(dst, &mut out);
             }
             Inst::Cmp { lhs, rhs, .. } | Inst::Test { lhs, rhs, .. } => {
+                if let Operand::Mem(m) = lhs {
+                    from_mem(m, &mut out);
+                }
+                if let Operand::Mem(m) = rhs {
+                    from_mem(m, &mut out);
+                }
                 from_operand(lhs, &mut out);
                 from_operand(rhs, &mut out);
             }
@@ -473,6 +486,17 @@ impl Inst {
             | Inst::Load { src: m, .. }
             | Inst::Store { dst: m, .. }
             | Inst::Lea { src: m, .. } => from_mem(m, &mut out),
+            // An ALU or compare instruction can read through a pointer, and a
+            // spill would need an extra load the selector does not emit, so
+            // that base is an address register too.
+            Inst::Alu { src: Operand::Mem(m), .. } => from_mem(m, &mut out),
+            Inst::Alu { dst: Operand::Mem(m), .. } => from_mem(m, &mut out),
+            Inst::Cmp { lhs: Operand::Mem(m), .. } | Inst::Test { lhs: Operand::Mem(m), .. } => {
+                from_mem(m, &mut out)
+            }
+            Inst::Cmp { rhs: Operand::Mem(m), .. } | Inst::Test { rhs: Operand::Mem(m), .. } => {
+                from_mem(m, &mut out)
+            }
             _ => {}
         }
         out.retain(|r| r.is_virtual());

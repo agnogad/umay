@@ -298,15 +298,22 @@ fn rewrite_inst(inst: &mut Inst, allocation: &Allocation) {
     let fix_mem = |mem: &mut Mem, allocation: &Allocation| {
         if let Some(base) = mem.base {
             if let Reg::Virtual(v) = base {
-                if let Some(Location::Reg(r)) = allocation.locations.get(&v) {
-                    mem.base = Some(Reg::Phys(*r));
+                match allocation.locations.get(&v) {
+                    Some(Location::Reg(r)) => mem.base = Some(Reg::Phys(*r)),
+                    // A base spilled to the stack cannot be an addressing mode
+                    // operand: that would need an extra load the selector never
+                    // emits. It cannot happen -- `address_registers` marks such
+                    // a register as unspillable -- so reaching here is a bug
+                    // worth stopping on rather than printing `(%!v14)`.
+                    other => panic!("base register v{v} has no physical home: {other:?}"),
                 }
             }
         }
         if let Some((index, scale)) = mem.index {
             if let Reg::Virtual(v) = index {
-                if let Some(Location::Reg(r)) = allocation.locations.get(&v) {
-                    mem.index = Some((Reg::Phys(*r), scale));
+                match allocation.locations.get(&v) {
+                    Some(Location::Reg(r)) => mem.index = Some((Reg::Phys(*r), scale)),
+                    other => panic!("index register v{v} has no physical home: {other:?}"),
                 }
             }
         }
@@ -324,11 +331,19 @@ fn rewrite_inst(inst: &mut Inst, allocation: &Allocation) {
             }
         }
         Inst::Alu { src, dst, .. } => {
-            if let MOperand::Reg(r) = src {
-                *src = resolve(*r, width, allocation);
+            // Both sides may be a memory operand: `*p` as a source reads through
+            // a base register, and a spilled destination becomes a stack
+            // reference. Their bases are virtual registers too and must be
+            // resolved, or the assembler sees a placeholder like `(%!v14)`.
+            match src {
+                MOperand::Reg(r) => *src = resolve(*r, width, allocation),
+                MOperand::Mem(m) => fix_mem(m, allocation),
+                _ => {}
             }
-            if let MOperand::Reg(r) = dst {
-                *dst = resolve(*r, width, allocation);
+            match dst {
+                MOperand::Reg(r) => *dst = resolve(*r, width, allocation),
+                MOperand::Mem(m) => fix_mem(m, allocation),
+                _ => {}
             }
         }
         Inst::Cmp { lhs, rhs, .. } | Inst::Test { lhs, rhs, .. } => {

@@ -442,3 +442,42 @@ fn two_literal_stack_arguments_keep_their_values() {
     let src = "fn sum9(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32, i: i32) -> i32 {\n    return a + b + c + d + e + f + g + h + i\n}\nfn main() -> i32 {\n    return sum9(1, 2, 3, 4, 5, 6, 7, 8, 9)\n}";
     expect_exit("two_literal_stack_args", src, 45);
 }
+
+#[test]
+fn a_value_read_through_a_pointer_does_not_share_its_base_register() {
+    // `total + *p` selects a memory operand: `addq (%base), %dst`. The base is a
+    // virtual register that `reads()` must report, or the allocator will hand the
+    // same register to the sum's destination and every later `*p` reads whatever
+    // the sum left there. The program returns 21 here; a clash turns it into a
+    // crash or a wrong number.
+    let src = "fn main() -> i32 {\n\
+        let mut i: i64 = 0\n\
+        let mut total: i64 = 0\n\
+        while i < 12 {\n\
+            let p = alloc(8) as *mut i64\n\
+            unsafe { *p = i }\n\
+            total = (total + unsafe { *p }) % 1000003\n\
+            dealloc(p as *mut u8)\n\
+            i = i + 1\n\
+        }\n\
+        return total as i32\n\
+    }";
+    expect_exit("pointer_base_register", src, 66);
+}
+
+#[test]
+fn two_pointer_reads_in_one_expression_keep_their_bases() {
+    // Two memory operands in one expression: each base must stay live across the
+    // other's use. This is the shape that regressed alongside the one above.
+    let src = "fn main() -> i32 {\n\
+        let a = alloc(8) as *mut i64\n\
+        let b = alloc(8) as *mut i64\n\
+        unsafe { *a = 20 }\n\
+        unsafe { *b = 22 }\n\
+        let sum = unsafe { *a } + unsafe { *b }\n\
+        dealloc(a as *mut u8)\n\
+        dealloc(b as *mut u8)\n\
+        return sum as i32\n\
+    }";
+    expect_exit("two_pointer_bases", src, 42);
+}
