@@ -191,9 +191,75 @@ pub fn allocate(function: &mut MachineFunction) -> Allocation {
         used_callee_saved: used_callee_saved.into_iter().collect(),
     };
 
+    // UMAY_ALLOC_STATS=1 prints what the allocator had to do. Spills are the
+    // quantity that decides runtime speed, so it is worth being able to see
+    // them without reading the assembly.
+    if std::env::var_os("UMAY_ALLOC_STATS").is_some() {
+        let regs = allocation.locations.values().filter(|l| matches!(l, Location::Reg(_))).count();
+        eprintln!(
+            "alloc {}: {} vregs, {} in registers, {} spilled, {} spill bytes",
+            function.name,
+            intervals.len(),
+            regs,
+            spilled.len(),
+            allocation.spill_bytes,
+        );
+    }
+
     rewrite_registers(function, &allocation);
+    let removed = peephole(function);
+    if std::env::var_os("UMAY_ALLOC_STATS").is_some() {
+        eprintln!("peephole {}: {} instructions removed", function.name, removed);
+    }
     allocation
 }
+
+/// Removes instruction pairs that one step of looking ahead proves redundant.
+///
+/// This is not an optimiser; it is the cleanup of patterns the selector emits
+/// mechanically. Every rule here removes a move whose value is provably already
+/// where the next instruction wants it, and none of them change a flag that a
+/// following conditional reads, because only adjacent instructions are examined
+/// and a flag-setting instruction ends any chain.
+fn peephole(function: &mut MachineFunction) -> usize {
+    let mut removed = 0;
+    for block in &mut function.blocks {
+        let mut out: Vec<Inst> = Vec::with_capacity(block.insts.len());
+        for inst in std::mem::take(&mut block.insts) {
+            if let Some(prev) = out.last() {
+                // `mov %r, %r` writes what is already there.
+                if is_self_move(&inst) {
+                    removed += 1;
+                    continue;
+                }
+                // `mov %r, slot` then `mov slot, %r`: adjacent, same register,
+                // same slot. Nothing ran in between, so the load reads exactly
+                // what the store wrote and the value is still in the register.
+                // This is true by construction -- no aliasing argument is needed
+                // because there is no instruction between the two.
+                #[allow(clippy::collapsible_if)] // let-chains need Rust 2024
+                if let Some((slot, reg)) = store_of_register(prev) {
+                    if loads_same_slot_into(&inst, &slot, reg) {
+                        removed += 1;
+                        continue;
+                    }
+                }
+            }
+            out.push(inst);
+        }
+        block.insts = out;
+    }
+    removed
+}
+
+/// True for `Move src -> dst` where both sides are the same physical register.
+fn is_self_move(inst: &Inst) -> bool {
+    match inst {
+        Inst::Move { src: MOperand::Reg(a), dst: MOperand::Reg(b), .. } => a == b,
+        _ => false,
+    }
+}
+
 
 fn is_callee_saved(reg: u8) -> bool {
     matches!(reg, 3 | 12 | 13 | 14 | 15)
@@ -395,4 +461,39 @@ fn rewrite_inst(inst: &mut Inst, allocation: &Allocation) {
         Inst::Jmp(_) | Inst::Jcc { .. } | Inst::Ret | Inst::SignExtendAcc { .. } | Inst::Label(_)
         | Inst::Comment(_) => {}
     }
+}
+
+/// `mov %r, slot` -> (slot, r), when both sides are a plain stack slot and a
+/// physical register.
+fn store_of_register(inst: &Inst) -> Option<(Mem, Reg)> {
+    match inst {
+        Inst::Store { src: MOperand::Reg(r), dst, kind: MoveKind::Move(_) } => {
+            plain_stack(dst).then(|| (dst.clone(), *r))
+        }
+        Inst::Move { src: MOperand::Reg(r), dst: MOperand::Mem(m), kind: MoveKind::Move(_) } => {
+            plain_stack(m).then(|| (m.clone(), *r))
+        }
+        _ => None,
+    }
+}
+
+/// True when `inst` loads `slot` into `reg`.
+fn loads_same_slot_into(inst: &Inst, slot: &Mem, reg: Reg) -> bool {
+    let (src, dst) = match inst {
+        Inst::Load { src, dst, kind: MoveKind::Move(_) } => (src, dst),
+        Inst::Move { src: MOperand::Mem(m), dst: MOperand::Reg(r), kind: MoveKind::Move(_) } => {
+            return *r == reg && same_slot(m, slot);
+        }
+        _ => return false,
+    };
+    matches!(dst, MOperand::Reg(r) if *r == reg) && same_slot(src, slot)
+}
+
+fn plain_stack(m: &Mem) -> bool {
+    m.symbol.is_none() && m.index.is_none() && m.base.is_some()
+}
+
+fn same_slot(a: &Mem, b: &Mem) -> bool {
+    a.base == b.base && a.offset == b.offset && a.symbol.is_none() && b.symbol.is_none()
+        && a.index.is_none() && b.index.is_none()
 }
