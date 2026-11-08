@@ -602,8 +602,17 @@ the same input produce identical artifacts.
   `main` built cleanly until `collect2` said "undefined reference to `main`",
   which names an object file rather than the author's program and arrives
   several stages too late. Both are now one clear message.
-- [ ] Property-based testing beyond the parser. The type checker and the backend
-  have no equivalent harness yet.
+- [x] Property-based testing of the backend: signed and unsigned comparison,
+  arithmetic, values across a call boundary, and "a program the frontend accepts
+  builds and runs" over a fixed reproducible sample. Each sample is one build, not
+  one build per case -- forty programs of twenty-four comparisons took forty
+  seconds, which is too slow for a suite run on every change.
+
+  Worth writing down: the first version of the harness compared the computed
+  value to a branch rather than to the expected constant, so every correctly-false
+  result was reported as a compiler bug. Twenty-four "failures" went into the
+  investigation before the harness was the suspect. A test that cannot be wrong
+  cheaply is worth more than one that has to be trusted.
 - [x] Benchmarks of clean time, incremental time, compiler RSS and binary size,
   recorded in `docs/measurements.md` with the command that produced them. The
   numbers changed a decision: the cache saves about 0.01s of a 0.21s build
