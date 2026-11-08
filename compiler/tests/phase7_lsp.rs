@@ -340,3 +340,62 @@ fn hover_finds_a_function_that_lives_in_a_module() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn definition_jumps_into_a_module_file() {
+    // `kinds::weigh` is declared in `kinds.um`. The scan used to look only at the
+    // document the editor is showing, where that name appears once and declares
+    // nothing, so go-to-definition answered `null`.
+    let dir = std::env::temp_dir().join(format!("umay_lsp_def_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the directory");
+    std::fs::write(
+        dir.join("kinds.um"),
+        "pub fn weigh(k: i64) -> i64 {\n    return k\n}\n",
+    )
+    .expect("write the module");
+    let main = dir.join("main.um");
+    let text = "fn main() -> i32 {\n    println_i64(kinds::weigh(3i64))\n    return 0\n}\n\nmod kinds;\n";
+    std::fs::write(&main, text).expect("write the program");
+
+    let uri = format!("file://{}", main.display());
+    let request = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{{"textDocument":{{"uri":"{uri}"}},"position":{{"line":1,"character":24}}}}}}"#
+    );
+    let replies = exchange(&[initialize(), &open(&uri, text), &request]);
+    let reply = reply_with_id(&replies, 2).expect("a definition reply");
+    assert!(
+        reply.contains("kinds.um"),
+        "the definition should be in the module's file, got {reply}"
+    );
+    assert!(
+        !reply.contains("\"result\":null"),
+        "go-to-definition found nothing, got {reply}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_declaration_with_a_visibility_is_still_a_definition()
+{
+    // `pub fn weigh` put `pub ` before the keyword, so the scan that looks for a
+    // declaration did not recognise the line at all.
+    let dir = std::env::temp_dir().join(format!("umay_lsp_pubdef_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the directory");
+    let main = dir.join("main.um");
+    let text = "pub fn helper() -> i64 {\n    return 1i64\n}\n\nfn main() -> i32 {\n    println_i64(helper())\n    return 0\n}\n";
+    std::fs::write(&main, text).expect("write the program");
+
+    let uri = format!("file://{}", main.display());
+    let request = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{{"textDocument":{{"uri":"{uri}"}},"position":{{"line":5,"character":18}}}}}}"#
+    );
+    let replies = exchange(&[initialize(), &open(&uri, text), &request]);
+    let reply = reply_with_id(&replies, 2).expect("a definition reply");
+    assert!(
+        reply.contains("\"line\":0") || reply.contains("\"line\": 0"),
+        "the definition is on the first line, got {reply}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

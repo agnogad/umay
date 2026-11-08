@@ -435,27 +435,39 @@ impl Server {
         let Some(word) = word_at(&document.text, offset) else {
             return result_response(id, Value::Null);
         };
-        match definition_offset(&document.text, &word) {
-            Some(start) => {
-                let index = LineIndex::new(&document.text);
-                let position = index.position(&document.text, start);
-                // The whole declaration line is the target, which is what an
-                // editor scrolls to.
-                let end = document.text[start as usize..]
-                    .find('\n')
-                    .map(|i| start + i as u32)
-                    .unwrap_or(document.text.len() as u32);
-                let end_position = index.position(&document.text, end);
-                result_response(
-                    id,
-                    Value::object([
-                        ("uri", Value::str(uri)),
-                        ("range", range_value(position, end_position)),
-                    ]),
-                )
-            }
-            None => result_response(id, Value::Null),
-        }
+
+        // A name reached through a module is declared in the module's own file,
+        // which is not the one the editor is showing. Scanning only the current
+        // document answered `null` -- and `null` is also what an editor gets for
+        // punctuation, so it looked like "nothing to go to" rather than "found
+        // nothing because I looked in one file".
+        let target = definition_offset(&document.text, &word)
+            .map(|start| (uri.to_string(), document.text.clone(), start))
+            .or_else(|| {
+                let (file, start) = module_definition(document, &document.text, offset, &word)?;
+                let text = std::fs::read_to_string(&file).ok()?;
+                Some((format!("file://{}", file.display()), text, start))
+            });
+        let Some((target_uri, target_text, start)) = target else {
+            return result_response(id, Value::Null);
+        };
+
+        let index = LineIndex::new(&target_text);
+        let position = index.position(&target_text, start);
+        // The whole declaration line is the target, which is what an editor
+        // scrolls to.
+        let end = target_text[start as usize..]
+            .find('\n')
+            .map(|i| start + i as u32)
+            .unwrap_or(target_text.len() as u32);
+        let end_position = index.position(&target_text, end);
+        result_response(
+            id,
+            Value::object([
+                ("uri", Value::str(target_uri.as_str())),
+                ("range", range_value(position, end_position)),
+            ]),
+        )
     }
 
     fn completion(&self, id: Value, params: &Value) -> Value {
@@ -641,6 +653,72 @@ fn describe(text: &str, name: &str, word: &str) -> Option<String> {
     None
 }
 
+/// Where a name qualified by a module is declared, as a file and a byte offset.
+///
+/// `kinds::weigh` names a function in `kinds.um`. The module is read from disk
+/// beside the document, the same way the compiler reads it, and the declaration
+/// is found there by the same scan used for the document itself.
+fn module_definition(
+    document: &Document,
+    text: &str,
+    offset: u32,
+    word: &str,
+) -> Option<(std::path::PathBuf, u32)> {
+    let path = document.path.as_ref()?;
+    let dir = path.parent()?;
+
+    // The module is whatever precedes `::` before the word on this line.
+    let line_start = text[..offset.min(text.len() as u32) as usize]
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    // The cursor may sit anywhere inside the word, so the text before the word
+    // starts -- not before the cursor -- is what precedes `::`.
+    let cursor = offset.min(text.len() as u32) as usize;
+    let mut word_start = cursor;
+    while word_start > line_start {
+        let Some(prev) = text[..word_start].chars().next_back() else { break };
+        if prev.is_alphanumeric() || prev == '_' {
+            word_start -= prev.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let before = &text[line_start..word_start];
+    let trimmed = before.trim_end();
+    if !trimmed.ends_with("::") {
+        return None;
+    }
+    let head = trimmed.trim_end_matches("::");
+    let module_name: String = head
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if module_name.is_empty() {
+        return None;
+    }
+
+    // A module may be a dependency rather than a neighbour, so the same rule the
+    // compiler uses applies here.
+    let mut file = crate::modules::find_module_file(dir, &module_name);
+    if file.is_none() {
+        for dependency in crate::modules::dependencies_of_project(dir) {
+            if dependency.name == module_name {
+                file = crate::modules::find_module_file(&dependency.source_dir, &module_name);
+                break;
+            }
+        }
+    }
+    let file = file?;
+    let source = std::fs::read_to_string(&file).ok()?;
+    let start = definition_offset(&source, word);
+    Some((file, start?))
+}
+
 /// Where a name is declared, as a byte offset.
 fn definition_offset(text: &str, word: &str) -> Option<u32> {
     // Every identifier occurrence, in order; the first one that starts a
@@ -661,6 +739,8 @@ fn definition_offset(text: &str, word: &str) -> Option<u32> {
         let before = text[line_start..at].trim_start();
         // A declaration is the name after `fn`, `struct`, `enum`, `trait`,
         // `const` or `type`, or a name followed by `: Type` in a field list.
+        // `pub ` may precede any of them, and a method may also be `pub`.
+        let before = before.strip_prefix("pub ").unwrap_or(before);
         let keywords = ["fn ", "struct ", "enum ", "trait ", "const ", "type "];
         if keywords.iter().any(|k| before.starts_with(k)) {
             return Some(at as u32);
