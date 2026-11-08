@@ -24,12 +24,56 @@ pub struct Document {
     /// The `languageId` the client sent. Only UMAY files are checked; a client
     /// may open a README in the same session.
     pub is_umay: bool,
+    /// The file on disk the document came from, when the client named one.
+    ///
+    /// The checker resolves `mod name;` against the directory of the file it is
+    /// compiling, so an editor buffer needs its own path or every module is a
+    /// missing file. `None` for a buffer with no `file:` URI, which is checked
+    /// as a file with no modules.
+    pub path: Option<std::path::PathBuf>,
 }
 
 impl Document {
     fn index(&self) -> LineIndex {
         LineIndex::new(&self.text)
     }
+
+    /// The name to hand the compiler: the file's path, or a placeholder.
+    fn source_name(&self) -> String {
+        match &self.path {
+            Some(path) => path.to_string_lossy().into_owned(),
+            None => "<lsp>".to_string(),
+        }
+    }
+}
+
+/// The filesystem path a `file:` URI names.
+///
+/// Only `file:` URIs have one; a client may invent another scheme for an
+/// in-memory buffer, and there is no directory to resolve modules against.
+fn uri_path(uri: &str) -> Option<std::path::PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let decoded = percent_decode(rest);
+    Some(std::path::PathBuf::from(decoded))
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(value) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(value);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The state the server keeps between messages.
@@ -207,7 +251,8 @@ impl Server {
             // A client that sends no languageId is opening the file it named, and
             // a `.um` extension is reason enough to check it.
             .unwrap_or(uri.ends_with(".um"));
-        self.documents.insert(uri.to_string(), Document { text, is_umay });
+        let path = uri_path(uri);
+        self.documents.insert(uri.to_string(), Document { text, is_umay, path });
         Some(uri.to_string())
     }
 
@@ -299,7 +344,7 @@ impl Server {
     /// notification.
     pub fn diagnostics_for(uri: &str, document: &Document) -> Value {
         let diags = if document.is_umay {
-            check(&document.text)
+            check(document)
         } else {
             Diagnostics::new()
         };
@@ -417,7 +462,8 @@ impl Server {
         let Some((_, document)) = self.document(params) else {
             return result_response(id, empty_completion());
         };
-        let symbols = metadata::symbols_or_empty(&document.text);
+        let symbols =
+            metadata::symbols_or_empty_at(&document.source_name(), &document.text);
         let items: Vec<Value> = symbols
             .iter()
             .map(|symbol| {
@@ -440,7 +486,8 @@ impl Server {
             return result_response(id, Value::Array(Vec::new()));
         };
         let index = LineIndex::new(&document.text);
-        let items: Vec<Value> = metadata::symbols_or_empty(&document.text)
+        let items: Vec<Value> =
+            metadata::symbols_or_empty_at(&document.source_name(), &document.text)
             .iter()
             .map(|symbol| {
                 let (name, kind, detail) = symbol_summary(symbol);
@@ -540,8 +587,8 @@ fn error_response(id: Value, code: i32, message: &str) -> Value {
 ///
 /// `analyze_source` runs the whole frontend, which is what `umay check` runs:
 /// parsing alone would let a type error sit in the editor with no squiggle.
-fn check(text: &str) -> Diagnostics {
-    let (diags, _map) = crate::analyze_source("<lsp>", text);
+fn check(document: &Document) -> Diagnostics {
+    let (diags, _map) = crate::analyze_source(&document.source_name(), &document.text);
     diags
 }
 

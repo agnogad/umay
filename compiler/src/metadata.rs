@@ -97,7 +97,13 @@ pub struct Variant {
 /// An editor asks while the program is half-written, so a parse failure is the
 /// normal case rather than an error: the answer is "nothing to offer yet".
 pub fn symbols_or_empty(text: &str) -> Vec<Symbol> {
-    match crate::metadata_source("<lsp>", text) {
+    symbols_or_empty_at("<lsp>", text)
+}
+
+/// The same, for a document that has a path, so its `mod name;` declarations
+/// resolve against the directory it is really in.
+pub fn symbols_or_empty_at(name: &str, text: &str) -> Vec<Symbol> {
+    match crate::metadata_source(name, text) {
         Ok(symbols) => symbols,
         Err(_) => Vec::new(),
     }

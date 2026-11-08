@@ -242,3 +242,112 @@ fn editing_a_module_changes_the_output() {
     );
     assert!(!second.contains("first"), "the old text must not survive:\n{second}");
 }
+
+// ---------------------------------------------------------------------------
+// The other tools see modules too
+// ---------------------------------------------------------------------------
+
+#[test]
+fn metadata_reports_the_items_in_a_module_file() {
+    // A tool asking what a project declares should hear about its modules, not
+    // only its entry point.
+    let project = Project::new("metadata");
+    project.write(
+        "main.um",
+        "fn main() -> i32 {\n    return 0\n}\n\nmod util;\n",
+    );
+    project.write("util.um", "fn helper() -> i64 {\n    return 1i64\n}\n");
+    let (status, stdout, stderr) = project.run(&["metadata", "main.um"]);
+    assert_eq!(status, 0, "metadata should succeed:\n{stderr}");
+    assert!(stdout.contains("fn main()"), "got:\n{stdout}");
+    assert!(
+        stdout.contains("util::helper"),
+        "the module's function should be listed under its path:\n{stdout}"
+    );
+}
+
+#[test]
+fn metadata_fails_the_same_way_check_does_on_a_missing_module() {
+    let project = Project::new("metadata_missing");
+    project.write("main.um", "fn main() -> i32 {\n    return 0\n}\n\nmod ghost;\n");
+    let (status, stdout, stderr) = project.run(&["metadata", "main.um"]);
+    let report = format!("{stdout}{stderr}");
+    assert_ne!(status, 0, "a missing module is an error here too");
+    assert!(report.contains("E0193"), "got:\n{report}");
+}
+
+#[test]
+fn the_language_server_resolves_modules_from_the_document_path() {
+    // The checker resolves `mod name;` against the file's directory, so a buffer
+    // has to tell the server where it lives or every module is a missing file.
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let project = Project::new("lsp_path");
+    let uri = format!(
+        "file://{}/main.um",
+        project.dir.to_string_lossy().trim_end_matches('/')
+    );
+    // The module file exists, so a server that knows where the buffer lives
+    // reports nothing.
+    project.write("util.um", "fn helper() -> i64 {\n    return 1i64\n}\n");
+
+    let source = "fn main() -> i32 {\n    println(util::helper())\n    return 0\n}\n\nmod util;\n";
+    let open = format!(
+        r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{uri}","languageId":"umay","version":1,"text":{}}}}}}}"#,
+        json_string(source)
+    );
+    let messages = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#.to_string(),
+        open,
+    ];
+
+    let mut child = Command::new(compiler())
+        .arg("lsp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the server");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin");
+        for message in &messages {
+            stdin
+                .write_all(&frame(message))
+                .expect("write a message");
+        }
+    }
+    let output = child.wait_with_output().expect("the server should finish");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        !stdout.contains("E0193"),
+        "the server reported a missing module it should have found:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("E0101"),
+        "the module's function should resolve:\n{stdout}"
+    );
+}
+
+fn frame(body: &str) -> Vec<u8> {
+    let mut out = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+    out.extend_from_slice(body.as_bytes());
+    out
+}
+
+fn json_string(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}

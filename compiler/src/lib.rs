@@ -90,11 +90,21 @@ pub fn metadata_source(
     name: impl Into<String>,
     text: impl Into<String>,
 ) -> Result<Vec<metadata::Symbol>, (Diagnostics, SourceMap)> {
-    let (out, map) = parse_source(name, text);
-    if out.diagnostics.has_errors() {
-        return Err((out.diagnostics, map));
+    let name = name.into();
+    let (out, mut map) = parse_source(name.clone(), text.into());
+    let mut diagnostics = out.diagnostics;
+    if diagnostics.has_errors() {
+        return Err((diagnostics, map));
     }
-    let symbols = metadata::symbols(&out.program, &map);
+    // Modules are read from disk so that a tool asking what a project declares
+    // hears about the items in its module files, not only the entry point.
+    let (program, module_diagnostics) =
+        modules::load_from_entry(out.program, std::path::Path::new(&name), &mut map);
+    append_all(&mut diagnostics, &module_diagnostics);
+    if diagnostics.has_errors() {
+        return Err((diagnostics, map));
+    }
+    let symbols = metadata::symbols(&program, &map);
     Ok(symbols)
 }
 

@@ -68,3 +68,12 @@ strings and integers and nothing else. Writing it out keeps the output reviewabl
 and the crate dependency-free; the risk is that a case is missing, which is why
 `jsonrpc.rs` has its own round-trip tests including surrogates and multi-byte
 text.
+
+## Modules and the buffer's path
+
+The checker resolves `mod name;` against the directory of the file being
+compiled, so the server has to know where the buffer lives. It therefore keeps
+the path from the document's `file:` URI and hands it to the compiler as the
+source name, percent-decoded. A buffer with any other scheme has no directory,
+so it is checked under a placeholder name and its modules are missing -- the
+honest result, since there is nowhere to look.

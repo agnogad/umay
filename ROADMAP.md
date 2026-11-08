@@ -534,6 +534,11 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   goes into the assembly, not just the entry point. Keying on the entry alone
   let an edited module reuse the previous assembly, so the program silently kept
   its old behaviour.
+- [x] `umay metadata` and the language server see modules. Metadata loads them
+  from disk before listing symbols. The server keeps the document's `file:` path
+  so the checker resolves `mod name;` against the directory the buffer is really
+  in; without it every module looked like a missing file in the editor and fine
+  on the command line, which is the least useful place for that disagreement.
 - [ ] Parallel compilation. There is one unit of work per build today, so there
   is nothing to run in parallel yet.
 - [x] Reproducible builds, checked: two clean builds of the same source in two
