@@ -1494,21 +1494,44 @@ impl FnChecker<'_, '_> {
         if self.is_send(ty) {
             return;
         }
-        let name = self.cx.ty_name(ty);
-        let mut d = Diagnostic::error("E1016", format!("`{name}` does not implement `Send`"))
-            .at(span)
-            .with_cause(format!("{what} is moved to another thread, and the marker says whether it may be"))
+        // A borrow is refused for a different reason than a value is, and the
+        // marker that answers for it is `Sync`. Naming the wrong one would send
+        // the reader looking for an `impl` that would not help.
+        let borrowed = match self.cx.cx.kind(ty).clone() {
+            TyKind::Ref(inner) => Some(inner),
+            _ => None,
+        };
+        let subject = borrowed.unwrap_or(ty);
+        let name = self.cx.ty_name(subject);
+        let marker = if borrowed.is_some() { "Sync" } else { "Send" };
+        let mut d = Diagnostic::error("E1016", format!("`{name}` does not implement `{marker}`"))
+            .at(span);
+        d = if borrowed.is_some() {
+            d.with_cause(format!(
+                "{what} is a borrow that crosses to another thread, and two threads may then \
+                 read the same value at once"
+            ))
+            .with_explanation(
+                "`Send` says a value may move to another thread; `Sync` says it may be \
+                 shared with one. A borrow that crosses the boundary is shared, so the \
+                 value behind it has to say it is safe for that. Writing \
+                 `impl Sync for Type {}` is how a type answers yes, and nothing is \
+                 inferred: forgetting the `impl` is an error, which is the safe direction.",
+            )
+        } else {
+            d.with_cause(format!("{what} is moved to another thread, and the marker says whether it may be"))
             .with_explanation(
                 "Ownership and borrows are statements about one thread; a value that moves \
                  to another escapes them, so the language asks the type to say it is safe. \
                  Writing `impl Send for Type {}` is how a type answers yes, and nothing is \
                  inferred: forgetting the `impl` is an error, which is the safe direction.",
-            );
-        if let Some(ty_name) = self.nominal_name(ty) {
+            )
+        };
+        if let Some(ty_name) = self.nominal_name(subject) {
             d = d.with_suggestion(Suggestion::new(
-                format!("add `impl Send for {ty_name} {{}}`"),
+                format!("add `impl {marker} for {ty_name} {{}}`"),
                 span,
-                format!("impl Send for {ty_name} {{}}"),
+                format!("impl {marker} for {ty_name} {{}}"),
             ));
         }
         self.push(d);
@@ -1572,13 +1595,77 @@ impl FnChecker<'_, '_> {
                 }
                 true
             }
-            TyKind::Ref(_) | TyKind::RawPtr(_) | TyKind::RawPtrMut(_) => {
-                // A shared borrow travels with the thread that owns the value, and
-                // the raw forms carry no guarantee at all. `Sync` is the marker for
-                // a shared borrow and nothing reads it yet, so both are refused
-                // rather than assumed.
+            TyKind::Ref(inner) => {
+                // A shared borrow may cross exactly when the value behind it is
+                // safe to hold in two places at once, which is what `Sync` says.
+                // The borrow itself is not what is at risk; the value is.
+                self.is_sync(inner)
+            }
+            TyKind::RawPtr(_) | TyKind::RawPtrMut(_) => {
+                // A raw pointer carries no guarantee at all, and no checker will
+                // ever look at it again, so it is refused rather than assumed.
                 false
             }
+            _ => {
+                let name = self.cx.ty_name(ty);
+                impls.iter().any(|i| i.type_name == name)
+            }
+        }
+    }
+
+    /// True when a value of `ty` may be held by two threads at once.
+    ///
+    /// This is the question a shared borrow raises: `&T` is only safe to send if
+    /// `T` is `Sync`, because two threads would otherwise read and write the same
+    /// memory. `Send` answers whether a value may *move*; this answers whether it
+    /// may be *shared*, and the two are separate promises a type makes.
+    pub(crate) fn is_sync(&mut self, ty: TyId) -> bool {
+        if self.cx.cx.is_error(ty) {
+            return true;
+        }
+        // As with `Send`, a parameter carries only what its own declaration's
+        // bound promised, keyed by the function's name so that one function's
+        // `T: Sync` cannot answer for another's `T`.
+        if let TyKind::Param { name } = self.cx.cx.kind(ty).clone() {
+            return self.cx.cx.param_bounds.iter().any(|b| {
+                if b.param != name || b.trait_name != "Sync" {
+                    return false;
+                }
+                match self.fn_id {
+                    Some(id) => {
+                        let here = self.cx.hir.fns.iter().find(|f| f.id == id).map(|f| f.name.as_str());
+                        match here {
+                            Some(name) => b.owner_name == name,
+                            None => true,
+                        }
+                    }
+                    None => b.owner == None,
+                }
+            });
+        }
+        let Some(impls) = self
+            .cx
+            .hir
+            .traits
+            .iter()
+            .find(|t| t.name == "Sync")
+            .map(|t| t.impls.clone())
+        else {
+            return false;
+        };
+        match self.cx.cx.kind(ty).clone() {
+            TyKind::Adt { def, args } => {
+                let name = self.cx.hir.def_name(def);
+                let Some(info) = impls.iter().find(|i| i.type_name == name) else {
+                    return false;
+                };
+                if info.bounded_all {
+                    return args.iter().all(|a| self.is_sync(*a));
+                }
+                true
+            }
+            TyKind::Ref(inner) => self.is_send(inner),
+            TyKind::RawPtr(_) | TyKind::RawPtrMut(_) => false,
             _ => {
                 let name = self.cx.ty_name(ty);
                 impls.iter().any(|i| i.type_name == name)

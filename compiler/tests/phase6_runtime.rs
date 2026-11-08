@@ -2264,3 +2264,58 @@ fn main() -> i32 {
 "#;
     build_fails_with("send_bound_not_shared", source, "E1016");
 }
+
+#[test]
+fn a_borrow_may_cross_only_when_the_value_behind_it_is_sync() {
+    // A borrow is not the thing at risk: the value it points at is. Two threads
+    // reading one value at once is what `Sync` is about, so a borrow is refused
+    // for a type that does not say it is safe to share, and the diagnostic has to
+    // name `Sync` rather than `Send` or the reader is sent looking for an `impl`
+    // that would not help.
+    let source = r#"
+struct Shared {
+    n: i64,
+}
+
+fn work(v: usize) -> usize {
+    return v
+}
+
+fn main() -> i32 {
+    let s = Shared { n: 1i64 }
+    let r = &s
+    let answer = thread_spawn::<&Shared, usize>(unsafe { work as *const u8 }, r)
+    return answer as i32
+}
+"#;
+    build_fails_with("borrow_not_sync", source, "E1016");
+}
+
+#[test]
+fn a_sync_value_may_be_borrowed_across_the_boundary() {
+    // The other half of the same rule: a type that declares `Sync` may be
+    // borrowed across, and the program runs.
+    let source = r#"
+struct Shared {
+    n: i64,
+}
+
+impl Sync for Shared {}
+
+fn work(_v: usize) -> usize {
+    return 42usize
+}
+
+fn main() -> i32 {
+    let s = Shared { n: 41i64 }
+    let r = &s
+    // The borrow crosses as the eight bytes the hand-off carries. What is being
+    // checked here is that the compiler allows it at all: `Shared` says `Sync`,
+    // so the borrow is one a second thread may hold.
+    let answer = thread_spawn::<&Shared, usize>(unsafe { work as *const u8 }, r)
+    println_i64(answer as i64)
+    return 0i32
+}
+"#;
+    expect_stdout("borrow_sync_ok", source, "42\n");
+}
