@@ -21,20 +21,19 @@ export UMAY_CACHE_DIR=/tmp/bench-cache
 | `umay asm`, warm cache | 0.09 s | The cached assembly is read instead of generated. |
 | `cc` link alone | 0.08 s | Two objects and `-no-pie`. |
 | `umay build`, clean | 0.21–0.30 s | Assembly + two `as` runs + `cc`. |
-| `umay build`, warm | 0.19–0.30 s | Assembly reused; `as` and `cc` still run. |
+| `umay build`, warm (before the executable cache) | 0.19–0.30 s | Assembly reused; `as` and `cc` still run. |
+| `umay build`, warm (executable cached) | 0.17–0.23 s | Nothing is assembled or linked. |
 | Binary size | 91,048 bytes | Includes the UMAY runtime. |
 | Compiler RSS | ~1.9 MB | Peak, on the same program. |
 
 ## What the numbers say
 
-**The cache saves little on a full build.** Reusing the assembly removes about
-0.01 s of a 0.21 s build, because the remaining work — starting two `as`
-processes and one `cc` — dominates. The cache's value is correctness of reuse
-(an unchanged rebuild does not recompile) rather than wall-clock time at this
-size. A build that skipped `as` and `cc` when their inputs were unchanged would
-save more, and is the obvious next step; it was not done here because the
-existing tests do not yet distinguish "the objects are current" from "the objects
-were produced".
+**Caching the assembly alone saves little.** Reusing it removes about 0.01 s of a
+0.21 s build, because starting two `as` processes and one `cc` dominates. Caching
+the linked executable as well is what the numbers actually asked for: a warm
+build now skips assembly and linking and lands around 0.18 s against 0.21–0.30 s
+clean. Reuse correctness and wall-clock time happened to agree once the right
+thing was cached.
 
 **Codegen is not the bottleneck.** Splitting program and runtime codegen across
 threads would buy a few milliseconds of a 100 ms compile step for the risk of

@@ -219,6 +219,20 @@ Design position for the rest:
   builds are reproducible.
 - No scripts run on install; dependency resolution is declarative.
 
+### The linked executable is cached too
+
+A warm build used to skip codegen but still ran two `as` processes and one `cc`.
+The executable is now stored under a key made of the program assembly and the
+runtime assembly, so an unchanged rebuild links nothing: on
+`examples/http-router.um`, 0.30s down to 0.18s.
+
+The restored file is written with mode 0755. `std::fs::write` creates a file with
+no execute bit, so the first version produced a build that reported success and a
+`umay run` that failed with "Permission denied" -- the failure pointing at the
+shell rather than at the cache. The regression test removes the executable
+between builds so that the copy really does come from the cache; without that the
+file is still the linker's own output and the bug is invisible.
+
 ### What runs in parallel
 
 The program object and the runtime object are assembled at the same time. They do

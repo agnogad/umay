@@ -544,6 +544,12 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   assembled at the same time. Each `as` is quiet and the caller prints, because
   two processes writing to the same stderr would make the same build say
   different things on different runs -- pinned by a test.
+- [x] An unchanged rebuild links nothing: the linked executable is cached under
+  a key made of the program assembly and the runtime assembly, so a warm build
+  starts neither `as` nor `cc`. Warm build time on `examples/http-router.um` fell
+  from about 0.30s to 0.18s. The copy restored from the cache is written with its
+  execute bit -- `std::fs::write` does not set one, so the first version produced
+  a build that succeeded and a `umay run` that failed with "Permission denied".
 - [ ] Compiling program and runtime codegen in parallel. Measured first: a cold
   build is about 0.18s, of which the link through `cc` dominates, so splitting
   codegen across threads would add shared-state risk for a few milliseconds.

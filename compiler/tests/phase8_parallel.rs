@@ -72,6 +72,24 @@ fn both_objects_are_produced_by_a_build() {
     }
 }
 
+/// The number of cache entries whose file name is `name`.
+fn entries_named(root: &std::path::Path, name: &str) -> usize {
+    let mut count = 0;
+    fn walk(dir: &std::path::Path, name: &str, count: &mut usize) {
+        let Ok(read) = std::fs::read_dir(dir) else { return };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, name, count);
+            } else if path.file_name().is_some_and(|n| n == name) {
+                *count += 1;
+            }
+        }
+    }
+    walk(root, name, &mut count);
+    count
+}
+
 #[test]
 fn the_build_says_the_same_thing_every_time() {
     // Assembling in parallel means two messages could arrive in either order.
@@ -122,4 +140,92 @@ fn parallel_assembly_does_not_break_reproducibility() {
         let right = std::fs::read(b.dir.join(artifact)).expect("artifact b");
         assert!(left == right, "{artifact} differs between two builds");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The linked executable is cached as well
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unchanged_rebuild_still_produces_a_working_executable() {
+    // The executable is now copied out of the cache instead of being linked.
+    // A copy that is truncated, or written without its mode, would fail here
+    // rather than in the field.
+    if !have_toolchain() {
+        eprintln!("skipping an_unchanged_rebuild_still_produces_a_working_executable: `cc` is not available");
+        return;
+    }
+    let build = Build::new("exe_cache");
+    assert_eq!(build.run(&["build", "main.um"]).0, 0);
+    let first = std::fs::read(build.dir.join("dist/main")).expect("the first executable");
+
+    assert_eq!(build.run(&["build", "main.um"]).0, 0);
+    let second = std::fs::read(build.dir.join("dist/main")).expect("the second executable");
+    assert!(first == second, "the cached executable differs from the linked one");
+
+    // Remove the executable so the next build must restore it from the cache.
+    // Without this the file is still the linker's own output, which is
+    // executable whatever the cache wrote -- and a restored copy that lost its
+    // mode would go unnoticed.
+    std::fs::remove_file(build.dir.join("dist/main")).expect("remove the executable");
+    assert_eq!(build.run(&["build", "main.um"]).0, 0);
+    assert!(
+        build.dir.join("dist/main").is_file(),
+        "the cached executable was not restored"
+    );
+
+    // It has to be runnable, which a byte comparison alone does not show: the
+    // execute bit lives in the file mode, not in the bytes.
+    let (status, stdout, stderr) = build.run(&["run", "main.um"]);
+    assert_eq!(status, 0, "the cached executable should run:\n{stderr}");
+    assert!(stdout.contains("parallel"), "got:\n{stdout}");
+}
+
+#[test]
+fn changing_the_source_replaces_the_cached_executable() {
+    if !have_toolchain() {
+        eprintln!("skipping changing_the_source_replaces_the_cached_executable: `cc` is not available");
+        return;
+    }
+    let build = Build::new("exe_invalidate");
+    assert_eq!(build.run(&["run", "main.um"]).0, 0);
+    std::fs::write(
+        build.dir.join("main.um"),
+        "fn main() -> i32 {\n    println(\"changed\")\n    return 0\n}\n",
+    )
+    .expect("rewrite the program");
+    let (status, stdout, stderr) = build.run(&["run", "main.um"]);
+    assert_eq!(status, 0, "the rebuild should succeed:\n{stderr}");
+    assert!(stdout.contains("changed"), "the old executable was reused:\n{stdout}");
+}
+
+#[test]
+fn a_different_optimisation_level_produces_a_different_executable_entry() {
+    if !have_toolchain() {
+        eprintln!(
+            "skipping a_different_optimisation_level_produces_a_different_executable_entry: `cc` is not available"
+        );
+        return;
+    }
+    // The linked executable's key includes the program assembly, and `-O0` and
+    // `-O2` generate different assembly, so the two cannot share an entry. This
+    // test pins the consequence rather than the mechanism: an `-O0` build
+    // followed by an `-O2` build must leave two executable entries.
+    //
+    // The level itself is also a field in the key. That is defence in depth and
+    // is not what this test proves: removing it changes nothing here precisely
+    // because the assembly differs. Worth knowing, so it is written down.
+    let build = Build::new("exe_opt");
+    let count = || entries_named(&build.cache, "exe");
+
+    assert_eq!(build.run(&["build", "main.um", "-O0"]).0, 0);
+    let after_o0 = count();
+    assert!(after_o0 > 0, "the -O0 build should have cached an executable");
+
+    assert_eq!(build.run(&["build", "main.um", "-O2"]).0, 0);
+    let after_o2 = count();
+    assert!(
+        after_o2 > after_o0,
+        "-O2 reused -O0's linked executable ({after_o0} then {after_o2})"
+    );
 }

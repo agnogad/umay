@@ -1017,24 +1017,52 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         return code;
     }
 
-    // Link with the C compiler driver, which knows where the C library and crt
-    // objects live. Nothing else from C is used.
-    let status = std::process::Command::new("cc")
-        .arg("-o")
-        .arg(&exe_path)
-        .arg(&obj_path)
-        .arg(&runtime_obj)
-        .arg("-no-pie")
-        .status();
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            eprintln!("umay: linking failed with {s}");
-            return exit::CODEGEN_ERROR;
+    // The linked executable is cached too, so an unchanged rebuild starts neither
+    // `as` nor `cc`. The key is the program assembly plus the runtime assembly:
+    // those two texts are everything that decides the objects, and the compiler
+    // version is already part of the key, so a change to the runtime or the
+    // backend cannot reuse a stale binary.
+    let exe_key = umayc::build::CacheKey::derive(
+        umayc::build::Artifact::LinkedExe,
+        level,
+        assembly.as_bytes(),
+        &[("runtime", &runtime_assembly)],
+    );
+    let mut linked_from_cache = false;
+    match cache.read(&exe_key, umayc::build::Artifact::LinkedExe) {
+        Some(bytes) => match write_executable(&exe_path, &bytes) {
+            Ok(()) => linked_from_cache = true,
+            Err(e) => {
+                eprintln!("umay: cannot write `{}`: {e}", exe_path.display());
+                return exit::IO_ERROR;
+            }
+        },
+        None => {}
+    }
+
+    if !linked_from_cache {
+        // Link with the C compiler driver, which knows where the C library and
+        // crt objects live. Nothing else from C is used.
+        let status = std::process::Command::new("cc")
+            .arg("-o")
+            .arg(&exe_path)
+            .arg(&obj_path)
+            .arg(&runtime_obj)
+            .arg("-no-pie")
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!("umay: linking failed with {s}");
+                return exit::CODEGEN_ERROR;
+            }
+            Err(e) => {
+                eprintln!("umay: cannot run `cc`: {e}");
+                return exit::IO_ERROR;
+            }
         }
-        Err(e) => {
-            eprintln!("umay: cannot run `cc`: {e}");
-            return exit::IO_ERROR;
+        if let Ok(bytes) = std::fs::read(&exe_path) {
+            let _ = cache.write(&exe_key, umayc::build::Artifact::LinkedExe, &bytes);
         }
     }
 
@@ -1100,6 +1128,23 @@ fn cmd_asm(args: &[String]) -> u8 {
 }
 
 /// Runs the assembler on one file, reporting a failure as an exit code.
+/// Writes an executable, with the execute bit set.
+///
+/// `std::fs::write` creates the file without a mode, so a copy restored from the
+/// cache would be a program the shell refuses to run -- the build would succeed
+/// and the next `umay run` would fail with "Permission denied", which points at
+/// nothing useful.
+fn write_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = 0o755;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
+}
+
 /// Assembles one `.s` into a `.o`.
 ///
 /// Prints nothing on success and returns the message to show on failure, rather
