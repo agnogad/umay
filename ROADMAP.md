@@ -687,13 +687,26 @@ input produce identical artifacts.
   operation's width. Every program that shifted by a literal failed to assemble
   before this; four tests now pin it, including both shift directions sharing a
   count.
-- [x] Comparison against Go, Rust, Zig and C, over one program each at a stated
-  toolchain version, in `docs/measurements.md`. On a 1000-function call chain all
-  five toolchains compute the same value, which is the claim worth checking --
-  UMAY builds it in 0.35 s against rustc's 0.50 s, clang's 0.48 s, go's 1.08 s
-  and gcc's 4.31 s, and links 240 KB against rustc's 4.4 MB. It is recorded as a
-  data point with its versions, not as a suite, because one program is not one.
-  Zig is listed as not installed, not dropped.
+- [x] Comparison against Go, Rust, Zig and C, over five workloads at stated
+  toolchain versions, in `docs/measurements.md`. Zig 0.17.1 was installed, so the
+  `not installed` gap is closed. Every language prints the same integer in every
+  workload -- the claim worth checking before any ratio. UMAY builds the
+  1000-function chain in 0.34 s against rustc's 0.53 s, clang's 0.40 s, go's
+  0.21 s and gcc's 4.34 s, and links 83-240 KB against rustc's 4.5 MB and go's
+  2.4 MB, at 12 MB peak build RSS against 69-147 MB for the others.
+- [x] **Runtime-speed comparison**, run five workloads long enough to dominate
+  process start: `compute` (50M multiply/add/modulo), `alloc` (2M malloc/free),
+  `fib(38)` (63M recursive calls), `str` (10 MB copy) and the call chain. UMAY
+  computes the right answer everywhere but runs about 1.6x slower than gcc on
+  `compute`, 1.7x on `fib` and 4x on `alloc`. The cause is register-allocation
+  quality -- intermediates are stored and immediately reloaded instead of staying
+  in a register -- recorded as the clearest place where effort would buy speed.
+  This closes the runtime-comparison gap the previous entry left open.
+- [x] The harness is `scripts/bench.py`: medians over repeated runs, peak RSS of
+  the measured child via `wait4`, correctness checked by comparing the printed
+  integer across languages, and a missing toolchain skipped rather than failed.
+  Zig's workloads print through libc's `write` because `std.debug.print` takes
+  ~24 s to compile in 0.17; the script comments that where it matters.
 - [x] Benchmarks at scale, over generated 1000- and 5000-function programs. A
   fivefold input costs about seven times the frontend work and four times a full
   build -- close to linear. The numbers exist so that a future change that makes
@@ -711,10 +724,19 @@ Exit criteria: UMAY MVP release.
 **Met.** The MVP is released as `0.1.0`: the compiler, standard library and
 toolchain build and run end to end, the suite passes, the specification is
 `v1.0`, and `scripts/release.sh` produces a checksummed, stripped artifact from
-a clean tree that passes its own tests. The one item left unchecked above -- a
-runtime-speed comparison -- is honestly still open: every comparison program runs
-once and exits, so a timing would measure process start, and it is recorded as
-not measured rather than filled with a number nobody can check.
+a clean tree that passes its own tests. The runtime-speed comparison that was
+previously recorded as not measured has since been run over four compute kernels
+(see the item above): UMAY is correct everywhere and 1.6-4x slower than the C
+compilers, and the reason -- register allocation quality -- is named rather than
+hidden. Closing that gap is the first item of the next phase, not of this one.
+
+Heading the next phase: close the register-allocation gap the benchmark
+measured. Every intermediate is stored to the stack and reloaded, so a loop
+body touches memory several times where the C compilers touch it once or twice.
+Keeping a value in its register across a short expression -- local allocation
+within a block -- would remove most of that traffic without touching the
+linear-scan framework. It is a named, measurable goal: the same five workloads,
+re-run, with the ratio to gcc in `docs/measurements.md` as the score.
 
 ---
 

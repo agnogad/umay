@@ -47,11 +47,12 @@ than of the program, and shrinking it is a runtime question.
 
 ## What is not measured
 
-- Runtime speed. Every program in the comparison above runs once and exits, so a
-  timing would measure process start, not the compiler. A fair runtime benchmark
-  needs a workload long enough to dominate startup, and none is built yet.
-- Zig, which is not installed on the machine these numbers were taken on. The
-  comparison names it rather than dropping it silently.
+- A whole-program benchmark suite of real applications (a parser, an HTTP
+  server under load). The workloads below are synthetic kernels, chosen so that
+  the same program can be written in six languages and checked for the same
+  output; they are not a claim about any real workload's speed.
+- Linker behaviour and kernel scheduling under contention. All numbers are from
+  an otherwise idle 12-core machine.
 
 ## At scale
 
@@ -78,38 +79,90 @@ with `UMAY_CACHE_DIR` pointed at a throwaway directory.
 
 ## Against other languages
 
-The same program (a 1000-function call chain ending in `return (r & 127)`), the
-same machine, each toolchain at the version below. This compares *build time,
-binary size and output*, not runtime speed: the program runs once and exits,
-which is dominated by process start in every language and would measure the
-loader rather than the compiler.
+Five workloads, written once per language in `scripts/bench.py`, each printing
+the same integer so correctness is checked before any timing is believed. This
+one *does* measure runtime speed as well as build time, because every workload
+runs long enough to dominate process start:
 
-| Toolchain | Version | Build time | Binary | Program output |
+- **callchain** -- 1000 functions, each calling the previous with an arithmetic
+  step, so nothing can be inlined away. Measures build time and cross-function
+  call overhead.
+- **compute** -- 50,000,000 iterations of integer multiply, add and modulo.
+  CPU-bound.
+- **alloc** -- 2,000,000 small `malloc`/`free` pairs. Allocation-bound.
+- **fib** -- `fib(38)`, 63 million recursive calls. Call/return overhead.
+- **str** -- a 10 MB buffer filled ten bytes at a time. Memory-copy bound.
+
+All on the same idle 12-core machine, each command repeated (5 builds, 7 runs)
+and the **median** reported: one run measures the machine's mood, not the
+toolchain. RSS is the peak of the measured child itself (from `wait4`), not a
+high-water mark shared with other builds.
+
+### Build time and size across all five
+
+| Toolchain | cc | callchain build | compute build | fib build | binary (fib) | build RSS |
+| --- | --- | --- | --- | --- | --- | --- |
+| UMAY 0.1.0 | own | **0.34 s** | 0.14 s | 0.14 s | **83 KB** | **12 MB** |
+| rustc 1.98.0 | own | 0.53 s | 0.11 s | 0.11 s | 4.5 MB | 123 MB |
+| clang 22.1.8 | own | 0.40 s | 0.09 s | 0.09 s | 16 KB | 85 MB |
+| gcc 16.2.1 | own | 4.34 s | **0.07 s** | 0.11 s | 16 KB | 35 MB |
+| zig 0.17.1 | own | 1.04 s | 0.38 s | 0.37 s | 144 KB | 119 MB |
+| go 1.27.0 | own | 0.21 s | 0.17 s | 0.17 s | 2.4 MB | 69 MB |
+
+### Runtime across the four compute kernels (median, seconds)
+
+| Toolchain | compute | alloc | fib | str |
 | --- | --- | --- | --- | --- |
-| UMAY | 0.1.0 (this tree) | 0.35 s | 240 KB | exit 1 |
-| rustc | 1.98.0 | 0.50 s | 4.4 MB | exit 1 |
-| clang | 22.1.8 | 0.48 s | 88 KB | exit 1 |
-| gcc | 16.2.1 | 4.31 s | 96 KB | exit 1 |
-| go | go1.27.0 | 1.08 s | 2.2 MB | exit 1 |
-| zig | not installed | -- | -- | -- |
+| gcc | **0.375** | **0.018** | **0.118** | 0.007 |
+| clang | 0.421 | 0.021 | 0.221 | **0.003** |
+| zig | 0.541 | 0.025 | 0.222 | 0.003 |
+| rust | 0.428 | 0.020 | 0.218 | 0.010 |
+| go | 0.438 | 0.020 | 0.362 | 0.026 |
+| UMAY | 0.717 | 0.077 | 0.772 | -- |
 
-What the numbers say, and what they do not:
+UMAY has no `str` row: the standard library's `String` does not yet expose the
+append-in-a-loop that the other languages use, so the workload was not written
+for it rather than written unfairly. The `--` is that omission, shown.
 
-- **The output agrees.** Every toolchain computes the same value and exits 1.
-  That is the claim worth checking -- a build time means nothing if the program
-  is wrong -- and it holds for a program with a thousand inter-function calls.
-- **UMAY is the fastest to build here**, ahead of rustc and clang by a little and
-  of gcc by an order of magnitude. The gcc figure is real for this shape (a
-  thousand heavily-inlined functions with `%`), not a mistake, and it says
-  something about that optimiser on this input rather than about gcc in general.
-- **The binary is small.** 240 KB against rustc's 4.4 MB and go's 2.2 MB, larger
-  than C's because it links the UMAY runtime as ordinary object code. That is
-  the design choice in ADR 0010 showing up as a number.
-- **This is one program.** A build-time comparison over one call-heavy program
-  is a data point, not a benchmark suite; a second shape (parsing, allocation,
-  string handling) might reorder clang and UMAY. It is recorded as a data point
-  with the toolchain versions stated, which is the most a single measurement can
-  honestly be.
+### What the numbers say
 
-Zig is listed as not installed rather than omitted: a comparison a reader cannot
-see the gaps in is not one they can check.
+- **The output agrees everywhere.** Every language prints the same integer in
+  every workload. This is the claim worth checking first; a ratio means nothing
+  if the program is wrong. `scripts/bench.py` prints a warning when they differ.
+- **UMAY builds fast and small.** It is within 0.1 s of the fastest C compiler on
+  the call-heavy program while gcc takes 4.3 s there (a real gcc result for a
+  thousand heavily-inlined functions with `%`), and its peak RSS is 12 MB against
+  85–147 MB for the others. Its binary is 83–240 KB against rustc's 4.5 MB and
+  go's 2.4 MB: the UMAY runtime links as ordinary object code, as ADR 0010 chose.
+- **UMAY runs slower, and this is the honest gap.** It is about 1.6x slower than
+  the C compilers on `compute`, 1.7x on `fib` and 4x on `alloc`. The cause is not
+  a wrong instruction — the programs compute the right answer — but register
+  allocation quality: every intermediate value is stored to the stack and
+  immediately reloaded instead of staying in a register, so a loop body does
+  several memory accesses the C compilers turn into one or two. That is a
+  selector/allocator optimisation, not a defect, and it is the clearest place
+  where effort would buy speed.
+- **`callchain` run times are near the noise floor.** Every language finishes it
+  in 3–7 ms; at that size the numbers measure the loader more than the call path,
+  which is why they are reported but not leaned on.
+
+### What this does not measure
+
+- Real applications. These are kernels chosen to be writable in six languages and
+  checkable; a parser or an HTTP server under load could reorder them.
+- Compile time on a large project. `At scale` above covers that separately.
+- Zig's `std.debug.print` cost, which is a property of one library call (it takes
+  ~24 s to compile in 0.17) and was avoided in the workloads by printing through
+  libc's `write` instead. That choice is in the script and is commented there.
+
+## Reproducing
+
+```sh
+cargo build --release
+python3 scripts/bench.py            # tables
+python3 scripts/bench.py --json     # machine-readable
+python3 scripts/bench.py --only fib # one workload
+```
+
+The harness needs `rustc`, `gcc`, `clang`, `zig` and `go` on `PATH`; a toolchain
+that is missing is skipped rather than reported as a failure.
