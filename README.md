@@ -174,6 +174,7 @@ Cranelift.
 | [docs/compiler-architecture.md](docs/compiler-architecture.md) | Pipeline, modules, interfaces |
 | [docs/diagnostics.md](docs/diagnostics.md) | Codes, schema, JSON contract |
 | [docs/build-system.md](docs/build-system.md) | Manifest, caching, incremental builds |
+| [docs/measurements.md](docs/measurements.md) | Recorded timings, sizes, and what they say |
 | [docs/adr/](docs/adr/) | Architecture Decision Records |
 
 ## Building and testing

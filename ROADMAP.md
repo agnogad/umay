@@ -587,8 +587,15 @@ the same input produce identical artifacts.
 ## Phase 9 — Stabilization · planned
 
 - Extended test corpora, property-based and fuzz testing at each phase boundary.
-- Benchmarks: clean time, incremental time, compiler RSS, runtime speed, binary
-  size — each compared against Go, Rust, Zig and C equivalents where meaningful.
+- [x] Benchmarks of clean time, incremental time, compiler RSS and binary size,
+  recorded in `docs/measurements.md` with the command that produced them. The
+  numbers changed a decision: the cache saves about 0.01s of a 0.21s build
+  because process startup and `cc` dominate, so the next build-system work is
+  skipping `as`/`cc` when their inputs are unchanged, not compiling in parallel.
+- [ ] Comparison against Go, Rust, Zig and C. Performing it fairly needs the same
+  program in each language and a stated toolchain version; a number without both
+  is a claim nobody can check. Not started.
+- [ ] Benchmarking at scale. The largest program in the repository is 153 lines.
 - Documentation review; specification promoted from draft to 1.0.
 - Release engineering: versioning, release notes, binary distribution.
 
