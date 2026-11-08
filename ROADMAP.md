@@ -187,7 +187,7 @@ programs and checks their exit codes.
 
 ---
 
-## Phase 6 — Runtime and Standard Library · in progress
+## Phase 6 — Runtime and Standard Library · done
 
 ### Step 1 — the runtime · done
 
@@ -212,7 +212,7 @@ signedness read from a comparison's result type, every load widening to 64 bits,
 `%rax` used as scratch while it held an address, a spilled address never
 resolved, and malformed `movz`/`movs` mnemonics. See ADR 0010.
 
-### Step 2 — a real standard library · in progress
+### Step 2 — a real standard library · done
 
 - [x] The prelude is **real UMAY source** (`stdlib/prelude.um`), parsed with every
   program: `print`, `println`, `eprintln`, `println_i64`, `byte_len`, `alloc`,
@@ -506,12 +506,28 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
 
 ---
 
-## Phase 8 — Build System and Packages · planned
+## Phase 8 — Build System and Packages · in progress
 
-- Content-addressed cache with the key derivation in
-  `docs/build-system.md`.
-- Module-level invalidation; parallel compilation.
-- Reproducible builds.
+- [x] Content-addressed cache with the key derivation in
+  `docs/build-system.md`. SHA-256 lives in the tree (`compiler/src/sha256.rs`)
+  because the crate has no dependencies; it is checked against the NIST vectors,
+  including the 55/56/64-byte padding boundary where a naive implementation
+  reuses a block it should not. The key covers the compiler version, artifact,
+  target, optimisation level, edition and the exact source bytes, each hashed
+  with its name and length so that two input sets cannot concatenate to the
+  same hash.
+- [x] An empty cache entry is a miss, not an artifact. A build killed mid-write
+  leaves a zero-length file, and serving it links an assembly with nothing in
+  it, so the failure surfaces as "undefined reference to `main`" much later.
+- [x] `umay build` reuses the cached assembly for the program and for the
+  runtime, so an unchanged rebuild recompiles neither. An unchanged rebuild adds
+  no cache entries, an edit does, and `-O0` and `-O2` never share one.
+- [x] `umay doctor` reports the cache's entry count and size, the inputs the key
+  is derived from, and the real phase status.
+- Module-level invalidation; parallel compilation. The compiler is single-file
+  today, so there is nothing to invalidate at module granularity yet.
+- Reproducible builds (the assembly is already identical across two clean
+  builds; the linked executable is the system linker's business).
 - `upm` package manager with `umay.lock`.
 
 Exit criteria: incremental rebuild after a one-module edit does not recompile

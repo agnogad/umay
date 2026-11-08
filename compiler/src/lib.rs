@@ -17,6 +17,7 @@
 
 pub mod ast;
 pub mod asm;
+pub mod build;
 pub mod cache;
 pub mod codegen;
 pub mod borrowck;
@@ -47,6 +48,7 @@ pub mod mir_print;
 pub mod parser;
 pub mod prelude;
 pub mod sema;
+pub mod sha256;
 pub mod source;
 pub mod token;
 pub mod types;

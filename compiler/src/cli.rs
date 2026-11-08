@@ -524,18 +524,27 @@ fn cmd_doctor(_args: &[String]) -> u8 {
     println!("  cache directory  : {}", umayc::cache_dir().display());
     let cache_ok = umayc::ensure_cache_dir().is_ok();
     println!("  cache writable   : {}", if cache_ok { "yes" } else { "NO (check permissions)" });
+    let (entries, bytes) = umayc::build::Cache::open().stats();
+    println!("  cache entries    : {entries} ({})", human_bytes(bytes));
     println!();
+    println!("  cache key is derived from:");
+    for input in umayc::build::CacheKey::derivation() {
+        println!("    - {input}");
+    }
+    println!();
+    // What this build can do, stated as fact rather than as a plan: the point of
+    // `doctor` is to answer "will this compiler do what I need".
     println!("  phase status:");
     for (phase, state) in [
-        ("0 architecture docs", "complete"),
-        ("1 lexer + parser", "complete"),
-        ("2 semantic analysis", "not started"),
-        ("3 HIR / MIR", "not started"),
-        ("4 ownership + borrow checking", "not started"),
-        ("5 x86_64 code generation", "not started"),
-        ("6 runtime + standard library", "not started"),
-        ("7 developer experience", "not started"),
-        ("8 build system + packages", "not started"),
+        ("0 architecture docs", "done"),
+        ("1 lexer + parser", "done"),
+        ("2 semantic analysis", "done"),
+        ("3 HIR / MIR", "done"),
+        ("4 ownership + borrow checking", "done"),
+        ("5 x86_64 code generation", "done"),
+        ("6 runtime + standard library", "done"),
+        ("7 developer experience", "done"),
+        ("8 build system + packages", "in progress"),
         ("9 stabilization", "not started"),
     ] {
         println!("    {phase:<32} {state}");
@@ -544,6 +553,22 @@ fn cmd_doctor(_args: &[String]) -> u8 {
         exit::OK
     } else {
         exit::IO_ERROR
+    }
+}
+
+/// A byte count a person can read.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
@@ -671,6 +696,16 @@ fn wrap(text: &str, width: usize) -> String {
 ///
 /// A build that succeeds is not silent about a warning it saw: `check` reports
 /// these, and a user who runs `build` instead should not get a different story.
+/// The cache key's name for an optimisation level.
+fn opt_level_name(level: umayc::opt::OptLevel) -> &'static str {
+    match level {
+        umayc::opt::OptLevel::O0 => "O0",
+        umayc::opt::OptLevel::O1 => "O1",
+        umayc::opt::OptLevel::O2 => "O2",
+        umayc::opt::OptLevel::O3 => "O3",
+    }
+}
+
 fn report_warnings(diags: &Diagnostics, map: &SourceMap, opts: &Options) {
     if diags.items().is_empty() {
         return;
@@ -706,24 +741,52 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         }
     };
 
-    let output = match umayc::codegen_source(path.to_string_lossy().as_ref(), &text, opts.opt_level) {
-        Ok(o) => o,
-        Err((diags, map)) => {
-            // A tool that drives the compiler reads JSON from every command, not
-            // just from `check`; a build that fails has to say so in the same
-            // shape or the driver needs two parsers.
-            if opts.format_json {
-                println!("{}", render_json(&diags, &map));
-            } else {
-                let rendered =
-                    umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
-                eprint!("{rendered}");
-            }
-            return exit::COMPILE_ERROR;
+    // The cache is keyed on everything that goes into the assembly, so a hit is
+    // the previous compile's exact answer. A miss is the normal first build.
+    let cache = umayc::build::Cache::open();
+    let level = opt_level_name(opts.opt_level);
+    let program_key = umayc::build::CacheKey::derive(
+        umayc::build::Artifact::ProgramAsm,
+        level,
+        text.as_bytes(),
+        &[],
+    );
+
+    let cached_assembly = cache.read(&program_key, umayc::build::Artifact::ProgramAsm);
+    let assembly = match cached_assembly {
+        Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        None => {
+            let output = match umayc::codegen_source(
+                path.to_string_lossy().as_ref(),
+                &text,
+                opts.opt_level,
+            ) {
+                Ok(o) => o,
+                Err((diags, map)) => {
+                    // A tool that drives the compiler reads JSON from every
+                    // command, not just from `check`; a build that fails has to
+                    // say so in the same shape or the driver needs two parsers.
+                    if opts.format_json {
+                        println!("{}", render_json(&diags, &map));
+                    } else {
+                        let rendered = umayc::render_all_full(
+                            &diags,
+                            &map,
+                            use_color(opts.color),
+                            opts.explain,
+                        );
+                        eprint!("{rendered}");
+                    }
+                    return exit::COMPILE_ERROR;
+                }
+            };
+            report_warnings(&output.diagnostics, &output.map, &opts);
+            // Only a clean build is stored: a warning is about the source, and the
+            // next run of the same source has to report it again.
+            let _ = cache.write(&program_key, umayc::build::Artifact::ProgramAsm, output.assembly.as_bytes());
+            output.assembly
         }
     };
-
-    report_warnings(&output.diagnostics, &output.map, &opts);
 
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
     // Artifacts go in `dist/` at the project root; the build never writes inside
@@ -736,7 +799,7 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     let asm_path = dist.join(format!("{stem}.s"));
     let exe_path = dist.join(stem);
 
-    if let Err(e) = std::fs::write(&asm_path, &output.assembly) {
+    if let Err(e) = std::fs::write(&asm_path, &assembly) {
         eprintln!("umay: cannot write `{}`: {e}", asm_path.display());
         return exit::IO_ERROR;
     }
@@ -754,18 +817,43 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     // compiler.
     let runtime_asm = dist.join("umay_runtime.s");
     let runtime_obj = dist.join("umay_runtime.o");
-    let runtime = match umayc::codegen_source_without_prelude("umay_runtime", umayc::RUNTIME_SOURCE, opts.opt_level) {
-        Ok(o) => o,
-        Err((diags, map)) => {
-            // A failure here is a compiler bug, not a problem with the user's
-            // program, so it says so instead of blaming the source.
-            let rendered = umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
-            eprint!("{rendered}");
-            eprintln!("umay: internal error: the runtime failed to compile");
-            return exit::CODEGEN_ERROR;
+    // The runtime is the same source on every build, so its assembly is a cache
+    // hit after the first build of a given compiler version and level.
+    let runtime_key = umayc::build::CacheKey::derive(
+        umayc::build::Artifact::RuntimeAsm,
+        level,
+        umayc::RUNTIME_SOURCE.as_bytes(),
+        &[],
+    );
+    let runtime_assembly = match cache.read(&runtime_key, umayc::build::Artifact::RuntimeAsm) {
+        Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        None => {
+            match umayc::codegen_source_without_prelude(
+                "umay_runtime",
+                umayc::RUNTIME_SOURCE,
+                opts.opt_level,
+            ) {
+                Ok(o) => {
+                    let _ = cache.write(
+                        &runtime_key,
+                        umayc::build::Artifact::RuntimeAsm,
+                        o.assembly.as_bytes(),
+                    );
+                    o.assembly
+                }
+                Err((diags, map)) => {
+                    // A failure here is a compiler bug, not a problem with the
+                    // user's program, so it says so instead of blaming the source.
+                    let rendered =
+                        umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
+                    eprint!("{rendered}");
+                    eprintln!("umay: internal error: the runtime failed to compile");
+                    return exit::CODEGEN_ERROR;
+                }
+            }
         }
     };
-    if let Err(e) = std::fs::write(&runtime_asm, &runtime.assembly) {
+    if let Err(e) = std::fs::write(&runtime_asm, &runtime_assembly) {
         eprintln!("umay: cannot write `{}`: {e}", runtime_asm.display());
         return exit::IO_ERROR;
     }

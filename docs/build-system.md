@@ -92,8 +92,15 @@ key = H(
 )
 ```
 
-`H` is a 256-bit hash (BLAKE3 or SHA-256; the choice is frozen in an ADR before
-implementation). The key is hex-encoded and used as the directory name.
+`H` is SHA-256, implemented in `compiler/src/sha256.rs` because the compiler has
+no dependencies. The key is hex-encoded and used as the directory name under a
+two-character prefix directory, so one directory never holds tens of thousands
+of entries. The field list is also printed by `umay doctor`, so the inputs can be
+read rather than inferred.
+
+Each input is hashed with its name and its length before its bytes, so two
+different sets of inputs cannot produce the same hash by concatenating to the
+same bytes: `("a", "bc")` and `("a", "b"), ("c", "")` hash differently.
 
 ### 5.2 Cache entries
 
@@ -192,7 +199,26 @@ Deferred to Phase 8. Design position:
   builds are reproducible.
 - No scripts run on install; dependency resolution is declarative.
 
-## 10. What Phase 1 implements
+## 10. What is implemented
+
+Phase 8 (in progress):
+
+- SHA-256 (`compiler/src/sha256.rs`), checked against the NIST vectors including
+  the 55/56/64-byte padding boundary and the one-million-`a` stress case.
+- The content-addressed cache (`compiler/src/build.rs`): key derivation, the
+  `<root>/v1/<2 hex>/<hash>/` layout, atomic writes, and stats for `umay doctor`.
+- `umay build` consults the cache for both the program's assembly and the
+  runtime's, so an unchanged rebuild recompiles neither.
+- An empty entry is treated as a miss rather than as an artifact. A build killed
+  mid-write leaves a zero-length file, and serving it links an assembly with no
+  text in it -- the program then fails to find `main`, which is a confusing place
+  to discover a cache problem.
+- `umay doctor` reports the entry count, the size, and the key's inputs.
+
+Still to come: module-level invalidation across a multi-file program (the
+compiler is single-file today), parallel compilation, and `upm`.
+
+## 11. What Phase 1 implemented
 
 - The canonical project layout produced by `umay new`.
 - The external cache path (`cache::cache_dir`), with `$UMAY_CACHE_DIR` override.
