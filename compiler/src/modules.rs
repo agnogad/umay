@@ -88,10 +88,13 @@ pub fn dependencies_of_project(source_dir: &Path) -> Vec<DependencyPath> {
         .dependencies
         .iter()
         .filter_map(|dependency| {
-            let path = dependency.path.as_ref()?;
-            // Paths in a manifest are relative to the manifest, which is what
-            // `umay build` and `umay lock` already use.
-            let source_dir = project_dir.join(path).join("src");
+            // A path dependency lives where the manifest points. A fetched one
+            // was unpacked under `deps/<name>`, whose `src/` is its module root,
+            // the same shape a path dependency has.
+            let source_dir = match &dependency.path {
+                Some(path) => project_dir.join(path).join("src"),
+                None => project_dir.join("deps").join(&dependency.name).join("src"),
+            };
             Some(DependencyPath {
                 name: dependency.name.clone(),
                 source_dir,

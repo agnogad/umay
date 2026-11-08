@@ -196,14 +196,17 @@ fn dependencies_are_read_in_both_forms() {
 }
 
 #[test]
-fn a_registry_dependency_with_no_version_is_rejected() {
-    let errs = errors(
-        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[dependencies]\nlib = { path = \"\" }\n",
-    );
-    assert!(
-        has(&errs, "has no version"),
-        "a dependency must say what version it wants: {errs:?}"
-    );
+fn a_registry_dependency_with_no_version_asks_for_the_newest() {
+    // An empty version is now a request for the newest the registry holds, not
+    // a mistake: there is a registry to answer it. The dependency is accepted
+    // with an empty version, which `umay lock` resolves to a concrete one.
+    let manifest = parse(
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[dependencies]\nlib = \"\"\n",
+    )
+    .expect("an empty version is a valid request for the newest release");
+    assert_eq!(manifest.dependencies[0].name, "lib");
+    assert!(manifest.dependencies[0].version.is_empty());
+    assert!(manifest.dependencies[0].path.is_none());
 }
 
 #[test]

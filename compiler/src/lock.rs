@@ -260,23 +260,41 @@ fn walk(
     chosen: &mut std::collections::BTreeMap<String, String>,
 ) {
     for dependency in &manifest.dependencies {
-        let Some(relative) = &dependency.path else {
-            unresolved.push((
-                dependency.name.clone(),
-                "there is no registry yet, so a dependency with no `path` cannot be fetched"
-                    .to_string(),
-            ));
-            continue;
+        // A dependency with no `path` is fetched from the registry into
+        // `project_dir/deps/<name>`; one with a `path` is used where it lies.
+        // Either way `source_dir` ends up being the directory that holds the
+        // package's `umay.toml`, and `walk` continues from there.
+        let source_dir = match &dependency.path {
+            Some(relative) => {
+                let dir = base.join(relative);
+                if !dir.is_dir() {
+                    unresolved.push((
+                        dependency.name.clone(),
+                        format!("`{}` is not a directory", dir.display()),
+                    ));
+                    continue;
+                }
+                dir
+            }
+            None => {
+                // The registry answers a name and a version. A manifest that
+                // names a version pins it; one that names none asks for the
+                // newest the registry holds, which fetch_latest resolves.
+                let fetched = if dependency.version.is_empty() {
+                    crate::upm::fetch_latest(root, &dependency.name)
+                } else {
+                    crate::upm::fetch(root, &dependency.name, &dependency.version)
+                        .map(|dir| (dir, dependency.version.clone()))
+                };
+                match fetched {
+                    Ok((dir, _version)) => dir,
+                    Err(err) => {
+                        unresolved.push((dependency.name.clone(), err.message));
+                        continue;
+                    }
+                }
+            }
         };
-
-        let source_dir = base.join(relative);
-        if !source_dir.is_dir() {
-            unresolved.push((
-                dependency.name.clone(),
-                format!("`{}` is not a directory", source_dir.display()),
-            ));
-            continue;
-        }
         let canonical = canonical_dir(&source_dir);
 
         // A dependency that reaches itself is a mistake in the graph, not a

@@ -55,6 +55,7 @@ pub mod sha256;
 pub mod source;
 pub mod token;
 pub mod types;
+pub mod upm;
 
 use diagnostics::{Diagnostic, Diagnostics};
 use source::{FileId, SourceMap};

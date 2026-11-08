@@ -351,16 +351,10 @@ fn validate(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
                 format!("`{}` is not a valid dependency name", dependency.name),
             ));
         }
-        // A path dependency needs no version, but a registry one does.
-        if dependency.path.is_none() && dependency.version.is_empty() {
-            errors.push(
-                ManifestError::at(
-                    0,
-                    format!("dependency `{}` has no version", dependency.name),
-                )
-                .with_help("add a version, or a `path`"),
-            );
-        }
+        // A path dependency needs no version. A registry dependency may name one
+        // to pin it, or leave it empty to ask for the newest the registry holds --
+        // an empty version is a request, not a mistake, now that a registry
+        // exists to answer it.
     }
 }
 
