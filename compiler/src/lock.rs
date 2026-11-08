@@ -206,40 +206,217 @@ pub struct Resolution {
     pub unresolved: Vec<(String, String)>,
 }
 
-/// Resolves a manifest's dependencies.
+/// Resolves a manifest's dependencies, and theirs.
 ///
-/// A path dependency is read and hashed. Anything else needs a registry, which
-/// does not exist yet, so it is reported as unresolved rather than invented: a
-/// lockfile that claims to have pinned something it never fetched is worse than
-/// no lockfile.
+/// The graph is walked breadth-first from the project's own manifest. Until this
+/// walked, only the direct dependencies were locked and a dependency's own
+/// dependencies were ignored -- so a lockfile said it had pinned a project's
+/// dependencies while silently leaving most of them out.
+///
+/// Only path dependencies can be resolved, because there is no registry. A
+/// dependency with no `path` is reported rather than invented: a lockfile that
+/// claims to have pinned something it never looked at is worse than none.
 pub fn resolve(project_dir: &Path, manifest: &Manifest) -> Resolution {
     let mut lockfile = Lockfile::new();
     let mut unresolved = Vec::new();
+    // Directories already visited, so a diamond does not lock a dependency twice
+    // and a cycle does not recurse forever.
+    let mut visited: Vec<PathBuf> = Vec::new();
+    // The chain that led to the current dependency, for a cycle message a reader
+    // can act on.
+    let mut stack: Vec<String> = Vec::new();
+    // What each name was already resolved to, for a version conflict.
+    let mut chosen: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
 
-    for dependency in &manifest.dependencies {
-        match &dependency.path {
-            Some(path) => {
-                let source_dir = project_dir.join(path);
-                match source_hash(&source_dir) {
-                    Ok(hash) => lockfile.packages.push(Locked {
-                        name: dependency.name.clone(),
-                        version: dependency.version.clone(),
-                        source: path.clone(),
-                        hash,
-                    }),
-                    Err(reason) => unresolved.push((dependency.name.clone(), reason)),
-                }
-            }
-            None => unresolved.push((
-                dependency.name.clone(),
-                "there is no registry yet, so a dependency with no `path` cannot be fetched"
-                    .to_string(),
-            )),
-        }
-    }
+    let root = canonical_dir(project_dir);
+    walk(
+        project_dir,
+        manifest,
+        &root,
+        &mut lockfile,
+        &mut unresolved,
+        &mut visited,
+        &mut stack,
+        &mut chosen,
+    );
 
     lockfile.packages.sort_by(|a, b| a.name.cmp(&b.name));
     Resolution { lockfile, unresolved }
+}
+
+/// The recursive half of [`resolve`].
+///
+/// Parameters rather than a struct because the borrow checker is happier and the
+/// call sites read the same either way; the doc above says what each is for.
+#[allow(clippy::too_many_arguments)]
+fn walk(
+    base: &Path,
+    manifest: &Manifest,
+    root: &Path,
+    lockfile: &mut Lockfile,
+    unresolved: &mut Vec<(String, String)>,
+    visited: &mut Vec<PathBuf>,
+    stack: &mut Vec<String>,
+    chosen: &mut std::collections::BTreeMap<String, String>,
+) {
+    for dependency in &manifest.dependencies {
+        let Some(relative) = &dependency.path else {
+            unresolved.push((
+                dependency.name.clone(),
+                "there is no registry yet, so a dependency with no `path` cannot be fetched"
+                    .to_string(),
+            ));
+            continue;
+        };
+
+        let source_dir = base.join(relative);
+        if !source_dir.is_dir() {
+            unresolved.push((
+                dependency.name.clone(),
+                format!("`{}` is not a directory", source_dir.display()),
+            ));
+            continue;
+        }
+        let canonical = canonical_dir(&source_dir);
+
+        // A dependency that reaches itself is a mistake in the graph, not a
+        // program to compile: say which chain closed the loop.
+        if canonical == *root {
+            let mut chain = stack.clone();
+            chain.push(dependency.name.clone());
+            unresolved.push((
+                dependency.name.clone(),
+                format!(
+                    "dependency cycle: {} returns to the project itself",
+                    chain.join(" -> ")
+                ),
+            ));
+            continue;
+        }
+        // A dependency already on the stack closes a loop back to itself. That
+        // is a mistake in the graph rather than a package that happens to be
+        // reached twice, and the message names the chain so it can be found.
+        if let Some(seen_at) = stack.iter().position(|seen| *seen == dependency.name) {
+            let mut chain: Vec<String> = stack[seen_at..].to_vec();
+            chain.push(dependency.name.clone());
+            unresolved.push((
+                dependency.name.clone(),
+                format!("dependency cycle: {}", chain.join(" -> ")),
+            ));
+            continue;
+        }
+        if visited.iter().any(|v| *v == canonical) {
+            // Reached through another route. Two routes to the same directory is
+            // a diamond, which is fine: it is one package.
+            continue;
+        }
+
+        let hash = match source_hash(&source_dir) {
+            Ok(hash) => hash,
+            Err(reason) => {
+                unresolved.push((dependency.name.clone(), reason));
+                continue;
+            }
+        };
+
+        // The version the dependency's own manifest states is the truth about
+        // it; the constraint in the parent's manifest is a request. A
+        // disagreement is reported rather than quietly resolved in either
+        // direction, because both answers are wrong: one builds a version the
+        // author did not ask for, the other edits a file the author did not
+        // write.
+        let own = manifest::read_project(&source_dir);
+        let own_version = match &own {
+            Ok(m) => m.package.version.clone(),
+            Err(_) => dependency.version.clone(),
+        };
+        if !dependency.version.is_empty() && !own_version.is_empty() && own_version != dependency.version
+        {
+            unresolved.push((
+                dependency.name.clone(),
+                format!(
+                    "`{}` is version {}, but the manifest asks for {}",
+                    dependency.name, own_version, dependency.version
+                ),
+            ));
+            continue;
+        }
+
+        // Two routes to the same *name* with different versions is a real
+        // conflict: a program cannot have two `lib`s.
+        if let Some(existing) = chosen.get(&dependency.name) {
+            if existing != &own_version {
+                unresolved.push((
+                    dependency.name.clone(),
+                    format!(
+                        "`{}` is required at both {} and {} through different paths",
+                        dependency.name, existing, own_version
+                    ),
+                ));
+                continue;
+            }
+            continue;
+        }
+        chosen.insert(dependency.name.clone(), own_version.clone());
+
+        lockfile.packages.push(Locked {
+            name: dependency.name.clone(),
+            version: own_version,
+            // The path is recorded relative to the project that named it, which
+            // is also relative to the project being locked, since every path is
+            // written from the directory of the manifest that contains it.
+            source: normalise_relative(root, &canonical),
+            hash,
+        });
+
+        visited.push(canonical.clone());
+        stack.push(dependency.name.clone());
+        if let Ok(own) = own {
+            walk(
+                &source_dir,
+                &own,
+                root,
+                lockfile,
+                unresolved,
+                visited,
+                stack,
+                chosen,
+            );
+        }
+        stack.pop();
+    }
+}
+
+/// A dependency's path as written from the project being locked.
+///
+/// The lockfile records where a package came from, and a reader expects a path
+/// that means something from the project root -- `../lib`, not
+/// `/home/someone/projects/lib`, which would make the lockfile depend on the
+/// machine it was written on and break reproducibility.
+fn normalise_relative(root: &Path, target: &Path) -> String {
+    let from: Vec<std::path::Component> = root.components().collect();
+    let to: Vec<std::path::Component> = target.components().collect();
+    let common = from
+        .iter()
+        .zip(to.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut parts: Vec<String> = Vec::new();
+    for _ in common..from.len() {
+        parts.push("..".to_string());
+    }
+    for component in &to[common..] {
+        parts.push(component.as_os_str().to_string_lossy().into_owned());
+    }
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn canonical_dir(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// The content hash of a dependency directory.

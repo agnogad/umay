@@ -576,10 +576,23 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   recorded with a SHA-256 of their source, so a changed dependency is visible
   rather than silently adopted. Re-locking an unchanged project produces the same
   bytes.
-- [ ] `upm` proper: fetching, version resolution across a dependency graph, and a
-  registry. None of it can be built honestly yet -- there is no registry, so
-  `umay lock` reports a dependency with no `path` and writes nothing rather than
-  claiming to have pinned something it never fetched.
+- [x] Dependency graph resolution. `umay lock` walks the whole graph, not just
+  the project's direct dependencies: a chain three deep is fully locked, a
+  diamond locks the shared package once. A cycle is reported with the chain that
+  closed it (`a -> b -> a`) rather than expanding until the stack is gone, and a
+  dependency that points back at the project is caught the same way.
+- [x] Version agreement. A dependency's own manifest says what it *is*; the
+  parent's manifest says what was *asked for*. A disagreement is reported with
+  both versions rather than resolved in either direction -- one answer builds a
+  version the author did not request, the other edits a file they did not write.
+  The same name at two versions through different paths is a conflict for the
+  same reason: a program cannot have two `lib`s.
+- [x] Locked paths are relative to the project, so a lockfile does not depend on
+  the machine that wrote it.
+- [ ] `upm` proper: fetching and a registry. A dependency with no `path` is still
+  reported and nothing is written, because there is no registry to fetch from
+  and a lockfile claiming to pin something it never looked at is worse than
+  none.
 
 Exit criteria: incremental rebuild after a one-module edit does not recompile
 independent modules (met for module granularity: the cache key covers the whole

@@ -199,8 +199,16 @@ Partially implemented in Phase 8. What exists:
 - The lockfile (`compiler/src/lock.rs`): format 1, written in a fixed order so
   the same resolution produces the same bytes, and read back with the format
   version checked.
-- `umay lock`: resolves path dependencies and records the SHA-256 of each one's
-  source. A dependency that changed is visible rather than silently adopted.
+- `umay lock`: resolves the dependency *graph* -- a dependency's own
+  dependencies are locked too -- and records the SHA-256 of each one's source. A
+  dependency that changed is visible rather than silently adopted. A chain three
+  deep is fully locked; a diamond locks the shared package once; a cycle is
+  reported with the chain that closed it instead of expanding forever. Locked
+  paths are relative to the project, so a lockfile does not depend on the machine
+  that wrote it.
+- Version agreement: the dependency's own manifest says what it is, the parent's
+  says what was asked for, and a disagreement is reported with both numbers
+  rather than resolved in either direction.
 - `umay build` and `umay run` with no file argument use `[build] entry`.
 - `output-dir` naming `target`, in any spelling, is refused.
 

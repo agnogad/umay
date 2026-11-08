@@ -347,3 +347,240 @@ fn listing(dir: &Path) -> Vec<String> {
     out.sort();
     out
 }
+
+// ---------------------------------------------------------------------------
+// A dependency graph, not just a list
+// ---------------------------------------------------------------------------
+
+/// A dependency tree: a directory of packages, each with a manifest.
+struct Tree {
+    root: PathBuf,
+}
+
+impl Tree {
+    fn new(tag: &str) -> Tree {
+        let root = std::env::temp_dir().join(format!("umay_tree_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create the tree");
+        Tree { root }
+    }
+
+    /// Adds a package with a name, version and dependency list.
+    fn package(&self, name: &str, version: &str, deps: &[(&str, &str, &str)]) -> &Self {
+        let dir = self.root.join(name);
+        std::fs::create_dir_all(dir.join("src")).expect("create the package");
+        std::fs::write(
+            dir.join("src/lib.um"),
+            format!("// {name}\nfn value() -> i64 {{\n    return 1i64\n}}\n"),
+        )
+        .expect("write the source");
+        let mut manifest = format!(
+            "[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2026\"\n"
+        );
+        if !deps.is_empty() {
+            manifest.push_str("\n[dependencies]\n");
+            for (dep_name, dep_version, dep_path) in deps {
+                manifest.push_str(&format!(
+                    "{dep_name} = {{ path = \"{dep_path}\", version = \"{dep_version}\" }}\n"
+                ));
+            }
+        }
+        std::fs::write(dir.join("umay.toml"), manifest).expect("write the manifest");
+        self
+    }
+
+    fn lock(&self, package: &str) -> (i32, String, String) {
+        let output = Command::new(compiler())
+            .current_dir(self.root.join(package))
+            .env("UMAY_CACHE_DIR", self.root.join(".cache"))
+            .arg("lock")
+            .output()
+            .expect("run umay lock");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    }
+
+    fn lockfile(&self, package: &str) -> String {
+        std::fs::read_to_string(self.root.join(package).join("umay.lock")).unwrap_or_default()
+    }
+}
+
+#[test]
+fn a_dependency_of_a_dependency_is_locked_too() {
+    // Before this walked the graph, only the direct dependency was recorded and a
+    // lockfile claimed to pin a project's dependencies while leaving most of them
+    // out.
+    let tree = Tree::new("transitive");
+    tree.package("base", "0.2.0", &[]);
+    tree.package("lib", "1.0.0", &[("base", "0.2.0", "../base")]);
+    tree.package("app", "0.1.0", &[("lib", "1.0.0", "../lib")]);
+
+    let (status, stdout, stderr) = tree.lock("app");
+    assert_eq!(status, 0, "locking should succeed:\n{stderr}");
+    assert!(stdout.contains("2 packages"), "got {stdout}");
+    let lock = tree.lockfile("app");
+    assert!(lock.contains("name = \"lib\""), "got:\n{lock}");
+    assert!(lock.contains("name = \"base\""), "the transitive dependency is missing:\n{lock}");
+}
+
+#[test]
+fn a_chain_three_deep_is_fully_locked() {
+    let tree = Tree::new("chain");
+    tree.package("c", "1.0.0", &[]);
+    tree.package("b", "1.0.0", &[("c", "1.0.0", "../c")]);
+    tree.package("a", "1.0.0", &[("b", "1.0.0", "../b")]);
+    tree.package("app", "0.1.0", &[("a", "1.0.0", "../a")]);
+
+    assert_eq!(tree.lock("app").0, 0);
+    let lock = tree.lockfile("app");
+    for name in ["a", "b", "c"] {
+        assert!(lock.contains(&format!("name = \"{name}\"")), "`{name}` is missing:\n{lock}");
+    }
+}
+
+#[test]
+fn a_diamond_locks_the_shared_dependency_once() {
+    // Two routes to the same package is one package, not two entries and not a
+    // conflict.
+    let tree = Tree::new("diamond");
+    tree.package("shared", "1.0.0", &[]);
+    tree.package("left", "1.0.0", &[("shared", "1.0.0", "../shared")]);
+    tree.package("right", "1.0.0", &[("shared", "1.0.0", "../shared")]);
+    tree.package(
+        "app",
+        "0.1.0",
+        &[("left", "1.0.0", "../left"), ("right", "1.0.0", "../right")],
+    );
+
+    let (status, stdout, stderr) = tree.lock("app");
+    assert_eq!(status, 0, "a diamond should resolve:\n{stderr}");
+    assert!(stdout.contains("3 packages"), "expected three packages, got {stdout}");
+    let lock = tree.lockfile("app");
+    assert_eq!(
+        lock.matches("name = \"shared\"").count(),
+        1,
+        "the shared dependency should appear once:\n{lock}"
+    );
+}
+
+#[test]
+fn a_dependency_cycle_is_reported_with_its_chain() {
+    let tree = Tree::new("cycle");
+    tree.package("a", "1.0.0", &[("b", "1.0.0", "../b")]);
+    tree.package("b", "1.0.0", &[("a", "1.0.0", "../a")]);
+    tree.package("app", "0.1.0", &[("a", "1.0.0", "../a")]);
+
+    let (status, stdout, stderr) = tree.lock("app");
+    let report = format!("{stdout}{stderr}");
+    assert_ne!(status, 0, "a cycle should not resolve silently:\n{report}");
+    assert!(report.contains("cycle"), "the message should say what it found:\n{report}");
+    assert!(
+        report.contains("a -> b -> a"),
+        "the chain should be named so it can be found:\n{report}"
+    );
+    assert!(
+        !tree.root.join("app").join("umay.lock").exists(),
+        "nothing should be written when the graph is not resolvable"
+    );
+}
+
+#[test]
+fn a_dependency_that_reaches_the_project_itself_is_reported() {
+    let tree = Tree::new("self_cycle");
+    tree.package("app", "0.1.0", &[]);
+    // Rewrite the manifest so `app` depends on itself.
+    std::fs::write(
+        tree.root.join("app").join("umay.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nself_ref = { path = \".\", version = \"0.1.0\" }\n",
+    )
+    .expect("write the manifest");
+
+    let (status, stdout, stderr) = tree.lock("app");
+    let report = format!("{stdout}{stderr}");
+    assert_ne!(status, 0, "a self-dependency should not resolve:\n{report}");
+    assert!(report.contains("cycle"), "got:\n{report}");
+}
+
+#[test]
+fn a_dependency_whose_version_disagrees_with_the_request_is_reported() {
+    // The dependency's own manifest says what it is; the parent's manifest says
+    // what was asked for. Quietly choosing either one gives the author a program
+    // they did not ask for.
+    let tree = Tree::new("version_mismatch");
+    tree.package("lib", "0.9.0", &[]);
+    tree.package("app", "0.1.0", &[("lib", "0.1.0", "../lib")]);
+
+    let (status, stdout, stderr) = tree.lock("app");
+    let report = format!("{stdout}{stderr}");
+    assert_ne!(status, 0, "a version mismatch should not resolve:\n{report}");
+    assert!(report.contains("0.9.0"), "the real version should be named:\n{report}");
+    assert!(report.contains("0.1.0"), "the requested version should be named:\n{report}");
+}
+
+#[test]
+fn the_same_name_at_two_versions_through_different_paths_is_reported() {
+    let tree = Tree::new("two_versions");
+    tree.package("lib_v1", "1.0.0", &[]);
+    tree.package("lib_v2", "2.0.0", &[]);
+    // Both packages declare a dependency called `lib`, at different versions. A
+    // program cannot have two `lib`s, so this is a conflict rather than a choice.
+    tree.package("left", "1.0.0", &[("lib", "1.0.0", "../lib_v1")]);
+    tree.package("right", "1.0.0", &[("lib", "2.0.0", "../lib_v2")]);
+    tree.package(
+        "app",
+        "0.1.0",
+        &[("left", "1.0.0", "../left"), ("right", "1.0.0", "../right")],
+    );
+
+    let (status, stdout, stderr) = tree.lock("app");
+    let report = format!("{stdout}{stderr}");
+    assert_ne!(status, 0, "two versions of one name should be reported:\n{report}");
+    assert!(report.contains("lib"), "the name should be named:\n{report}");
+}
+
+#[test]
+fn a_locked_graph_names_paths_relative_to_the_project() {
+    // An absolute path would make the lockfile depend on the machine that wrote
+    // it, which breaks both reproducibility and sharing the file.
+    let tree = Tree::new("relative_paths");
+    tree.package("base", "1.0.0", &[]);
+    tree.package("lib", "1.0.0", &[("base", "1.0.0", "../base")]);
+    tree.package("app", "0.1.0", &[("lib", "1.0.0", "../lib")]);
+
+    assert_eq!(tree.lock("app").0, 0);
+    let lock = tree.lockfile("app");
+    // `source` is the line a path lives on; the header comment has a slash in it
+    // and is none of this test's business.
+    for line in lock.lines().filter(|l| l.starts_with("source = ")) {
+        assert!(
+            line.contains("\"../"),
+            "a source path should be written relative to the project: {line}"
+        );
+    }
+    let absolute_root = tree.root.to_string_lossy().into_owned();
+    assert!(
+        !lock.contains(&absolute_root),
+        "the lockfile names the machine's paths:\n{lock}"
+    );
+    // The transitive dependency sits one level further out than the project.
+    assert!(
+        lock.contains("source = \"../base\""),
+        "the transitive path should be written from the project:\n{lock}"
+    );
+}
+
+#[test]
+fn locking_a_graph_twice_produces_the_same_bytes() {
+    let tree = Tree::new("graph_stable");
+    tree.package("base", "1.0.0", &[]);
+    tree.package("lib", "1.0.0", &[("base", "1.0.0", "../base")]);
+    tree.package("app", "0.1.0", &[("lib", "1.0.0", "../lib")]);
+
+    assert_eq!(tree.lock("app").0, 0);
+    let first = tree.lockfile("app");
+    assert_eq!(tree.lock("app").0, 0);
+    assert_eq!(first, tree.lockfile("app"), "re-locking the same graph changed the file");
+}
