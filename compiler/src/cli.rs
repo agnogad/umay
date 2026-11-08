@@ -55,7 +55,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         "asm" => cmd_asm(&rest),
         "fmt" => cmd_fmt(&rest),
         "lint" => cmd_lint(&rest),
-        "lsp" => not_yet("lsp", "Phase 7, developer experience"),
+        "lsp" => umayc::lsp::serve() as u8,
         other => {
             eprintln!("umay: unknown command `{other}`");
             eprintln!("run `umay help` for the list of commands");
@@ -99,9 +99,6 @@ OPTIONS:
     --color auto|always|never
     --explain              Include the full explanation under each diagnostic
     -O0 .. -O3             Optimisation level for build, run and asm (-O = -O2)
-
-PLANNED (not in this build):
-    lsp
 
 EXIT CODES:
     0 success   1 compile error   2 usage error   3 I/O error

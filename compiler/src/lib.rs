@@ -32,6 +32,7 @@ pub mod layout;
 pub mod lower;
 pub mod isel;
 pub mod machine;
+pub mod lsp;
 pub mod lower_expr;
 pub mod lower_flow;
 pub mod lower_match;

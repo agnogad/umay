@@ -92,6 +92,38 @@ pub struct Variant {
     pub struct_fields: Vec<(String, String)>,
 }
 
+/// The symbols of `text`, or none if it does not parse.
+///
+/// An editor asks while the program is half-written, so a parse failure is the
+/// normal case rather than an error: the answer is "nothing to offer yet".
+pub fn symbols_or_empty(text: &str) -> Vec<Symbol> {
+    match crate::metadata_source("<lsp>", text) {
+        Ok(symbols) => symbols,
+        Err(_) => Vec::new(),
+    }
+}
+
+impl Symbol {
+    /// The name this symbol declares, without its module or owner prefix.
+    pub fn short_name(&self) -> &str {
+        match self {
+            Symbol::Fn { name, .. }
+            | Symbol::Struct { name, .. }
+            | Symbol::Enum { name, .. }
+            | Symbol::Trait { name, .. }
+            | Symbol::Const { name, .. }
+            | Symbol::Alias { name, .. }
+            | Symbol::Module { name } => name,
+            Symbol::Impl { owner, .. } => owner,
+        }
+    }
+
+    /// The name as written in the document, including any prefix.
+    pub fn name(&self) -> &str {
+        self.short_name()
+    }
+}
+
 /// Collects the symbols a program declares, in source order.
 ///
 /// Items are gathered depth-first through `mod` blocks so that a program split
