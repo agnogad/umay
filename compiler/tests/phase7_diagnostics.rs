@@ -367,3 +367,40 @@ impl serde_like_json::Value {
         }
     }
 }
+
+#[test]
+fn a_warning_is_reported_on_every_build_not_just_the_first() {
+    // The cache holds the assembly and nothing else, so a cache hit has no
+    // diagnostics with it. Caching a build that warned made the warning appear
+    // once and then vanish -- which is worse than never showing it, because the
+    // user learns they cannot trust a quiet build.
+    if !have_toolchain() {
+        eprintln!("skipping a_warning_is_reported_on_every_build_not_just_the_first: `cc` is not available");
+        return;
+    }
+    let dir = scratch("warn_every_time", NARROWING);
+    // A cache of this test's own, so a warm entry from another test cannot decide
+    // the result.
+    let cache = dir.join("cache");
+    let build = |dir: &std::path::Path| {
+        let output = Command::new(compiler())
+            .current_dir(dir)
+            .env("UMAY_CACHE_DIR", &cache)
+            .args(["build", "main.um"])
+            .output()
+            .expect("run umay");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+
+    for attempt in 1..=3 {
+        let (status, stdout) = build(&dir);
+        assert_eq!(status, 0, "the program is correct");
+        assert!(
+            stdout.contains("W0102"),
+            "build {attempt} dropped the warning it reported before:\n{stdout}"
+        );
+    }
+}

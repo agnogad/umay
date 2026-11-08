@@ -527,7 +527,13 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
 - Module-level invalidation; parallel compilation. The compiler is single-file
   today, so there is nothing to invalidate at module granularity yet.
 - [x] Reproducible builds, checked: two clean builds of the same source in two
-  different directories produce byte-identical assembly.
+  different directories produce byte-identical assembly, object files and
+  executable (including the linker's build id). Pinned by tests, because an
+  absolute path in the output would pass every other test in the suite.
+- [x] A build that warned is not cached. The cache stores the assembly and
+  nothing else, so a cache hit had no diagnostics with it and the second build
+  of a warning program was silent. A warning a user sees once and then never
+  again is worse than no warning: it teaches them a quiet build means nothing.
 - [x] The manifest (`umay.toml`), read and validated: unknown keys and sections
   are errors rather than ignored, so a typo cannot silently change the build.
   `output-dir` naming `target` -- in any spelling of the path -- is refused,

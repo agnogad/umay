@@ -219,6 +219,14 @@ Design position for the rest:
   builds are reproducible.
 - No scripts run on install; dependency resolution is declarative.
 
+### What is not cached, deliberately
+
+A build that produced a warning is not cached. The cache holds the assembly text
+and nothing else, so a hit has no diagnostics to go with it; caching a warning
+build made the warning appear on the first build and vanish on the second. A
+warning the user sees once is one they cannot trust, so the build runs again and
+says the same thing every time.
+
 ## 10. What is implemented
 
 Phase 8 (in progress):

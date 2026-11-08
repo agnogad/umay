@@ -878,9 +878,17 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
                 }
             };
             report_warnings(&output.diagnostics, &output.map, &opts);
-            // Only a clean build is stored: a warning is about the source, and the
-            // next run of the same source has to report it again.
-            let _ = cache.write(&program_key, umayc::build::Artifact::ProgramAsm, output.assembly.as_bytes());
+            // Only a build with nothing to say is stored. The cache holds the
+            // assembly and nothing else, so a hit has no diagnostics to report --
+            // a warning program would then be silent on its second build, and a
+            // warning a user sees once is a warning they cannot trust.
+            if output.diagnostics.items().is_empty() {
+                let _ = cache.write(
+                    &program_key,
+                    umayc::build::Artifact::ProgramAsm,
+                    output.assembly.as_bytes(),
+                );
+            }
             output.assembly
         }
     };
