@@ -23,6 +23,7 @@ pub mod borrowck;
 pub mod diagnostics;
 pub mod drop_elab;
 pub mod explain;
+pub mod fmt;
 pub mod hir;
 pub mod lexer;
 pub mod frame;

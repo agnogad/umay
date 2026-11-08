@@ -50,7 +50,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         "build" => cmd_build(&rest, false),
         "run" => cmd_build(&rest, true),
         "asm" => cmd_asm(&rest),
-        "fmt" => not_yet("fmt", "Phase 7 (developer experience)"),
+        "fmt" => cmd_fmt(&rest),
         "lint" => not_yet("lint", "Phase 7 (developer experience)"),
         "lsp" => not_yet("lsp", "Phase 7 (developer experience)"),
         other => {
@@ -83,6 +83,7 @@ COMMANDS:
     asm <file>         Print the generated assembly
     ast <file>         Print the parsed syntax tree
     mir <file>         Print the lowered MIR (basic blocks)
+    fmt <files...>     Rewrite whitespace to the standard style (--check: report only)
     explain <CODE>     Explain a diagnostic code (e.g. umay explain E0101)
     doctor             Report toolchain and environment information
     new <name>         Create a new UMAY project
@@ -191,6 +192,66 @@ fn use_color(requested: Option<bool>) -> bool {
             std::env::var_os("NO_COLOR").is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout())
         }
     }
+}
+
+/// `umay fmt`: rewrites the whitespace between tokens and nothing else.
+///
+/// The formatter is deliberately conservative: it changes no token, and it
+/// keeps every comment and every line break the author wrote. A file that is
+/// already formatted is not rewritten, so running it twice leaves the same
+/// bytes and its exit status tells a script whether anything would have changed.
+fn cmd_fmt(args: &[String]) -> u8 {
+    let check_only = args.iter().any(|a| a == "--check");
+    let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    if files.is_empty() {
+        eprintln!("umay: `fmt` requires at least one source file");
+        return exit::USAGE;
+    }
+    let mut changed_any = false;
+    let mut io_failed = false;
+    let mut broken = false;
+    for file in files {
+        let path = Path::new(file);
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("umay: cannot read `{file}`: {e}");
+                io_failed = true;
+                continue;
+            }
+        };
+        let result = umayc::fmt::format(&text);
+        if result.errors > 0 {
+            // A file that does not lex has no well-defined gaps, so writing it
+            // back would be a guess. Saying so is the honest answer.
+            eprintln!("umay: `{file}` has {} lexical errors; not formatted", result.errors);
+            broken = true;
+            continue;
+        }
+        if result.text == text {
+            continue;
+        }
+        changed_any = true;
+        if check_only {
+            println!("{file}");
+            continue;
+        }
+        if let Err(e) = std::fs::write(path, &result.text) {
+            eprintln!("umay: cannot write `{file}`: {e}");
+            io_failed = true;
+        }
+    }
+    if broken {
+        return exit::COMPILE_ERROR;
+    }
+    if io_failed {
+        return exit::IO_ERROR;
+    }
+    if check_only && changed_any {
+        // A script asks "is this tree formatted" by the exit status alone.
+        return exit::COMPILE_ERROR;
+    }
+    exit::OK
 }
 
 fn cmd_check(args: &[String]) -> u8 {

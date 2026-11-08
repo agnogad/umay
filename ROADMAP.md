@@ -332,8 +332,10 @@ Measured against a working router probe, in the order the gaps bite:
 - [x] A bound is read from the declaration that wrote it. Every generic function
   names its parameter `T`, so a lookup by name alone let one function's
   `T: Send` answer for another's bare `T`.
-- [ ] `Sync` is declared and read by nothing: the child is a `fork`ed process,
-  so no memory is shared and nothing can race.
+- [x] `Sync` is read: a borrow may cross the boundary exactly when the value
+  behind it carries the marker, and the diagnostic names `Sync` rather than
+  `Send` so the reader is sent to the right one. A raw pointer stays refused:
+  no borrow checker will look at it again.
 
 Wiring up `fs` and `process` exposed four defects that had nothing to do with
 either:
@@ -454,10 +456,16 @@ a stack-argument bug, all now fixed and tested:
 
 ---
 
-## Phase 7 — AI Developer Experience · planned
+## Phase 7 — AI Developer Experience · in progress
 
 - LSP server: diagnostics, hover, go-to-definition, completion.
-- `umay fmt` — deterministic formatter.
+- [x] `umay fmt` — deterministic formatter. Done: rewrites the gaps between
+  tokens and nothing else, so every literal, escape and identifier survives
+  byte for byte. A gap holding a comment is left alone. Fixed point on the
+  whole standard library and examples (`compiler/tests/phase7_fmt.rs`). The one
+  thing it will not decide is whether a `<` brackets a type's arguments or
+  compares two values: that cannot be told from the token stream, so the
+  author's spacing is kept there rather than guessed at.
 - `umay lint` — style and correctness lints (`W*` codes).
 - JSON diagnostics for build and run, not just check.
 - Stable machine-readable compiler metadata (symbol and type dumps).

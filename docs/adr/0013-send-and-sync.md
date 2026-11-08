@@ -97,9 +97,13 @@ available without an import.
   primitives, `String`, `Bytes`, `Vec<T: Send>`, `Option<T: Send>`.
 - `thread_spawn` refuses an `A` that is not `Send`, with `E1016`. A type that
   must not cross is stopped at compile time.
-- The child is a `fork`ed process, not a thread: it has its own copy of memory,
-  so no lock is needed and `Sync` is not yet read by anything. It stays declared
-  so a scoped thread can be checked against it later without renaming anything.
+- `Sync` is read: a borrow may cross the boundary exactly when the value behind
+  it is `Sync`, which is the one question a borrow raises. A raw pointer stays
+  refused, because no borrow checker will ever look at it again.
+- The child is a `fork`ed process, not a thread, so no memory is shared and no
+  lock is needed. A borrow crosses because the child gets its own copy of it; the
+  marker is still the right question to ask, because a `pthread` child would
+  share the memory the borrow points at.
 - The hand-off is eight bytes in each direction. A value or answer wider than
   that is refused rather than truncated -- by `sizeof` in the library form, and
   by construction in `umay_thread_spawn`.
