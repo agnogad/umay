@@ -113,6 +113,13 @@ pub struct ParamBound {
     /// second one's `T` look like an `Iterator`, and `T + T` was then rejected
     /// inside the first function. The owner disambiguates them.
     pub owner: Option<crate::hir::FnId>,
+    /// The name of the function that declared it.
+    ///
+    /// The id alone is not enough: a declaration's signature is resolved once and
+    /// its body checked later, and the two look the function up separately, so
+    /// they can end up holding different ids for the same declaration. The name
+    /// is what both agree on.
+    pub owner_name: String,
 }
 
 pub struct TyCtxt {

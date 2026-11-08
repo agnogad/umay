@@ -1987,6 +1987,9 @@ fn two_generic_parameters_named_t_do_not_share_a_bound() {
     // the name alone made one function's `Send` bound answer for another's
     // `Iterator` bound, and `sum + v` inside the iterator helper was then rejected
     // with "`+` is not defined for `T`".
+    //
+    // `Worker` carries the marker because a marker is checked where the call is
+    // made: that is what makes it a rule rather than a comment.
     let source = r##"
 trait Shippable {}
 trait Shareable {}
@@ -2009,6 +2012,7 @@ fn drive<T: Agent>(it: &mut T, times: usize) -> i64 {
     return sum
 }
 fn needs_send<T: Shippable>(x: &T) -> bool { return true }
+impl Shippable for Worker {}
 fn main() -> i32 {
     let mut w = Worker { at: 0i64 }
     println_i64(drive(&mut w, 3usize))
@@ -2203,4 +2207,60 @@ fn main() -> i32 {
     );
     assert_eq!(run.stdout, "7\n1\n");
     assert_eq!(run.status, 0);
+}
+
+#[test]
+fn a_marker_bound_is_checked_where_the_call_is_made() {
+    // A marker declares no methods, so its only meaning is the promise it makes.
+    // Left unchecked, a caller could hand `A = NotSend` to a `fn f<A: Send>` and
+    // the value would cross the thread boundary through a forwarder that never
+    // claimed it could -- the check would apply to direct calls only.
+    let source = r#"
+struct NotSend {
+    n: usize,
+}
+
+fn work(v: usize) -> usize {
+    return v
+}
+
+fn forward<A: Send>(v: A) -> usize {
+    return thread_spawn::<A, usize>(unsafe { work as *const u8 }, v)
+}
+
+fn main() -> i32 {
+    return forward::<NotSend>(NotSend { n: 1usize }) as i32
+}
+"#;
+    build_fails_with("marker_bound_checked", source, "E1017");
+}
+
+#[test]
+fn one_functions_send_bound_does_not_answer_for_anothers_parameter() {
+    // A parameter is named `T` in every generic function. Answering `Send` from
+    // the bound list by name alone let a forwarder with no bound at all inherit a
+    // neighbour's, which is exactly how a value that is not `Send` got across.
+    let source = r#"
+struct NotSend {
+    n: i64,
+}
+
+fn work(v: usize) -> usize {
+    return v
+}
+
+fn bounded<T: Send>(v: usize) -> usize {
+    return v
+}
+
+fn unbounded<A>(v: A) -> usize {
+    return thread_spawn::<A, usize>(unsafe { work as *const u8 }, v)
+}
+
+fn main() -> i32 {
+    let bad = NotSend { n: 1i64 }
+    return unbounded::<NotSend>(bad.n) as i32
+}
+"#;
+    build_fails_with("send_bound_not_shared", source, "E1016");
 }

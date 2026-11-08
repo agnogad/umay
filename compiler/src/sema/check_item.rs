@@ -428,6 +428,10 @@ impl<'a> Checker<'a> {
                         args,
                         trait_name: name,
                         owner,
+                        owner_name: slot
+                            .and_then(|id| self.hir.fns.iter().find(|x| x.id == id))
+                            .map(|x| x.name.clone())
+                            .unwrap_or_default(),
                     };
                     if !self
                         .cx

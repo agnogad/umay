@@ -51,6 +51,24 @@ the two type arguments (`E1004` when they are missing), checks the value against
 marker is refused with `E1016`, whose suggestion is the `impl` line that would
 fix it.
 
+### A bound is checked where the call is made
+
+A marker's `impl` is checked twice: directly, on the value, and through every
+bound the callee declared. The second is what stops a forwarder from laundering a
+value that is not `Send`:
+
+    fn forward<A>(v: A) -> usize { thread_spawn::<A, _>(entry, v) }
+
+`A` has no bound here, so the inner call is right to refuse it -- but only if the
+bound is read from *this* function. A parameter is named `T` in every generic
+function that has one, and answering from the bound list by name alone let one
+declaration's `T: Send` stand in for another's bare `T`. A bound now carries the
+name of the function that wrote it, and `is_send` asks only that function.
+
+Only a marker is enforced. A trait with methods is resolved structurally in UMAY,
+so a program that never wrote the `impl` still runs, and demanding it would reject
+working code; a marker has no methods, so its promise is the whole of its meaning.
+
 `is_send` reads the `impls` recorded on each trait: a parameter is `Send` when
 it is bound `T: Send`, a primitive is `Send` when the library says so, an
 aggregate is `Send` when it has an `impl` and -- for `impl<T: Send> Send for

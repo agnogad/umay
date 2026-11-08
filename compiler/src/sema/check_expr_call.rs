@@ -66,11 +66,118 @@ impl FnChecker<'_, '_> {
         };
 
         self.check_call_args(&params, &arg_hirs, span, "function");
+        // The callee's bounds are promises its body is checked against, so the
+        // caller is where they have to be kept. Without this a `T: Send` bound
+        // would say nothing to a caller who never asked whether a type could
+        // cross, which is the whole reason the bound was written.
+        if let HirExprKind::FnRef(id) = callee_hir.kind {
+            self.check_bounds_of(id, &params, &arg_hirs, span);
+        }
         HirExpr {
             kind: HirExprKind::Call { callee: Box::new(callee_hir), args: arg_hirs },
             ty: ret,
             span,
         }
+    }
+
+    /// Checks that the types a call actually uses satisfy the declaration's bounds.
+    ///
+    /// The parameter names come from the declaration; the types come from the
+    /// arguments, matched the way the body's own parameters are. A parameter the
+    /// arguments do not name is left alone: `Vec::new()` says nothing about `T`,
+    /// and the annotation at the binding is where that is settled.
+    fn check_bounds_of(
+        &mut self,
+        callee: FnId,
+        params: &[TyId],
+        args: &[HirExpr],
+        span: crate::source::Span,
+    ) {
+        let Some(decl) = self.cx.hir.fns.iter().find(|f| f.id == callee) else { return };
+        let decl_params = decl.params.clone();
+        let decl_name = decl.name.clone();
+        // Only a marker is checked here. A marker declares no methods, so its
+        // only meaning is the promise it makes, and a promise nothing checks is
+        // not a rule. A trait with methods is different: UMAY resolves a method
+        // call on a parameter structurally, by finding one that fits, so a
+        // program that never wrote `impl Iterator for Counter` still runs, and
+        // demanding the `impl` would reject working code.
+        let bounds: Vec<crate::types::ParamBound> = self
+            .cx
+            .cx
+            .param_bounds
+            .iter()
+            .filter(|b| b.owner_name == decl_name && self.cx.hir.traits.iter().any(|t| t.name == b.trait_name && t.methods.is_empty()))
+            .cloned()
+            .collect();
+        if bounds.is_empty() {
+            return;
+        }
+        let _ = params;
+        // Every parameter the call pinned down, from the declared and actual types.
+        let mut fixed: std::collections::HashMap<String, TyId> = std::collections::HashMap::new();
+        for (d, a) in decl_params.iter().zip(args.iter()) {
+            unify_bound(&mut self.cx.cx, *d, a.ty, &mut fixed);
+        }
+        for bound in bounds {
+            let Some(ty) = fixed.get(&bound.param).copied() else { continue };
+            // A type still naming a parameter is not this call's business: the
+            // caller is generic too, and its own bound is checked where *it* is
+            // called. `mentions_unresolved_param` cannot be asked here, because it
+            // reports every argument-less type -- `NotSend` is one, and so is the
+            // generic case it is really about.
+            if self.cx.cx.is_error(ty) || self.cx.cx.first_param(ty).is_some() {
+                continue;
+            }
+            if !self.satisfies_bound(ty, &bound.trait_name) {
+                let name = self.cx.ty_name(ty);
+                let mut d = Diagnostic::error(
+                    "E1017",
+                    format!("`{name}` does not implement `{}`", bound.trait_name),
+                )
+                .at(span)
+                .with_cause(format!(
+                    "`{decl_name}` requires its parameter `{}` to implement `{}`",
+                    bound.param, bound.trait_name
+                ))
+                .with_explanation(
+                    "A bound is a promise the callee's body relies on: it may call the \
+                     trait's methods, or use the marker to decide whether a value may cross \
+                     a thread boundary. The caller is where the promise is kept, so the \
+                     argument's type has to carry the same `impl`.",
+                );
+                if let Some(ty_name) = self.nominal_name(ty) {
+                    d = d.with_suggestion(Suggestion::new(
+                        format!("add `impl {} for {ty_name} {{}}`", bound.trait_name),
+                        span,
+                        format!("impl {} for {ty_name} {{}}", bound.trait_name),
+                    ));
+                }
+                self.push(d);
+            }
+        }
+    }
+
+    /// True when `ty` has an `impl` of the named trait.
+    fn satisfies_bound(&mut self, ty: TyId, trait_name: &str) -> bool {
+        if trait_name == "Send" {
+            return self.is_send(ty);
+        }
+        let Some(impls) = self
+            .cx
+            .hir
+            .traits
+            .iter()
+            .find(|t| t.name == trait_name)
+            .map(|t| t.impls.clone())
+        else {
+            return true;
+        };
+        let name = match self.cx.cx.kind(ty).clone() {
+            TyKind::Adt { def, .. } => self.cx.hir.def_name(def),
+            _ => self.cx.ty_name(ty),
+        };
+        impls.iter().any(|i| i.type_name == name)
     }
 
     /// Checks arity and per-argument types for a call.
@@ -1412,14 +1519,35 @@ impl FnChecker<'_, '_> {
         if self.cx.cx.is_error(ty) {
             return true;
         }
-        // A parameter carries whatever its bound promised.
+        // A parameter carries whatever its bound promised -- and only what *its*
+        // bound promised. Every generic function names its parameter `T`, so a
+        // lookup by name alone lets one function's `T: Send` answer for another's
+        // `T`, which would let a value that is not `Send` cross a thread boundary
+        // simply by being passed through a forwarder that never claimed it could.
         if let TyKind::Param { name } = self.cx.cx.kind(ty).clone() {
-            return self
-                .cx
-                .cx
-                .param_bounds
-                .iter()
-                .any(|b| b.param == name && b.trait_name == "Send");
+            return self.cx.cx.param_bounds.iter().any(|b| {
+                if b.param != name || b.trait_name != "Send" {
+                    return false;
+                }
+                // A bound belongs to the declaration that wrote it. Two functions
+                // may each have a `T: Send` or, more to the point, one may have it
+                // and another may not, so the owner is what keeps them apart.
+                // The body being checked is the one the checker was made for,
+                // not whatever function the last signature happened to leave in
+                // `current_fn`: a bound is written by one declaration and read by
+                // that declaration's body, and the two must agree.
+                let here = self.fn_id;
+                match here {
+                    Some(id) => {
+                        let name = self.cx.hir.fns.iter().find(|f| f.id == id).map(|f| f.name.as_str());
+                        match name {
+                            Some(name) => b.owner_name == name,
+                            None => true,
+                        }
+                    }
+                    None => b.owner == None,
+                }
+            });
         }
         let Some(impls) = self
             .cx
@@ -1512,5 +1640,38 @@ impl FnChecker<'_, '_> {
                 self.error_hir(span)
             }
         }
+    }
+}
+
+/// Fills `fixed` in from one declared/actual type pair.
+///
+/// The same walk `mono` does to pick an instance, but here it is answering a
+/// different question: which concrete type each of the declaration's parameters
+/// was used at, so that the bound written against that parameter can be checked.
+fn unify_bound(
+    types: &mut crate::types::TyCtxt,
+    declared: TyId,
+    actual: TyId,
+    fixed: &mut std::collections::HashMap<String, TyId>,
+) {
+    match (types.kind(declared).clone(), types.kind(actual).clone()) {
+        (TyKind::Param { name }, _) => {
+            fixed.entry(name).or_insert(actual);
+        }
+        (TyKind::Ref(d), TyKind::Ref(a))
+        | (TyKind::RefMut(d), TyKind::RefMut(a))
+        | (TyKind::RawPtr(d), TyKind::RawPtr(a))
+        | (TyKind::RawPtrMut(d), TyKind::RawPtrMut(a))
+        | (TyKind::Slice(d), TyKind::Slice(a)) => unify_bound(types, d, a, fixed),
+        (TyKind::Ref(d), _) | (TyKind::RefMut(d), _) => unify_bound(types, d, actual, fixed),
+        (TyKind::Adt { def: d1, args: d_args }, TyKind::Adt { def: d2, args: a_args }) if d1 == d2 => {
+            for (d, a) in d_args.iter().zip(a_args.iter()) {
+                unify_bound(types, *d, *a, fixed);
+            }
+        }
+        (TyKind::Array { elem: d, .. }, TyKind::Array { elem: a, .. }) => {
+            unify_bound(types, d, a, fixed)
+        }
+        _ => {}
     }
 }

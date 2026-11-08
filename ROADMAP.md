@@ -324,6 +324,14 @@ Measured against a working router probe, in the order the gaps bite:
   prelude. A value whose type does not carry `Send` is refused with `E1016` and
   a suggestion naming the `impl` to write. The child runs the work and answers
   through a pipe, so both directions cross as eight bytes.
+- [x] A marker bound is checked where the call is made. Without it a caller
+  could hand a non-`Send` value to a `fn f<A: Send>` and cross the boundary
+  through a forwarder that never claimed it could. Only a marker is enforced:
+  a trait with methods is resolved structurally, so demanding its `impl` would
+  reject working code.
+- [x] A bound is read from the declaration that wrote it. Every generic function
+  names its parameter `T`, so a lookup by name alone let one function's
+  `T: Send` answer for another's bare `T`.
 - [ ] `Sync` is declared and read by nothing: the child is a `fork`ed process,
   so no memory is shared and nothing can race.
 
