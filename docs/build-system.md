@@ -264,8 +264,9 @@ Phase 8 (in progress):
   to discover a cache problem.
 - `umay doctor` reports the entry count, the size, and the key's inputs.
 
-Still to come: module-level invalidation across a multi-file program (the
-compiler is single-file today), parallel compilation, and `upm`.
+Still to come: per-module reuse (the key covers the whole module tree, so an
+edit to any module recompiles the program -- correct, but coarse), a parallel
+frontend, and `upm` proper.
 
 ## 11. What Phase 1 implemented
 
