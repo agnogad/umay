@@ -354,12 +354,36 @@ impl FnChecker<'_, '_> {
         hint: Option<crate::types::TyId>,
     ) -> HirExpr {
         // Only enum variants and associated function paths are valid here.
-        if path.segments.len() == 2 {
-            let second = &path.segments[1];
-            let first = &path.segments[0];
+        //
+        // The type is named by every segment but the last, so `Kind::Large` is
+        // two segments and `kinds::Kind::Large` is three. Requiring exactly two
+        // meant an enum used through a module had no variant reachable at all.
+        if path.segments.len() >= 2 {
+            let second = &path.segments[path.segments.len() - 1];
+            let name_parts: Vec<String> = path.segments[..path.segments.len() - 1]
+                .iter()
+                .map(|s| s.name.clone())
+                .collect();
+            let type_name = name_parts.join("::");
+            let first = &path.segments[path.segments.len() - 2];
+            let _ = first;
             // `Type::method(...)` is handled by check_call; a bare path here is
             // either a unit variant or a qualified function.
-            if let Some(def) = self.cx.def_by_name.get(&first.name).copied() {
+            // Inside the module that declares it, a type is spelled bare; from
+            // outside, it is spelled with the module's name. Both are looked up,
+            // qualified first.
+            let qualified = match &self.cx.module_prefix {
+                Some(module) => format!("{module}::{type_name}"),
+                None => type_name.clone(),
+            };
+            let def_opt = self
+                .cx
+                .def_by_name
+                .get(&qualified)
+                .copied()
+                .or_else(|| self.cx.def_by_name.get(&type_name).copied())
+                .or_else(|| self.cx.def_by_name.get(&second.name).copied());
+            if let Some(def) = def_opt {
                 if let Some(info) = self.cx.hir.enums.iter().find(|e| e.def_id == def) {
                     if let Some(i) = info.variants.iter().position(|v| v.name == second.name) {
                         let variant = &info.variants[i];
@@ -412,10 +436,32 @@ impl FnChecker<'_, '_> {
         // place that has to know about it -- and it is checked for every path
         // length, because `a::b::name` is as valid as `a::name`.
         if path.segments.len() >= 2 {
-            if let Some(entry) = self.cx.items.lookup(&path.as_string()).cloned() {
-                if let crate::hir::Res::Fn(fn_id) = entry.res {
-                    let ty = self.fn_type(fn_id);
-                    return HirExpr { kind: HirExprKind::FnRef(fn_id), ty, span };
+            let spelled = path.as_string();
+            if let Some(entry) = self.cx.items.lookup(&spelled).cloned() {
+                match entry.res {
+                    crate::hir::Res::Fn(fn_id) => {
+                        let ty = self.fn_type(fn_id);
+                        return HirExpr { kind: HirExprKind::FnRef(fn_id), ty, span };
+                    }
+                    // `module::LIMIT` is a constant, not a function. Only
+                    // functions were resolved here, so every constant, type and
+                    // variant reached through a module was "unknown name".
+                    crate::hir::Res::Const(id) => {
+                        let ty = self.const_type(id);
+                        return HirExpr { kind: HirExprKind::ConstRef(id), ty, span };
+                    }
+                    crate::hir::Res::Type(_) => {
+                        self.push(
+                            Diagnostic::error(
+                                "E0101",
+                                format!("`{spelled}` is a type, not a value"),
+                            )
+                            .at(span)
+                            .with_cause("types cannot be used where a value is expected"),
+                        );
+                        return self.error_hir(span);
+                    }
+                    _ => {}
                 }
             }
         }

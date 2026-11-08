@@ -599,6 +599,16 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   `lib::answer()` compiles and runs. Before this the manifest recorded a
   dependency that nothing could reach: `umay lock` listed it and the compiler
   never saw it.
+- [x] A module's constants, enums and enum variants are reachable through the
+  module. Each was looked up by its bare name, and each is registered as
+  `module::Name`, so `kinds::LIMIT` and `kinds::Kind::Large` were both "unknown
+  name". An enum's variants were never attached to it at all, because the
+  definition was found by the bare name too -- so a module's enum had no variants
+  as far as the checker was concerned.
+- [x] A module's type can be used in a type position, a struct literal and as the
+  receiver of its own `impl`: `let p: geo::Point = geo::Point { .. }` followed by
+  `p.sum()`. The receiver lookup was the last of these to fail, and it failed as
+  an error type in the backend rather than at the line that named the type.
 - [x] A method may be written `pub fn` inside an `impl`, and may carry
   attributes. Neither parsed: the impl body accepted only the bare `fn` keyword,
   so a module's method -- normally written `pub` because it is meant to be

@@ -64,7 +64,9 @@ impl<'a> Checker<'a> {
                         kind: DefKind::Struct,
                         is_pub: true,
                     });
-                    self.def_by_name.insert(s.name.clone(), def);
+                    // Keyed by the name the item is reachable under, so a type
+                    // inside a module is found as `module::Name`.
+                    self.def_by_name.insert(self.scoped_name(&s.name), def);
                 }
                 ast::Item::Enum(e) => {
                     let def = DefId(self.next_def_id());
@@ -83,7 +85,7 @@ impl<'a> Checker<'a> {
                         kind: DefKind::Enum,
                         is_pub: true,
                     });
-                    self.def_by_name.insert(e.name.clone(), def);
+                    self.def_by_name.insert(self.scoped_name(&e.name), def);
                 }
                 _ => {}
             }
@@ -101,7 +103,7 @@ impl<'a> Checker<'a> {
                     span: t.name_span,
                     arity: 0,
                 };
-                if let Err(existing) = self.items.declare(t.name.clone(), entry) {
+                if let Err(existing) = self.declare_scoped(&t.name, entry) {
                     self.duplicate_name(&t.name, t.name_span, existing.span, existing.kind);
                 } else {
                     self.traits.insert(t.name.clone(), t.clone());
@@ -134,12 +136,17 @@ impl<'a> Checker<'a> {
                     span: c.name_span,
                     arity: 0,
                 };
-                if let Err(existing) = self.items.declare(c.name.clone(), entry) {
+                if let Err(existing) = self.declare_scoped(&c.name, entry) {
                     self.duplicate_name(&c.name, c.name_span, existing.span, existing.kind);
                 } else {
-                    self.const_by_name.insert(c.name.clone(), id);
+                    // Keyed the way the body pass will look it up, so a module's
+                    // constant is found under `module::NAME`.
+                    self.const_by_name.insert(self.scoped_name(&c.name), id);
                     self.hir.consts.push(HirConst {
-                        name: c.name.clone(),
+                        // A module's constant is emitted under its qualified name,
+                        // for the same reason a function is: two modules may each
+                        // declare `LIMIT`, and the assembler has no scopes.
+                        name: self.scoped_name(&c.name),
                         span: c.name_span,
                         ty: self.cx.error(),
                         value: crate::hir::HirExpr {
@@ -187,24 +194,56 @@ impl<'a> Checker<'a> {
         // qualified and not bare: `mod a;` and `mod b;` may both declare `run`,
         // and a bare `run` from either would be a duplicate of the other, or --
         // worse -- resolve to whichever was collected first.
-        let outer = self.module_prefix.replace(module.to_string());
+        // A module inside a module keeps both names: `a::b::name`, not `b::name`,
+        // so the prefix is composed with whatever encloses it.
+        let qualified = match &self.module_prefix {
+            Some(outer) => format!("{outer}::{module}"),
+            None => module.to_string(),
+        };
+        let outer = self.module_prefix.replace(qualified);
         self.collect_items_in(items);
         self.module_prefix = outer;
 
-        // A module nested inside this one was registered as `inner::name`; from
-        // here it is reachable as `this::inner::name`, so the prefix is applied
-        // to every name the module added, however many segments it has.
-        let added: Vec<(String, ItemEntry)> = self
-            .items
-            .user_items()
-            .filter(|(name, _)| !before.contains(*name))
-            .map(|(name, entry)| (format!("{module}::{name}"), entry.clone()))
-            .collect();
-        for (key, entry) in added {
-            // A module may be declared in two files; the qualified spelling is
-            // a second way to reach a name, not a second definition of it.
-            let _ = self.items.declare(key, entry);
+        // The items are already registered under their qualified names by
+        // `scoped_name`, which is set for the whole of `collect_items_in`. This
+        // used to re-prefix the diff of the name set afterwards, which now that
+        // registration qualifies as it goes would produce `module::module::name`.
+        let _ = before;
+    }
+
+    /// The definition a type name refers to, under its qualified spelling.
+    ///
+    /// Fields and variants are attached to a definition found by name, and a
+    /// module's type is only registered as `module::Name`. Looking up the bare
+    /// name found nothing, so a module's enum was registered with no variants and
+    /// every use of one was "no such variant".
+    fn lookup_type_def(&self, name: &str) -> Option<DefId> {
+        let key = self.scoped_name(name);
+        self.def_by_name
+            .get(&key)
+            .or_else(|| self.def_by_name.get(name))
+            .copied()
+    }
+
+    /// A name as it is registered: qualified when it belongs to a module, and
+    /// also reachable by its bare name from inside that module.
+    ///
+    /// Registering only the qualified spelling made a module unable to use its
+    /// own types: `Kind::Large` inside the file that declares `Kind` was unknown,
+    /// because by then the enclosing scope holds `kinds::Kind` and not `Kind`.
+    fn declare_scoped(&mut self, name: &str, entry: ItemEntry) -> Result<(), ItemEntry>
+    where
+        ItemEntry: Clone,
+    {
+        let key = self.scoped_name(name);
+        let result = self.items.declare(key, entry.clone());
+        if self.module_prefix.is_some() {
+            // The bare name is a second spelling inside the module, not a second
+            // definition: a clash there is the duplicate the qualified insert
+            // already reported.
+            let _ = self.items.declare(name.to_string(), entry);
         }
+        result
     }
 
     /// A name as it is registered, qualified when it belongs to a module.
@@ -224,8 +263,7 @@ impl<'a> Checker<'a> {
         _def_kind: DefKind,
     ) {
         let entry = ItemEntry { res: crate::hir::Res::Type(def), kind, span, arity: 0 };
-        let key = self.scoped_name(name);
-        if let Err(existing) = self.items.declare(key, entry) {
+        if let Err(existing) = self.declare_scoped(name, entry) {
             // A name inside a module is only a duplicate of another name in the
             // same module; the qualified key makes that the only comparison.
             self.duplicate_name(name, span, existing.span, existing.kind);
@@ -241,7 +279,7 @@ impl<'a> Checker<'a> {
             arity,
         };
         let key = self.scoped_name(name);
-        if let Err(existing) = self.items.declare(key.clone(), entry) {
+        if let Err(existing) = self.declare_scoped(name, entry) {
             self.duplicate_name(name, span, existing.span, existing.kind);
             return id;
         }
@@ -287,6 +325,10 @@ impl<'a> Checker<'a> {
     }
 
     fn collect_impl(&mut self, block: &ast::ImplBlock) {
+        // The type an impl block belongs to is named the way the type is
+        // registered. Inside a module that is `module::Type`, and a method's
+        // `self` is laid out by looking the owner up: with the bare name the
+        // lookup found nothing and the frame for `self` could not be built.
         let Some(self_ty_name) = type_name_of(&block.self_ty) else {
             return;
         };
@@ -379,7 +421,7 @@ impl<'a> Checker<'a> {
             match item {
                 ast::Item::Struct(s) => {
                     let generics: Vec<String> = s.generics.iter().map(|g| g.name.clone()).collect();
-                    let def = self.def_by_name.get(&s.name).copied();
+                    let def = self.lookup_type_def(&s.name);
                     let mut fields = Vec::new();
                     for f in &s.fields {
                         let ty = self.resolve_type(&f.ty, &generics);
@@ -393,7 +435,7 @@ impl<'a> Checker<'a> {
                 }
                 ast::Item::Enum(e) => {
                     let generics: Vec<String> = e.generics.iter().map(|g| g.name.clone()).collect();
-                    let def = self.def_by_name.get(&e.name).copied();
+                    let def = self.lookup_type_def(&e.name);
                     let mut variants = Vec::new();
                     let mut seen: HashMap<String, Span> = HashMap::new();
                     for v in &e.variants {
@@ -446,7 +488,11 @@ impl<'a> Checker<'a> {
                     if let Some(inner) = &m.items {
                         // The declaration is registered under the module's name,
                         // so its signature is resolved under it too.
-                        let outer = self.module_prefix.replace(m.name.clone());
+                        let qualified = match &self.module_prefix {
+                            Some(outer) => format!("{outer}::{}", m.name),
+                            None => m.name.clone(),
+                        };
+                        let outer = self.module_prefix.replace(qualified);
                         self.resolve_signatures_in(inner);
                         self.module_prefix = outer;
                     }
@@ -535,7 +581,12 @@ impl<'a> Checker<'a> {
             has_self = true;
             self_mutable = sp.mutable;
             self_by_ref = sp.by_ref.is_some();
-            let ty = match receiver.and_then(|r| self.def_by_name.get(r).copied()) {
+            // The receiver is the impl block's type. Inside a module the type is
+            // only registered as `module::Name`, so the bare name finds nothing
+            // and `self` becomes the error type -- which the backend then refuses
+            // to lay out, far from the line that caused it.
+            let receiver_def = receiver.and_then(|r| self.lookup_type_def(r));
+            let ty = match receiver_def {
                 Some(def) => {
                     // The receiver carries the impl block's parameters, so a
                     // method of `impl<T> Box<T>` has `&Box<T>` as its `self`.
@@ -611,12 +662,38 @@ impl<'a> Checker<'a> {
                         return prim;
                     }
                 }
-                // Unknown or generic path.
+                // A path spelling a type, which is how a type from a module is
+                // named: `kinds::Kind`. Looking only at the last segment meant no
+                // module's type could be written in a type position at all.
                 if let Some(seg) = path.segments.last() {
                     let args: Vec<TyId> =
                         seg.args.iter().map(|a| self.resolve_type(a, generics)).collect();
+                    let spelled = path.as_string();
+                    if let Some(def) = self.def_by_name.get(&spelled).copied() {
+                        return self.cx.adt(def, args);
+                    }
                     if let Some(def) = self.def_by_name.get(&seg.name).copied() {
                         return self.cx.adt(def, args);
+                    }
+                    // A bare name inside the module that declares it, and a bare
+                    // name for a type only one module declares.
+                    if let Some(first) = path.segments.first() {
+                        if let Some(module) = self.module_prefix.clone() {
+                            let key = format!("{module}::{}", first.name);
+                            if let Some(def) = self.def_by_name.get(&key).copied() {
+                                return self.cx.adt(def, args);
+                            }
+                        }
+                        let suffix = format!("::{}", first.name);
+                        let only: Vec<DefId> = self
+                            .def_by_name
+                            .iter()
+                            .filter(|(key, _)| key.ends_with(&suffix))
+                            .map(|(_, def)| *def)
+                            .collect();
+                        if only.len() == 1 {
+                            return self.cx.adt(only[0], args);
+                        }
                     }
                 }
                 let display = path.as_string();
@@ -887,7 +964,11 @@ impl<'a> Checker<'a> {
                         // `run` looked up bare `run` and the last one won: one
                         // function got both bodies and the other got none, which
                         // the linker reported as an undefined reference.
-                        let outer = self.module_prefix.replace(m.name.clone());
+                        let qualified = match &self.module_prefix {
+                            Some(outer) => format!("{outer}::{}", m.name),
+                            None => m.name.clone(),
+                        };
+                        let outer = self.module_prefix.replace(qualified);
                         self.check_bodies_in(&inner);
                         self.module_prefix = outer;
                     }

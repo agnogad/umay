@@ -777,6 +777,35 @@ impl<'c, 's> FnChecker<'c, 's> {
     }
 
     /// Resolves `Enum::Variant` to `(DefId, variant index)`.
+    /// The definition a type name refers to, spelled either as the module that
+    /// declares it spells it or as a reader outside it would.
+    ///
+    /// A module's types are registered as `module::Name`, so the bare `Name` is
+    /// not in the table. A bare name is still how the module itself refers to its
+    /// own types, and how a caller refers to one when nothing else has that name.
+    fn lookup_def(&self, name: &str) -> Option<crate::types::DefId> {
+        if let Some(def) = self.cx.def_by_name.get(name) {
+            return Some(*def);
+        }
+        if let Some(module) = &self.cx.module_prefix {
+            if let Some(def) = self.cx.def_by_name.get(&format!("{module}::{name}")) {
+                return Some(*def);
+            }
+        }
+        // Whatever module declares it, if exactly one does.
+        let suffix = format!("::{name}");
+        let mut found = None;
+        for (key, def) in &self.cx.def_by_name {
+            if key.ends_with(&suffix) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(*def);
+            }
+        }
+        found
+    }
+
     pub fn resolve_variant_path(&mut self, path: &ast::Path) -> Option<(crate::types::DefId, u32)> {
         let segs: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
         // Accept both `Enum::Variant` and a bare `Variant` if unambiguous.
@@ -796,7 +825,7 @@ impl<'c, 's> FnChecker<'c, 's> {
                 }
                 match found {
                     Some((e, i)) => {
-                        let def = self.cx.def_by_name.get(&e).copied()?;
+                        let def = self.lookup_def(&e)?;
                         return Some((def, i));
                     }
                     None => {
@@ -810,7 +839,7 @@ impl<'c, 's> FnChecker<'c, 's> {
                 return None;
             }
         };
-        let Some(def) = self.cx.def_by_name.get(&enum_name).copied() else {
+        let Some(def) = self.lookup_def(&enum_name) else {
             self.unknown_name(&enum_name, path.span);
             return None;
         };

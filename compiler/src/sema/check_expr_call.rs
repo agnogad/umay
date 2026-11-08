@@ -1014,7 +1014,22 @@ impl FnChecker<'_, '_> {
         hint: Option<crate::types::TyId>,
     ) -> HirExpr {
         let name = path.segments.last().map(|s| s.name.clone()).unwrap_or_default();
-        let Some(def) = self.cx.def_by_name.get(&name).copied() else {
+        // A struct from a module is spelled `module::Name`. Only the last
+        // segment was looked up, so the literal was "unknown name" -- and the
+        // suggestion offered `print`, which is what a two-segment substitution
+        // guess looks like when the real name is not in the table at all.
+        let spelled = path.as_string();
+        let found = self
+            .cx
+            .def_by_name
+            .get(&spelled)
+            .copied()
+            .or_else(|| self.cx.def_by_name.get(&name).copied())
+            .or_else(|| match &self.cx.module_prefix {
+                Some(module) => self.cx.def_by_name.get(&format!("{module}::{name}")).copied(),
+                None => None,
+            });
+        let Some(def) = found else {
             self.unknown_name(&name, path.span);
             for f in fields {
                 match &f.value {

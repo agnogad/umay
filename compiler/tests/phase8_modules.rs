@@ -460,3 +460,59 @@ fn a_method_may_carry_an_attribute()
     let (status, stdout, stderr) = project.run(&["check", "main.um"]);
     assert_eq!(status, 0, "an attributed method should parse:\n{stdout}{stderr}");
 }
+
+#[test]
+fn a_module_exposes_constants_enums_and_their_variants()
+{
+    // Constants, enum variants and types were each looked up separately, and each
+    // looked up by its bare name. A module registers `module::Name`, so all three
+    // were "unknown name" from outside -- and the enum's own variants were never
+    // attached to it at all, because the definition was found by bare name too.
+    if !have_toolchain() {
+        eprintln!("skipping a_module_exposes_constants_enums_and_their_variants: `cc` is not available");
+        return;
+    }
+    let project = Project::new("module_surface");
+    project.write(
+        "kinds.um",
+        "pub enum Kind {\n    Small,\n    Large,\n}\n\npub const LIMIT: i64 = 3i64;\n\npub fn weigh(k: Kind) -> i64 {\n    match k {\n        Kind::Small => return 1i64,\n        Kind::Large => return 2i64,\n    }\n}\n",
+    );
+    project.write(
+        "main.um",
+        "fn main() -> i32 {\n    println_i64(kinds::LIMIT)\n    println_i64(kinds::weigh(kinds::Kind::Large))\n    return 0\n}\n\nmod kinds;\n",
+    );
+
+    let (status, stdout, stderr) = project.run(&["run", "main.um"]);
+    assert_eq!(status, 0, "the module's constants and enum should be usable:\n{stderr}");
+    let numbers: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.starts_with("built "))
+        .collect();
+    assert_eq!(numbers, ["3", "2"], "got {stdout:?} (stderr {stderr:?})");
+}
+
+#[test]
+fn a_module_may_declare_a_constant_with_the_same_name_as_another()
+{
+    // Two modules each declaring `LIMIT` is the ordinary case. A constant is a
+    // name like any other, and the module is what tells them apart.
+    let project = Project::new("two_constants");
+    project.write("a.um", "pub const LIMIT: i64 = 1i64;\n");
+    project.write("b.um", "pub const LIMIT: i64 = 2i64;\n");
+    project.write(
+        "main.um",
+        "fn main() -> i32 {\n    println_i64(a::LIMIT)\n    println_i64(b::LIMIT)\n    return 0\n}\n\nmod a;\nmod b;\n",
+    );
+
+    if !have_toolchain() {
+        eprintln!("skipping a_module_may_declare_a_constant_with_the_same_name_as_another: `cc` is not available");
+        return;
+    }
+    let (status, stdout, stderr) = project.run(&["run", "main.um"]);
+    assert_eq!(status, 0, "two modules may each declare `LIMIT`:\n{stderr}");
+    let numbers: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.starts_with("built "))
+        .collect();
+    assert_eq!(numbers, ["1", "2"], "got {stdout:?}");
+}
