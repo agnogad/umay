@@ -351,3 +351,35 @@ fn json_string(text: &str) -> String {
     out.push('"');
     out
 }
+
+#[test]
+fn two_modules_may_declare_the_same_function_name()
+{
+    // Two dependencies that both define `run` is the ordinary case, not a
+    // mistake. Registering a module's items under their bare names made the
+    // second one a duplicate definition, and made whichever was collected first
+    // answer for the other: `b::run()` called `a::run()`.
+    if !have_toolchain() {
+        eprintln!("skipping two_modules_may_declare_the_same_function_name: `cc` is not available");
+        return;
+    }
+    let project = Project::new("same_fn_name");
+    project.write("a.um", "pub fn run() -> i64 {\n    return 1i64\n}\n");
+    project.write("b.um", "pub fn run() -> i64 {\n    return 2i64\n}\n");
+    project.write(
+        "main.um",
+        "fn main() -> i32 {\n    println_i64(a::run())\n    println_i64(b::run())\n    return 0\n}\n\nmod a;\nmod b;\n",
+    );
+
+    let (status, stdout, stderr) = project.run(&["run", "main.um"]);
+    assert_eq!(status, 0, "the program should run:\n{stderr}");
+    let numbers: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.starts_with("built "))
+        .collect();
+    assert_eq!(
+        numbers,
+        ["1", "2"],
+        "each module's function should answer for itself; full output was {stdout:?}"
+    );
+}

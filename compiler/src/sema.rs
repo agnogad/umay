@@ -90,6 +90,13 @@ pub struct Checker<'a> {
     /// rewrite every local and temporary that still names the variable, so
     /// nothing keeps a 4-byte slot while being read as 8.
     pub(crate) settled_vars: HashMap<crate::types::TyId, crate::types::TyId>,
+    /// The module whose items are being collected, if any.
+    ///
+    /// An item inside `mod foo;` is reachable as `foo::name` and is not a name in
+    /// the enclosing scope. Registering it bare as well made two dependencies
+    /// that both declare `run` collide, and made whichever was collected first
+    /// answer for the other: `b::run()` resolved to `a::run()`.
+    pub(crate) module_prefix: Option<String>,
     /// The function whose signature was resolved last.
     ///
     /// Generic parameter names repeat across functions, so a bound is only
@@ -112,6 +119,7 @@ impl<'a> Checker<'a> {
 
     pub fn new(sources: &'a crate::source::SourceMap) -> Self {
         let mut checker = Checker {
+            module_prefix: None,
             current_fn: None,
             cx: TyCtxt::new(),
             items: ItemScope::new(),

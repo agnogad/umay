@@ -183,7 +183,13 @@ impl<'a> Checker<'a> {
     fn collect_items_qualified(&mut self, items: &[ast::Item], module: &str) {
         let before: std::collections::HashSet<String> =
             self.items.all_names().into_iter().map(str::to_string).collect();
+        // While this module's items are collected, names are registered already
+        // qualified and not bare: `mod a;` and `mod b;` may both declare `run`,
+        // and a bare `run` from either would be a duplicate of the other, or --
+        // worse -- resolve to whichever was collected first.
+        let outer = self.module_prefix.replace(module.to_string());
         self.collect_items_in(items);
+        self.module_prefix = outer;
 
         // A module nested inside this one was registered as `inner::name`; from
         // here it is reachable as `this::inner::name`, so the prefix is applied
@@ -201,6 +207,14 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A name as it is registered, qualified when it belongs to a module.
+    fn scoped_name(&self, name: &str) -> String {
+        match &self.module_prefix {
+            Some(module) => format!("{module}::{name}"),
+            None => name.to_string(),
+        }
+    }
+
     fn register_type_name(
         &mut self,
         name: &str,
@@ -210,7 +224,10 @@ impl<'a> Checker<'a> {
         _def_kind: DefKind,
     ) {
         let entry = ItemEntry { res: crate::hir::Res::Type(def), kind, span, arity: 0 };
-        if let Err(existing) = self.items.declare(name.to_string(), entry) {
+        let key = self.scoped_name(name);
+        if let Err(existing) = self.items.declare(key, entry) {
+            // A name inside a module is only a duplicate of another name in the
+            // same module; the qualified key makes that the only comparison.
             self.duplicate_name(name, span, existing.span, existing.kind);
         }
     }
@@ -223,14 +240,26 @@ impl<'a> Checker<'a> {
             span,
             arity,
         };
-        if let Err(existing) = self.items.declare(name.to_string(), entry) {
+        let key = self.scoped_name(name);
+        if let Err(existing) = self.items.declare(key.clone(), entry) {
             self.duplicate_name(name, span, existing.span, existing.kind);
             return id;
         }
+        // Keyed both ways: a module's function is reached by its qualified name,
+        // and a body check that walks the item list looks it up by the name the
+        // item declares. Without the qualified entry both dependencies' `run`
+        // pointed at whichever was registered last.
         self.fn_by_name.insert(name.to_string(), id);
+        if let Some(module) = &self.module_prefix {
+            self.fn_by_name.insert(format!("{module}::{name}"), id);
+        }
+        // A function that belongs to a module is emitted under its qualified
+        // name, because the bare one is ambiguous as soon as two modules declare
+        // it -- and the linker, unlike sema, has no scope to disambiguate with.
+        // Everything outside a module keeps its plain name.
         self.hir.fns.push(HirFn {
             id,
-            name: name.to_string(),
+            name: key, 
             span,
             generics: Vec::new(),
             params: Vec::new(),
@@ -415,7 +444,11 @@ impl<'a> Checker<'a> {
                 }
                 ast::Item::Mod(m) => {
                     if let Some(inner) = &m.items {
+                        // The declaration is registered under the module's name,
+                        // so its signature is resolved under it too.
+                        let outer = self.module_prefix.replace(m.name.clone());
                         self.resolve_signatures_in(inner);
+                        self.module_prefix = outer;
                     }
                 }
                 _ => {}
@@ -436,7 +469,16 @@ impl<'a> Checker<'a> {
         // while its body was checked under another, and the bound was invisible.
         let slot = match receiver {
             Some(ty) => self.methods.get(&(ty.to_string(), f.name.clone())).copied(),
-            None => self.fn_by_name.get(&f.name).copied(),
+            // Inside a module the bare name is ambiguous the moment two modules
+            // declare the same one, so the slot is looked up by the name this
+            // declaration is actually registered under.
+            None => {
+                let key = self.scoped_name(&f.name);
+                self.fn_by_name
+                    .get(&key)
+                    .or_else(|| self.fn_by_name.get(&f.name))
+                    .copied()
+            }
         };
         let mut generics: Vec<String> = outer_generics.to_vec();
         generics.extend(f.generics.iter().map(|g| g.name.clone()));
@@ -814,7 +856,13 @@ impl<'a> Checker<'a> {
         for item in items {
             match item {
                 ast::Item::Fn(f) => {
-                    if let Some(id) = self.fn_by_name.get(&f.name).copied() {
+                    let key = self.scoped_name(&f.name);
+                    let found = self
+                        .fn_by_name
+                        .get(&key)
+                        .or_else(|| self.fn_by_name.get(&f.name))
+                        .copied();
+                    if let Some(id) = found {
                         self.check_one_body(id, f, &[]);
                     }
                 }
@@ -834,7 +882,14 @@ impl<'a> Checker<'a> {
                 ast::Item::Mod(m) => {
                     if let Some(inner) = &m.items {
                         let inner = inner.clone();
+                        // The body belongs to the name the function was
+                        // registered under. Without the prefix, every module's
+                        // `run` looked up bare `run` and the last one won: one
+                        // function got both bodies and the other got none, which
+                        // the linker reported as an undefined reference.
+                        let outer = self.module_prefix.replace(m.name.clone());
                         self.check_bodies_in(&inner);
+                        self.module_prefix = outer;
                     }
                 }
                 _ => {}

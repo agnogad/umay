@@ -63,7 +63,12 @@ fn function_symbols(hir: &crate::hir::Hir, program: &MirProgram) -> HashMap<FnId
                 && f.name != "main"
                 && !f.name.starts_with("umay_") =>
             {
-                format!("umay_user_{}", f.name)
+                // A name from a module is qualified (`lib::answer`). `::` is not
+                // a symbol character in assembly, so the separator becomes `__`
+                // -- the same one a method's symbol uses, which keeps `lib::x`
+                // and a method `x` on `lib` from being confused for each other
+                // only if they were ever the same item, which they cannot be.
+                format!("umay_user_{}", f.name.replace("::", "__"))
             }
             None => f.name.clone(),
         };

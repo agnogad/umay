@@ -170,7 +170,11 @@ mod_decl   ::= 'mod' identifier (block | ';')
 ```
 
 A module written with a body (`mod inner { ... }`) keeps its items in the same
-file. A module written with `;` is read from disk: `mod name;` in `dir/main.um`
+file. A module written with `;` is read from disk: A module's items belong to the module that declares them: `a::run` and `b::run`
+may both exist, and each names its own function. They are not names in the
+enclosing scope.
+
+`mod name;` in `dir/main.um`
 loads `dir/name.um`, or `dir/name/mod.um` if the first does not exist. The first
 of those that exists wins; if neither does, the program is rejected and the error
 names both paths.

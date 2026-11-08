@@ -599,6 +599,11 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   `lib::answer()` compiles and runs. Before this the manifest recorded a
   dependency that nothing could reach: `umay lock` listed it and the compiler
   never saw it.
+- [x] A module's items belong to it. Two dependencies that both declare `run`
+  used to be a duplicate definition, and whichever was collected first answered
+  for the other (`b::run()` called `a::run()`). Each module's items are now
+  registered and emitted under their qualified name, so two modules may declare
+  the same function and each is its own.
 - [x] The cache key covers a dependency's source, so editing one rebuilds the
   program that uses it, rather than keeping the previous assembly.
 - [ ] `upm` proper: fetching and a registry. A dependency with no `path` is still
