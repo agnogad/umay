@@ -1,0 +1,349 @@
+//! `umay lock`, `umay build` inside a project, and the manifest's payoff.
+//!
+//! These tests run the real binary in a real project directory. The manifest's
+//! whole reason to exist is that `umay build` should work from the project's own
+//! description of itself, and that is only observable by running it.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn compiler() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_umay"))
+}
+
+fn have_toolchain() -> bool {
+    Command::new("cc")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+struct Project {
+    dir: PathBuf,
+    cache: PathBuf,
+}
+
+impl Project {
+    /// A project created by `umay new`, which is what a user gets.
+    fn created(name: &str) -> Project {
+        let dir = std::env::temp_dir().join(format!("umay_proj_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the parent directory");
+        let status = Command::new(compiler())
+            .current_dir(&dir)
+            .args(["new", "app"])
+            .status()
+            .expect("run umay new");
+        assert!(status.success(), "`umay new` should succeed");
+        let dir = dir.join("app");
+        let cache = dir.join("cache");
+        Project { dir, cache }
+    }
+
+    fn run(&self, args: &[&str]) -> (i32, String, String) {
+        let output = Command::new(compiler())
+            .current_dir(&self.dir)
+            .env("UMAY_CACHE_DIR", &self.cache)
+            .args(args)
+            .output()
+            .expect("run umay");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    }
+
+    fn read(&self, relative: &str) -> String {
+        std::fs::read_to_string(self.dir.join(relative))
+            .unwrap_or_else(|e| panic!("cannot read {relative}: {e}"))
+    }
+
+    fn write(&self, relative: &str, text: &str) {
+        let path = self.dir.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create a parent directory");
+        }
+        std::fs::write(path, text).expect("write a file");
+    }
+
+    /// Adds a local library the project depends on.
+    fn add_local_dependency(&self, name: &str) {
+        self.write(
+            &format!("../{name}/src/lib.um"),
+            "fn answer() -> i64 {\n    return 42i64\n}\n",
+        );
+        self.write(
+            &format!("../{name}/umay.toml"),
+            &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n"),
+        );
+    }
+
+    fn declare_dependency(&self, name: &str, value: &str) {
+        let manifest = self.read("umay.toml");
+        let updated = format!("{manifest}\n[dependencies]\n{name} = {value}\n");
+        self.write("umay.toml", &updated);
+    }
+}
+
+#[test]
+fn a_new_project_builds_and_runs_with_no_arguments() {
+    if !have_toolchain() {
+        eprintln!("skipping a_new_project_builds_and_runs_with_no_arguments: `cc` is not available");
+        return;
+    }
+    let project = Project::created("hello");
+    let (status, stdout, stderr) = project.run(&["build"]);
+    assert_eq!(status, 0, "`umay build` should work from the manifest:\n{stderr}");
+
+    let (status, stdout, _) = project.run(&["run"]);
+    assert_eq!(status, 0, "a new project should exit 0, got {status}");
+    assert!(stdout.contains("Hello, UMAY"), "the greeting should print, got {stdout}");
+}
+
+#[test]
+fn a_manifest_that_names_target_is_refused() {
+    if !have_toolchain() {
+        eprintln!("skipping a_manifest_that_names_target_is_refused: `cc` is not available");
+        return;
+    }
+    let project = Project::created("target");
+    let manifest = project.read("umay.toml").replace("output-dir = \"dist\"", "output-dir = \"target\"");
+    // The generated manifest may not name output-dir at all; write one that does.
+    let manifest = if manifest.contains("target") {
+        manifest
+    } else {
+        project.read("umay.toml").replace("[build]", "[build]\noutput-dir = \"target\"")
+    };
+    project.write("umay.toml", &manifest);
+    let (status, _, stderr) = project.run(&["build"]);
+    assert_ne!(status, 0, "a `target/` output directory must be refused");
+    assert!(stderr.contains("target"), "the error should say why:\n{stderr}");
+}
+
+#[test]
+fn build_reports_a_manifest_error_rather_than_a_missing_file() {
+    if !have_toolchain() {
+        eprintln!("skipping build_reports_a_manifest_error_rather_than_a_missing_file: `cc` is not available");
+        return;
+    }
+    let project = Project::created("broken_manifest");
+    project.write("umay.toml", "[package]\nname = \"app\"\n");
+    let (status, _, stderr) = project.run(&["build"]);
+    assert_ne!(status, 0);
+    assert!(
+        stderr.contains("version") || stderr.contains("edition"),
+        "the manifest's problem should be named:\n{stderr}"
+    );
+    // The error names the file, so the reader knows where to look.
+    assert!(stderr.contains("umay.toml"), "got {stderr}");
+}
+
+#[test]
+fn no_source_and_no_manifest_is_a_usage_error() {
+    let dir = std::env::temp_dir().join(format!("umay_bare_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create");
+    let output = Command::new(compiler())
+        .current_dir(&dir)
+        .env("UMAY_CACHE_DIR", dir.join("cache"))
+        .args(["build"])
+        .output()
+        .expect("run umay");
+    assert_eq!(output.status.code(), Some(2), "a usage error has exit code 2");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("umay.toml"), "the message should say what is missing:\n{stderr}");
+}
+
+#[test]
+fn a_project_with_no_dependencies_locks_to_an_empty_file() {
+    let project = Project::created("lock_empty");
+    let (status, stdout, stderr) = project.run(&["lock"]);
+    assert_eq!(status, 0, "locking an empty project should succeed:\n{stderr}");
+    assert!(stdout.contains("0 packages"), "got {stdout}");
+    let lock = project.read("umay.lock");
+    assert!(lock.contains("version = 1"), "the lockfile records its format:\n{lock}");
+    assert!(!lock.contains("[[package]]"), "no packages were resolved:\n{lock}");
+}
+
+#[test]
+fn a_path_dependency_is_locked_with_its_content_hash() {
+    let project = Project::created("lock_path");
+    project.add_local_dependency("helper");
+    project.declare_dependency("helper", "{ path = \"../helper\", version = \"0.1.0\" }");
+    let (status, stdout, stderr) = project.run(&["lock"]);
+    assert_eq!(status, 0, "a path dependency should resolve:\n{stderr}");
+    assert!(stdout.contains("1 package"), "got {stdout}");
+    let lock = project.read("umay.lock");
+    assert!(lock.contains("name = \"helper\""), "got {lock}");
+    assert!(lock.contains("source = \"../helper\""), "got {lock}");
+    // A 64-character SHA-256 digest.
+    let hash_line = lock
+        .lines()
+        .find(|l| l.starts_with("hash = "))
+        .unwrap_or_else(|| panic!("the lockfile should record a hash:\n{lock}"));
+    let hash = hash_line.trim_start_matches("hash = ").trim_matches('"');
+    assert_eq!(hash.len(), 64, "expected a SHA-256 digest, got {hash}");
+}
+
+#[test]
+fn locking_twice_produces_the_same_file() {
+    // A lockfile that changes when nothing changed makes every diff unreadable.
+    let project = Project::created("lock_stable");
+    project.add_local_dependency("helper");
+    project.declare_dependency("helper", "{ path = \"../helper\", version = \"0.1.0\" }");
+    assert_eq!(project.run(&["lock"]).0, 0);
+    let first = project.read("umay.lock");
+    assert_eq!(project.run(&["lock"]).0, 0);
+    let second = project.read("umay.lock");
+    assert_eq!(first, second, "re-locking the same project should not change the file");
+}
+
+#[test]
+fn changing_a_dependency_changes_its_locked_hash() {
+    let project = Project::created("lock_change");
+    project.add_local_dependency("helper");
+    project.declare_dependency("helper", "{ path = \"../helper\", version = \"0.1.0\" }");
+    assert_eq!(project.run(&["lock"]).0, 0);
+    let first = project.read("umay.lock");
+
+    project.write("../helper/src/lib.um", "fn answer() -> i64 {\n    return 43i64\n}\n");
+    assert_eq!(project.run(&["lock"]).0, 0);
+    let second = project.read("umay.lock");
+    assert_ne!(first, second, "a changed dependency must change the lockfile");
+}
+
+#[test]
+fn a_dependency_with_no_path_is_reported_rather_than_invented() {
+    // There is no registry. A lockfile claiming to have pinned something it never
+    // fetched would be worse than refusing.
+    let project = Project::created("lock_registry");
+    project.declare_dependency("lib", "\"1.0.0\"");
+    let (status, _, stderr) = project.run(&["lock"]);
+    assert_ne!(status, 0, "an unresolvable dependency should fail");
+    assert!(
+        stderr.contains("no registry"),
+        "the message should say why it cannot be fetched:\n{stderr}"
+    );
+    assert!(
+        !project.dir.join("umay.lock").exists(),
+        "nothing should be written when resolution is incomplete"
+    );
+}
+
+#[test]
+fn a_missing_path_dependency_is_reported_by_name() {
+    let project = Project::created("lock_missing");
+    project.declare_dependency("ghost", "{ path = \"../ghost\", version = \"0.1.0\" }");
+    let (status, _, stderr) = project.run(&["lock"]);
+    assert_ne!(status, 0);
+    assert!(stderr.contains("ghost"), "the message should name the dependency:\n{stderr}");
+}
+
+#[test]
+fn a_manifest_with_a_typo_names_the_line() {
+    let project = Project::created("lock_typo");
+    project.write(
+        "umay.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\nauthros = [\"a\"]\n",
+    );
+    let (status, _, stderr) = project.run(&["lock"]);
+    assert_ne!(status, 0);
+    assert!(stderr.contains("authros"), "the typo should be named:\n{stderr}");
+    assert!(stderr.contains("umay.toml:5"), "the line should be named:\n{stderr}");
+}
+
+#[test]
+fn a_lockfile_from_a_future_format_is_refused() {
+    let project = Project::created("lock_future");
+    project.write("umay.lock", "version = 99\n");
+    // The manifest still has to load, so go through a command that reads both.
+    let (status, _, stderr) = project.run(&["lock"]);
+    // `lock` rewrites the file rather than reading it, so check the reader instead.
+    let _ = (status, stderr);
+    let lockfile = umayc::lock::Lockfile::parse("version = 99\n").expect_err("a future format is not readable");
+    assert!(
+        lockfile.iter().any(|e| e.message.contains("format")),
+        "got {lockfile:?}"
+    );
+}
+
+#[test]
+fn a_locked_dependency_that_changed_is_visible_to_verify() {
+    let project = Project::created("lock_verify");
+    project.add_local_dependency("helper");
+    project.declare_dependency("helper", "{ path = \"../helper\", version = \"0.1.0\" }");
+    assert_eq!(project.run(&["lock"]).0, 0);
+
+    let lockfile = umayc::lock::read_project(&project.dir).expect("the lockfile should parse");
+    assert!(
+        umayc::lock::verify(&project.dir, &lockfile).is_empty(),
+        "an untouched dependency should verify"
+    );
+
+    project.write("../helper/src/lib.um", "fn answer() -> i64 {\n    return 0i64\n}\n");
+    let problems = umayc::lock::verify(&project.dir, &lockfile);
+    assert_eq!(problems.len(), 1, "a changed dependency should be reported: {problems:?}");
+    assert!(problems[0].contains("helper"), "got {problems:?}");
+}
+
+#[test]
+fn the_lockfile_is_never_written_into_a_project_by_a_build() {
+    if !have_toolchain() {
+        eprintln!("skipping the_lockfile_is_never_written_into_a_project_by_a_build: `cc` is not available");
+        return;
+    }
+    let project = Project::created("build_no_lock");
+    assert_eq!(project.run(&["build"]).0, 0);
+    assert!(
+        !project.dir.join("umay.lock").exists(),
+        "a build must not write a lockfile; only `umay lock` does"
+    );
+    assert!(!project.dir.join("target").exists(), "no `target/` may appear");
+}
+
+#[test]
+fn dist_is_the_only_thing_a_build_adds_to_a_project() {
+    if !have_toolchain() {
+        eprintln!("skipping dist_is_the_only_thing_a_build_adds_to_a_project: `cc` is not available");
+        return;
+    }
+    let project = Project::created("build_no_target");
+    let before = listing(&project.dir);
+    assert_eq!(project.run(&["build"]).0, 0);
+    let after = listing(&project.dir);
+    for path in after {
+        if before.contains(&path) {
+            continue;
+        }
+        assert!(
+            Path::new(&path).starts_with("dist"),
+            "the build added `{path}`, which is outside dist/"
+        );
+    }
+}
+
+/// Every path under `dir`, relative, excluding the test's own cache.
+fn listing(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.file_name().is_some_and(|n| n == "cache") {
+                continue;
+            }
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else if let Ok(relative) = path.strip_prefix(root) {
+                out.push(relative.to_string_lossy().into_owned());
+            }
+        }
+    }
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}

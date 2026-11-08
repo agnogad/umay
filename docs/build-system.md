@@ -168,6 +168,7 @@ non-determinism, that is documented rather than hidden.
 | `umay build` | compile to an executable in `dist/`; `-O0`..`-O3` |
 | `umay run` | build then execute, passing the program's exit status through |
 | `umay asm` | print the generated assembly without building |
+| `umay lock` | resolve dependencies and write `umay.lock` |
 | `umay clean` | remove `dist/` contents and the cache |
 | `umay fmt` | format source (Phase 7) |
 | `umay lint` | run lints (Phase 7) |
@@ -189,7 +190,26 @@ tools as a program problem. See [ADR 0010](adr/0010-runtime-in-umay.md).
 
 ## 9. Package manager (`upm`)
 
-Deferred to Phase 8. Design position:
+Partially implemented in Phase 8. What exists:
+
+- The manifest (`compiler/src/manifest.rs`): a reader for the subset of TOML a
+  manifest uses, plus the validation rules from section 3. A key or section it
+  does not know is an error rather than being ignored, because a typo in a build
+  file that is silently skipped builds the wrong thing.
+- The lockfile (`compiler/src/lock.rs`): format 1, written in a fixed order so
+  the same resolution produces the same bytes, and read back with the format
+  version checked.
+- `umay lock`: resolves path dependencies and records the SHA-256 of each one's
+  source. A dependency that changed is visible rather than silently adopted.
+- `umay build` and `umay run` with no file argument use `[build] entry`.
+- `output-dir` naming `target`, in any spelling, is refused.
+
+What does not exist, and why it is not faked: there is no registry. A
+dependency with no `path` cannot be fetched, so `umay lock` reports it and
+writes nothing -- a lockfile claiming to have pinned something it never fetched
+would be worse than no lockfile at all.
+
+Design position for the rest:
 
 - `upm` is a separate executable built on the same manifest format.
 - Vendored `deps/` remains inside the project; downloaded sources are stored in

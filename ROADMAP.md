@@ -526,9 +526,25 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   is derived from, and the real phase status.
 - Module-level invalidation; parallel compilation. The compiler is single-file
   today, so there is nothing to invalidate at module granularity yet.
-- Reproducible builds (the assembly is already identical across two clean
-  builds; the linked executable is the system linker's business).
-- `upm` package manager with `umay.lock`.
+- [x] Reproducible builds, checked: two clean builds of the same source in two
+  different directories produce byte-identical assembly.
+- [x] The manifest (`umay.toml`), read and validated: unknown keys and sections
+  are errors rather than ignored, so a typo cannot silently change the build.
+  `output-dir` naming `target` -- in any spelling of the path -- is refused,
+  which is what keeps the no-`target/` rule from depending on how someone
+  happens to write it.
+- [x] `umay build` / `umay run` with no file argument build the entry point named
+  by the manifest. A project created by `umay new` now builds and runs with no
+  arguments at all, and its `main` returns 0 rather than whatever was in the
+  return register.
+- [x] `umay.lock` (format 1) and `umay lock`: path dependencies are resolved and
+  recorded with a SHA-256 of their source, so a changed dependency is visible
+  rather than silently adopted. Re-locking an unchanged project produces the same
+  bytes.
+- [ ] `upm` proper: fetching, version resolution across a dependency graph, and a
+  registry. None of it can be built honestly yet -- there is no registry, so
+  `umay lock` reports a dependency with no `path` and writes nothing rather than
+  claiming to have pinned something it never fetched.
 
 Exit criteria: incremental rebuild after a one-module edit does not recompile
 independent modules; no `target/` ever appears in a project; two clean builds of

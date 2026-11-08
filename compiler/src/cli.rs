@@ -56,6 +56,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         "fmt" => cmd_fmt(&rest),
         "lint" => cmd_lint(&rest),
         "lsp" => umayc::lsp::serve() as u8,
+        "lock" => cmd_lock(&rest),
         other => {
             eprintln!("umay: unknown command `{other}`");
             eprintln!("run `umay help` for the list of commands");
@@ -556,6 +557,71 @@ fn cmd_doctor(_args: &[String]) -> u8 {
     }
 }
 
+/// `umay lock` — resolve the project's dependencies into `umay.lock`.
+///
+/// Resolution is honest about what it cannot do: a dependency with no `path` needs
+/// a registry, and there is none. Writing a lockfile that claimed to have pinned
+/// something never fetched would be worse than writing none.
+fn cmd_lock(args: &[String]) -> u8 {
+    let opts = match parse_options(args) {
+        Ok(o) => o,
+        Err((code, msg)) => {
+            eprintln!("umay: {msg}");
+            return code;
+        }
+    };
+    let _ = opts;
+    let project = Path::new("umay.toml");
+    if !project.exists() {
+        eprintln!("umay: no `umay.toml` here; run `umay lock` from a project directory");
+        return exit::USAGE;
+    }
+    let manifest = match umayc::manifest::read_project(Path::new(".")) {
+        Ok(m) => m,
+        Err(errors) => {
+            report_manifest_errors(&errors);
+            return exit::COMPILE_ERROR;
+        }
+    };
+    let resolution = umayc::lock::resolve(Path::new("."), &manifest);
+    for (name, reason) in &resolution.unresolved {
+        eprintln!("umay: cannot resolve `{name}`: {reason}");
+    }
+    if !resolution.unresolved.is_empty() {
+        // A partial lockfile would be a lie about what is pinned, so nothing is
+        // written until every dependency resolves.
+        return exit::COMPILE_ERROR;
+    }
+    match std::fs::write("umay.lock", resolution.lockfile.to_text()) {
+        Ok(()) => {
+            println!(
+                "wrote umay.lock ({} package{})",
+                resolution.lockfile.packages.len(),
+                if resolution.lockfile.packages.len() == 1 { "" } else { "s" }
+            );
+            exit::OK
+        }
+        Err(e) => {
+            eprintln!("umay: cannot write `umay.lock`: {e}");
+            exit::IO_ERROR
+        }
+    }
+}
+
+/// Prints manifest errors the way diagnostics are printed: location first.
+fn report_manifest_errors(errors: &[umayc::manifest::ManifestError]) {
+    for error in errors {
+        if error.line > 0 {
+            eprintln!("umay.toml:{}: {}", error.line, error.message);
+        } else {
+            eprintln!("umay.toml: {}", error.message);
+        }
+        if let Some(help) = &error.help {
+            eprintln!("  help: {help}");
+        }
+    }
+}
+
 /// A byte count a person can read.
 fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
@@ -589,7 +655,7 @@ fn cmd_new(args: &[String]) -> u8 {
     println!("created project `{name}`");
     println!("  umay.toml");
     println!("  src/main.um");
-    println!("\nnext: cd {name} && umay check src/main.um");
+    println!("\nnext: cd {name} && umay run");
     exit::OK
 }
 
@@ -609,11 +675,16 @@ fn create_project(dir: &Path, name: &str) -> std::io::Result<()> {
          opt-level = 0\n"
     );
     std::fs::write(dir.join("umay.toml"), manifest)?;
+    // A program that greets and exits 0. `main` with no return type and no
+    // `return` leaves whatever was in the return register, so a freshly created
+    // project would exit with a random status -- which makes `umay run` look
+    // broken when nothing is wrong.
     let main = format!(
         "// {name} — created by `umay new`\n\n\
-         fn main() {{\n\
+         fn main() -> i32 {{\n\
          \x20   let greeting = \"Hello, UMAY\"\n\
-         \x20   print(greeting)\n\
+         \x20   println(greeting)\n\
+         \x20   return 0\n\
          }}\n"
     );
     std::fs::write(dir.join("src/main.um"), main)?;
@@ -719,6 +790,22 @@ fn report_warnings(diags: &Diagnostics, map: &SourceMap, opts: &Options) {
     }
 }
 
+/// The entry point named by `umay.toml` in the current directory.
+fn entry_from_manifest() -> Result<String, u8> {
+    if !Path::new("umay.toml").exists() {
+        eprintln!("umay: no source file given and no `umay.toml` here");
+        eprintln!("usage: umay build <file.um>, or run it inside a project");
+        return Err(exit::USAGE);
+    }
+    match umayc::manifest::read_project(Path::new(".")) {
+        Ok(manifest) => Ok(manifest.build.entry.clone()),
+        Err(errors) => {
+            report_manifest_errors(&errors);
+            Err(exit::COMPILE_ERROR)
+        }
+    }
+}
+
 fn cmd_build(args: &[String], run: bool) -> u8 {
     let opts = match parse_options(args) {
         Ok(o) => o,
@@ -727,11 +814,21 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
             return code;
         }
     };
-    if opts.files.len() != 1 {
-        eprintln!("umay: `{}` takes exactly one source file", if run { "run" } else { "build" });
+    // With no file named, the project's manifest says what to build. That is the
+    // point of having a manifest: `umay build` in a project directory should not
+    // need the entry point repeated.
+    let file = match opts.files.first() {
+        Some(file) => file.clone(),
+        None => match entry_from_manifest() {
+            Ok(entry) => entry,
+            Err(code) => return code,
+        },
+    };
+    let file = &file;
+    if opts.files.len() > 1 {
+        eprintln!("umay: `{}` takes at most one source file", if run { "run" } else { "build" });
         return exit::USAGE;
     }
-    let file = &opts.files[0];
     let path = Path::new(file);
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,

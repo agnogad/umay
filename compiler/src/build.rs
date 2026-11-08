@@ -83,7 +83,7 @@ impl CacheKey {
         field("opt_level", opt_level.as_bytes());
         // The language edition: a source that means one thing in one edition and
         // another in a later one must not share a cache entry.
-        field("edition", "0.1".as_bytes());
+        field("edition", "2026".as_bytes());
         field("source", source);
         for (name, value) in extra {
             field(name, value.as_bytes());
