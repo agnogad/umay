@@ -37,6 +37,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         "check" => cmd_check(&rest),
         "explain" => cmd_explain(&rest),
         "ast" => cmd_ast(&rest),
+        "metadata" => cmd_metadata(&rest),
         "mir" => cmd_mir(&rest),
         "doctor" => cmd_doctor(&rest),
         "new" => cmd_new(&rest),
@@ -100,7 +101,7 @@ OPTIONS:
     -O0 .. -O3             Optimisation level for build, run and asm (-O = -O2)
 
 PLANNED (not in this build):
-    fmt, lint, lsp
+    lsp
 
 EXIT CODES:
     0 success   1 compile error   2 usage error   3 I/O error
@@ -411,6 +412,49 @@ fn cmd_mir(args: &[String]) -> u8 {
         Err((diags, map)) => {
             let rendered = umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
             eprint!("{rendered}");
+            exit::COMPILE_ERROR
+        }
+    }
+}
+
+/// `umay metadata <file>` — what the program declares, as text or JSON.
+fn cmd_metadata(args: &[String]) -> u8 {
+    let opts = match parse_options(args) {
+        Ok(o) => o,
+        Err((code, msg)) => {
+            eprintln!("umay: {msg}");
+            return code;
+        }
+    };
+    if opts.files.len() != 1 {
+        eprintln!("umay: `metadata` takes exactly one source file");
+        return exit::USAGE;
+    }
+    let file = &opts.files[0];
+    let text = match std::fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("umay: cannot read `{file}`: {e}");
+            return exit::IO_ERROR;
+        }
+    };
+    match umayc::metadata_source(file.clone(), text) {
+        Ok(symbols) => {
+            if opts.format_json {
+                println!("{}", umayc::metadata::to_json(&symbols));
+            } else {
+                print!("{}", umayc::metadata::to_text(&symbols));
+            }
+            exit::OK
+        }
+        Err((diags, map)) => {
+            if opts.format_json {
+                println!("{}", render_json(&diags, &map));
+            } else {
+                let rendered =
+                    umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
+                eprint!("{rendered}");
+            }
             exit::COMPILE_ERROR
         }
     }

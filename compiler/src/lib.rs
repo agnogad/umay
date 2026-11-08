@@ -35,6 +35,7 @@ pub mod machine;
 pub mod lower_expr;
 pub mod lower_flow;
 pub mod lower_match;
+pub mod metadata;
 pub mod mir;
 pub mod mir_parse;
 pub mod mono;
@@ -71,6 +72,24 @@ pub fn lint_source(name: impl Into<String>, text: impl Into<String>) -> (Diagnos
     let id = FileId(0);
     let diags = lint::lint(&map, id, &out.program);
     (diags, map)
+}
+
+/// Collects the symbols a program declares, for `umay metadata`.
+///
+/// Parsing is enough: what a program declares is a property of its syntax, and
+/// asking for it should not require the program to also type-check. A program
+/// with a type error still has functions and structs, and an editor asking what
+/// they are should get them.
+pub fn metadata_source(
+    name: impl Into<String>,
+    text: impl Into<String>,
+) -> Result<Vec<metadata::Symbol>, (Diagnostics, SourceMap)> {
+    let (out, map) = parse_source(name, text);
+    if out.diagnostics.has_errors() {
+        return Err((out.diagnostics, map));
+    }
+    let symbols = metadata::symbols(&out.program, &map);
+    Ok(symbols)
 }
 
 /// Runs the lexer and parser over one in-memory source file.

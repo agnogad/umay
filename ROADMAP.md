@@ -485,7 +485,17 @@ a stack-argument bug, all now fixed and tested:
   compiler's own source, prepended to every program and uneditable by the
   user; a four-line program was reporting thirty-seven warnings about it,
   which buried the one that was about the user's code.
-- Stable machine-readable compiler metadata (symbol and type dumps).
+- [x] Stable machine-readable compiler metadata: `umay metadata <file>` lists
+  what a program declares — functions, structs, enums, traits, impls, consts and
+  aliases — as text or as a versioned JSON document. It answers the question an
+  editor, a doc generator or a test harness actually has, without asking them to
+  read MIR, which is the compiler's internal form and changes with the backend.
+  Types are rendered from the syntax tree rather than sliced out of the source,
+  because a path segment's span covers only its name: the first version printed
+  `Pair<i64>` as `Pair`, which is a different type. Trait bounds are kept for the
+  same reason — `fn f<T: Size>` accepts less than `fn f<T>` and a driver needs to
+  know that. Parsing is enough: a program with a type error still declares what it
+  declares, and an editor asks while the program is still being written.
 
 Exit criteria: an editor session on a multi-file project shows live diagnostics
 and navigation; `umay fmt` is idempotent on the full test corpus.
