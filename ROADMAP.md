@@ -458,7 +458,10 @@ a stack-argument bug, all now fixed and tested:
 
 ## Phase 7 — AI Developer Experience · in progress
 
-- LSP server: diagnostics, hover, go-to-definition, completion.
+- LSP server: diagnostics, hover, go-to-definition, completion. This is the one
+  item left in the phase. The pieces it needs are in place: `check --format
+  json` for diagnostics, `metadata --format json` for the names to complete,
+  and `fmt` for the formatting it will serve on request.
 - [x] `umay fmt` — deterministic formatter. Done: rewrites the gaps between
   tokens and nothing else, so every literal, escape and identifier survives
   byte for byte. A gap holding a comment is left alone. Fixed point on the

@@ -55,7 +55,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         "asm" => cmd_asm(&rest),
         "fmt" => cmd_fmt(&rest),
         "lint" => cmd_lint(&rest),
-        "lsp" => not_yet("lsp", "Phase 7 (developer experience)"),
+        "lsp" => not_yet("lsp", "Phase 7, developer experience"),
         other => {
             eprintln!("umay: unknown command `{other}`");
             eprintln!("run `umay help` for the list of commands");
@@ -66,8 +66,8 @@ pub fn run(args: Vec<String>) -> ExitCode {
 }
 
 fn not_yet(cmd: &str, phase: &str) -> u8 {
-    eprintln!("umay: `{cmd}` is not implemented yet (planned for {phase}).");
-    eprintln!("This build implements Phase 1: lexing and parsing. See ROADMAP.md.");
+    eprintln!("umay: `{cmd}` is not implemented yet; it is planned for {phase}.");
+    eprintln!("Every other command works; see ROADMAP.md for what is left.");
     exit::NOT_IMPLEMENTED
 }
 
