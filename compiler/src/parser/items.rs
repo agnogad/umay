@@ -449,6 +449,9 @@ impl Parser {
                     self.error("E0151", "unexpected end of file in trait body", self.span());
                     break;
                 }
+                // A method may carry a visibility and attributes, the same as a
+                // free function.
+                self.skip_method_decorations();
                 if self.at_keyword(Keyword::Fn) {
                     self.advance();
                     match self.parse_fn_body(true) {
@@ -489,6 +492,12 @@ impl Parser {
                     self.error("E0161", "unexpected end of file in impl body", self.span());
                     break;
                 }
+                // A method may carry a visibility and attributes, the same as a
+                // free function. They meant nothing to the impl body until now,
+                // so `pub fn` inside an `impl` was a parse error -- in a module,
+                // where a method is normally written `pub`, that made the
+                // ordinary way to write an `impl` unusable.
+                self.skip_method_decorations();
                 if self.at_keyword(Keyword::Fn) {
                     self.advance();
                     match self.parse_fn_body(true) {
@@ -504,6 +513,15 @@ impl Parser {
         }
         let end = self.prev_span();
         Some(ImplBlock { generics, trait_path, self_ty, methods, span: start.to(end) })
+    }
+
+    /// Consumes the attributes and visibility that may precede a method.
+    fn skip_method_decorations(&mut self) {
+        // `parse_attribute` consumes a `#` before looking, so it is only called
+        // when one is there -- otherwise every non-attribute token after a method
+        // became "expected `[` after `#`".
+        while self.at(&TokenKind::Hash) && self.parse_attribute().is_some() {}
+        self.eat_keyword(Keyword::Pub);
     }
 
     fn parse_const(&mut self) -> Option<ConstDecl> {

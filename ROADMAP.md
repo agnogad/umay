@@ -599,6 +599,10 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   `lib::answer()` compiles and runs. Before this the manifest recorded a
   dependency that nothing could reach: `umay lock` listed it and the compiler
   never saw it.
+- [x] A method may be written `pub fn` inside an `impl`, and may carry
+  attributes. Neither parsed: the impl body accepted only the bare `fn` keyword,
+  so a module's method -- normally written `pub` because it is meant to be
+  reachable from outside -- could not be written at all.
 - [x] A module's items belong to it. Two dependencies that both declare `run`
   used to be a duplicate definition, and whichever was collected first answered
   for the other (`b::run()` called `a::run()`). Each module's items are now

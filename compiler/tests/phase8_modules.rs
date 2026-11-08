@@ -383,3 +383,80 @@ fn two_modules_may_declare_the_same_function_name()
         "each module's function should answer for itself; full output was {stdout:?}"
     );
 }
+
+#[test]
+fn a_public_method_inside_an_impl_parses()
+{
+    // `pub fn` inside an `impl` was a parse error, so the ordinary way of writing
+    // a method -- especially in a module, where it is meant to be reachable from
+    // outside -- could not be written at all.
+    if !have_toolchain() {
+        eprintln!("skipping a_public_method_inside_an_impl_parses: `cc` is not available");
+        return;
+    }
+    let project = Project::new("pub_method");
+    project.write(
+        "main.um",
+        "struct Counter {\n    value: i64,\n}\n\nimpl Counter {\n    pub fn add(self, n: i64) -> i64 {\n        return self.value + n\n    }\n}\n\nfn main() -> i32 {\n    let c: Counter = Counter { value: 3i64 }\n    println_i64(c.add(4i64))\n    return 0\n}\n",
+    );
+
+    let (status, stdout, stderr) = project.run(&["run", "main.um"]);
+    assert_eq!(status, 0, "`pub fn` in an impl should parse and run:\n{stderr}");
+    assert!(stdout.contains('7'), "the method should run, got {stdout:?}");
+}
+
+#[test]
+fn a_struct_and_its_method_work_from_inside_a_module()
+{
+    if !have_toolchain() {
+        eprintln!("skipping a_struct_and_its_method_work_from_inside_a_module: `cc` is not available");
+        return;
+    }
+    let project = Project::new("mod_struct");
+    project.write(
+        "geo.um",
+        "pub struct Point {\n    x: i64,\n    y: i64,\n}\n\nimpl Point {\n    pub fn sum(self) -> i64 {\n        return self.x + self.y\n    }\n}\n",
+    );
+    project.write(
+        "main.um",
+        "fn main() -> i32 {\n    let p: geo::Point = geo::Point { x: 3i64, y: 4i64 }\n    println_i64(p.sum())\n    return 0\n}\n\nmod geo;\n",
+    );
+
+    let (status, stdout, stderr) = project.run(&["run", "main.um"]);
+    assert_eq!(status, 0, "a module's type and method should be usable:\n{stderr}");
+    assert!(stdout.contains('7'), "expected 3 + 4, got {stdout:?}");
+}
+
+#[test]
+fn an_attribute_does_not_turn_the_next_token_into_an_error()
+{
+    // `parse_attribute` consumes a `#` before it looks at what follows, so
+    // calling it unconditionally made every token after a method an "expected
+    // `[` after `#`" error.
+    let project = Project::new("no_attribute");
+    project.write(
+        "main.um",
+        "struct S {\n    v: i64,\n}\n\nimpl S {\n    fn get(self) -> i64 {\n        return self.v\n    }\n}\n\nfn main() -> i32 {\n    return 0\n}\n",
+    );
+
+    let (status, stdout, stderr) = project.run(&["check", "main.um"]);
+    let report = format!("{stdout}{stderr}");
+    assert_eq!(status, 0, "a method with no attribute should parse:\n{report}");
+    assert!(
+        !report.contains("after `#`"),
+        "the parser should not complain about a `#` that is not there:\n{report}"
+    );
+}
+
+#[test]
+fn a_method_may_carry_an_attribute()
+{
+    let project = Project::new("method_attribute");
+    project.write(
+        "main.um",
+        "struct S {\n    v: i64,\n}\n\nimpl S {\n    #[inline]\n    pub fn get(self) -> i64 {\n        return self.v\n    }\n}\n\nfn main() -> i32 {\n    return 0\n}\n",
+    );
+
+    let (status, stdout, stderr) = project.run(&["check", "main.um"]);
+    assert_eq!(status, 0, "an attributed method should parse:\n{stdout}{stderr}");
+}
