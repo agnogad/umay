@@ -359,7 +359,15 @@ struct Tree {
 
 impl Tree {
     fn new(tag: &str) -> Tree {
-        let root = std::env::temp_dir().join(format!("umay_tree_{tag}_{}", std::process::id()));
+        // The tag and the pid are not enough to be unique: the harness runs the
+        // cases of one binary in one process, so two trees in one run would share
+        // a directory and see each other's packages.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "umay_tree_{tag}_{}_{n}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create the tree");
         Tree { root }
@@ -369,18 +377,17 @@ impl Tree {
     fn package(&self, name: &str, version: &str, deps: &[(&str, &str, &str)]) -> &Self {
         let dir = self.root.join(name);
         std::fs::create_dir_all(dir.join("src")).expect("create the package");
-        // Every package gets both shapes of source: a library file for one that
-        // is depended on, and an entry point for one that is built and run.
-        std::fs::write(
-            dir.join("src/lib.um"),
-            format!("// {name}\nfn value() -> i64 {{\n    return 1i64\n}}\n"),
-        )
-        .expect("write the source");
+        // Every package gets an entry point, so any of them can be built. The
+        // library file is only for packages that are dependencies: writing
+        // `src/lib.um` into the app as well would make the app's own `mod lib;`
+        // resolve to this placeholder instead of the dependency it declares,
+        // which is a test that passes while the feature is broken.
         std::fs::write(
             dir.join("src/main.um"),
             "fn main() -> i32 {\n    return 0\n}\n",
         )
         .expect("write the entry point");
+
         let mut manifest = format!(
             "[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2026\"\n"
         );
@@ -393,6 +400,18 @@ impl Tree {
             }
         }
         std::fs::write(dir.join("umay.toml"), manifest).expect("write the manifest");
+        self
+    }
+
+    /// Gives a package a library file, so it can be depended on.
+    ///
+    /// Separate from `package` because only the package that is depended on
+    /// needs one. Writing `src/lib.um` into every package put a placeholder in
+    /// the app's own directory, where the app's `mod lib;` found it instead of
+    /// the dependency -- a test that passed while the thing it tested was broken.
+    fn library(&self, name: &str, functions: &str) -> &Self {
+        std::fs::write(self.root.join(name).join("src/lib.um"), functions)
+            .expect("write the library");
         self
     }
 
@@ -649,4 +668,119 @@ fn a_build_warns_when_the_lockfile_no_longer_matches()
         report.contains("umay lock"),
         "the message should say what to do:\n{report}"
     );
+}
+
+#[test]
+fn a_program_can_use_a_declared_dependency_through_mod()
+{
+    // Naming a dependency in `umay.toml` is what makes `mod lib;` resolve to the
+    // dependency's own source. Before this, the manifest recorded a dependency
+    // that nothing could reach: locking listed it and the compiler never saw it.
+    if !have_toolchain() {
+        eprintln!("skipping a_program_can_use_a_declared_dependency_through_mod: `cc` is not available");
+        return;
+    }
+    let tree = Tree::new("use_dep");
+    tree.package("lib", "1.0.0", &[]);
+    std::fs::write(
+        tree.root.join("lib").join("src/lib.um"),
+        "pub fn answer() -> i64 {\n    return 42i64\n}\n",
+    )
+    .expect("write the library");
+    tree.package("app", "0.1.0", &[("lib", "1.0.0", "../lib")]);
+    std::fs::write(
+        tree.root.join("app").join("src/main.um"),
+        "fn main() -> i32 {\n    println_i64(lib::answer())\n    return 0\n}\n\nmod lib;\n",
+    )
+    .expect("write the program");
+
+    let output = Command::new(compiler())
+        .current_dir(tree.root.join("app"))
+        .env("UMAY_CACHE_DIR", tree.root.join(".cache"))
+        .args(["run", "src/main.um"])
+        .output()
+        .expect("run the program");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "the program should run:\n{stderr}");
+    assert!(
+        stdout.contains("42"),
+        "the dependency's function should be callable, got stdout {stdout:?} / stderr {stderr:?}"
+    );
+}
+
+#[test]
+fn editing_a_dependency_rebuilds_the_program_that_uses_it()
+{
+    // The cache key has to cover a dependency's source as well as the program's,
+    // or a changed dependency keeps its old behaviour -- the exact failure the
+    // cache exists to avoid.
+    if !have_toolchain() {
+        eprintln!("skipping editing_a_dependency_rebuilds_the_program_that_uses_it: `cc` is not available");
+        return;
+    }
+    let tree = Tree::new("dep_invalidates");
+    tree.package("lib", "1.0.0", &[]);
+    tree.package("app", "0.1.0", &[("lib", "1.0.0", "../lib")]);
+    std::fs::write(
+        tree.root.join("app").join("src/main.um"),
+        "fn main() -> i32 {\n    println_i64(lib::answer())\n    return 0\n}\n\nmod lib;\n",
+    )
+    .expect("write the program");
+
+    let run = || {
+        let output = Command::new(compiler())
+            .current_dir(tree.root.join("app"))
+            .env("UMAY_CACHE_DIR", tree.root.join(".cache"))
+            .args(["run", "src/main.um"])
+            .output()
+            .expect("run the program");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    std::fs::write(
+        tree.root.join("lib").join("src/lib.um"),
+        "pub fn answer() -> i64 {\n    return 11i64\n}\n",
+    )
+    .expect("write the library");
+    assert!(run().contains("11"), "the first build should use the first version");
+
+    std::fs::write(
+        tree.root.join("lib").join("src/lib.um"),
+        "pub fn answer() -> i64 {\n    return 22i64\n}\n",
+    )
+    .expect("change the library");
+    assert!(
+        run().contains("22"),
+        "a changed dependency should rebuild the program that uses it"
+    );
+}
+
+#[test]
+fn a_mod_that_names_no_dependency_is_still_an_error()
+{
+    // Resolving dependencies must not turn a typo into a silent no-op: a `mod`
+    // for a name nobody declares still has to fail, and the message still has to
+    // say where it looked.
+    let tree = Tree::new("unknown_mod");
+    tree.package("app", "0.1.0", &[]);
+    std::fs::write(
+        tree.root.join("app").join("src/main.um"),
+        "fn main() -> i32 {\n    return 0\n}\n\nmod nonsense;\n",
+    )
+    .expect("write the program");
+
+    let output = Command::new(compiler())
+        .current_dir(tree.root.join("app"))
+        .env("UMAY_CACHE_DIR", tree.root.join(".cache"))
+        .args(["check", "src/main.um"])
+        .output()
+        .expect("check the program");
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_ne!(output.status.code(), Some(0), "an unknown module is an error:\n{report}");
+    assert!(report.contains("nonsense"), "the name should be named:\n{report}");
 }

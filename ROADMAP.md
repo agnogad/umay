@@ -594,6 +594,13 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   check now runs at the start of `build`, names the dependency that changed, and
   says to run `umay lock`. It covers transitive dependencies, which the first
   shape of the check would have missed.
+- [x] A declared dependency is reachable from the program. Naming `lib` in
+  `[dependencies]` makes `mod lib;` resolve to the dependency's own source, so
+  `lib::answer()` compiles and runs. Before this the manifest recorded a
+  dependency that nothing could reach: `umay lock` listed it and the compiler
+  never saw it.
+- [x] The cache key covers a dependency's source, so editing one rebuilds the
+  program that uses it, rather than keeping the previous assembly.
 - [ ] `upm` proper: fetching and a registry. A dependency with no `path` is still
   reported and nothing is written, because there is no registry to fetch from
   and a lockfile claiming to pin something it never looked at is worse than

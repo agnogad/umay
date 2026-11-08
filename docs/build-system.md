@@ -206,6 +206,12 @@ Partially implemented in Phase 8. What exists:
   reported with the chain that closed it instead of expanding forever. Locked
   paths are relative to the project, so a lockfile does not depend on the machine
   that wrote it.
+- Dependencies are reachable as modules. Naming `lib` in `[dependencies]` makes
+  `mod lib;` resolve to `../lib/src/lib.um`, so the program can call
+  `lib::answer()`. The manifest is found by walking up from the source file (a
+  project entry point lives in `src/`, not beside `umay.toml`), and its paths are
+  relative to the manifest. The cache key covers a dependency's source too, so
+  editing one rebuilds the program that uses it.
 - Version agreement: the dependency's own manifest says what it is, the parent's
   says what was asked for, and a disagreement is reported with both numbers
   rather than resolved in either direction.

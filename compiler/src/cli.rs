@@ -792,7 +792,7 @@ fn report_warnings(diags: &Diagnostics, map: &SourceMap, opts: &Options) {
 ///
 /// Best-effort in the same way the cache key is: a source that does not parse has
 /// a parse error to report, and that error is the one worth printing.
-fn names_a_main(text: &str, path: &Path) -> bool {
+fn names_a_main(text: &str, path: &Path, dependencies: &[umayc::modules::DependencyPath]) -> bool {
     let (out, mut map) = umayc::parse_source(path.to_string_lossy().into_owned(), text.to_string());
     if out.diagnostics.has_errors() {
         // The parse error is the real problem; let codegen report it with its
@@ -800,7 +800,7 @@ fn names_a_main(text: &str, path: &Path) -> bool {
         return true;
     }
     let (program, module_diagnostics) =
-        umayc::modules::load_from_entry(out.program, path, &mut map);
+        umayc::modules::load_from_entry_with_deps(out.program, path, &mut map, dependencies);
     if module_diagnostics.has_errors() {
         return true;
     }
@@ -811,11 +811,15 @@ fn names_a_main(text: &str, path: &Path) -> bool {
 ///
 /// Best-effort on purpose: the frontend reports the error properly, and a cache
 /// key that cannot be computed must not be a second, worse error message.
-fn module_sources_for(text: &str, path: &Path) -> Vec<(String, String)> {
+fn module_sources_for(
+    text: &str,
+    path: &Path,
+    dependencies: &[umayc::modules::DependencyPath],
+) -> Vec<(String, String)> {
     let (frontend, _map) =
         umayc::parse_source(path.to_string_lossy().into_owned(), text.to_string());
     let base = path.parent().unwrap_or_else(|| Path::new("."));
-    umayc::modules::module_sources(&frontend.program, base)
+    umayc::modules::module_sources_with_deps(&frontend.program, base, dependencies)
         .into_iter()
         .map(|(name, source)| {
             // The path is absolute on one machine and different on another. The
@@ -911,11 +915,18 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     let level = opt_level_name(opts.opt_level);
     warn_if_lock_is_stale();
 
+    // Dependencies named in the manifest are reachable as modules, so the entry
+    // point's directory is not the only place `mod lib;` can find a file. The
+    // project root is where the manifest lives, which is the entry's directory
+    // for a program at `src/main.um`.
+    let project_root = path.parent().unwrap_or_else(|| Path::new("."));
+    let dependencies = umayc::modules::dependencies_of_project(project_root);
+
     // A program with no `main` cannot be linked, and the linker's way of saying
     // so is "undefined reference to `main`" from `collect2` after the assembler
     // has already run. Asking about the source here makes it a diagnostic about
     // the program instead of a message about an object file.
-    if !names_a_main(&text, path) {
+    if !names_a_main(&text, path, &dependencies) {
         eprintln!(
             "umay: `{}` has no `main` function\n  a program needs one to be linked and run",
             file
@@ -926,7 +937,7 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     // The key covers every file that goes into the assembly, not just the entry
     // point. Keying on the entry alone let an edited module reuse the previous
     // assembly: the program silently kept its old behaviour.
-    let module_sources = module_sources_for(&text, path);
+    let module_sources = module_sources_for(&text, path, &dependencies);
     let extra: Vec<(&str, &str)> = module_sources
         .iter()
         .map(|(name, text)| (name.as_str(), text.as_str()))

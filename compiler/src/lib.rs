@@ -86,6 +86,20 @@ pub fn lint_source(name: impl Into<String>, text: impl Into<String>) -> (Diagnos
 /// asking for it should not require the program to also type-check. A program
 /// with a type error still has functions and structs, and an editor asking what
 /// they are should get them.
+/// The dependencies a source file's project declares, for module resolution.
+///
+/// Every entry point uses this rather than the caller passing a list, so a
+/// single file, a tool and the language server all find a declared dependency by
+/// the same rule: the manifest lives beside the source.
+fn dependencies_for(name: &str) -> Vec<modules::DependencyPath> {
+    let path = std::path::Path::new(name);
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+    match dir {
+        Some(dir) => modules::dependencies_of_project(dir),
+        None => Vec::new(),
+    }
+}
+
 pub fn metadata_source(
     name: impl Into<String>,
     text: impl Into<String>,
@@ -98,8 +112,9 @@ pub fn metadata_source(
     }
     // Modules are read from disk so that a tool asking what a project declares
     // hears about the items in its module files, not only the entry point.
+    let deps = dependencies_for(&name);
     let (program, module_diagnostics) =
-        modules::load_from_entry(out.program, std::path::Path::new(&name), &mut map);
+        modules::load_from_entry_with_deps(out.program, std::path::Path::new(&name), &mut map, &deps);
     append_all(&mut diagnostics, &module_diagnostics);
     if diagnostics.has_errors() {
         return Err((diagnostics, map));
@@ -177,8 +192,9 @@ pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
     }
     // Modules are read from disk before the prelude is prepended, so everything
     // downstream sees one flat list of items and needs no idea of files.
+    let deps = dependencies_for(name);
     let (program, module_diagnostics) =
-        modules::load_from_entry(out.program, std::path::Path::new(name), &mut map);
+        modules::load_from_entry_with_deps(out.program, std::path::Path::new(name), &mut map, &deps);
     append_all(&mut diagnostics, &module_diagnostics);
     let (program, prelude_diagnostics) = prelude::with_prelude(program, &mut map);
     append_all(&mut diagnostics, &prelude_diagnostics);
@@ -410,8 +426,13 @@ fn codegen_source_impl(
     // program that is already complete. The runtime compiles without the prelude
     // and has no modules of its own, so it takes the plain path.
     let program = if with_prelude {
-        let (program, module_diagnostics) =
-            modules::load_from_entry(out.program, std::path::Path::new(name), &mut map);
+        let deps = dependencies_for(name);
+        let (program, module_diagnostics) = modules::load_from_entry_with_deps(
+            out.program,
+            std::path::Path::new(name),
+            &mut map,
+            &deps,
+        );
         append_all(&mut diagnostics, &module_diagnostics);
         let (program, prelude_diagnostics) = prelude::with_prelude(program, &mut map);
         append_all(&mut diagnostics, &prelude_diagnostics);
