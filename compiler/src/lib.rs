@@ -24,6 +24,7 @@ pub mod diagnostics;
 pub mod drop_elab;
 pub mod explain;
 pub mod fmt;
+pub mod lint;
 pub mod hir;
 pub mod lexer;
 pub mod frame;
@@ -55,6 +56,21 @@ use source::{FileId, SourceMap};
 pub struct FrontendOutput {
     pub program: ast::Program,
     pub diagnostics: Diagnostics,
+}
+
+/// Runs every lint over one in-memory source file.
+///
+/// A convenience over `parse_source` and `lint` so that a caller does not have to
+/// reconstruct the file id: `parse_source` builds a fresh map, so the file it
+/// added is the only one in it.
+pub fn lint_source(name: impl Into<String>, text: impl Into<String>) -> (Diagnostics, SourceMap) {
+    let (out, map) = parse_source(name, text);
+    if out.diagnostics.has_errors() {
+        return (out.diagnostics, map);
+    }
+    let id = FileId(0);
+    let diags = lint::lint(&map, id, &out.program);
+    (diags, map)
 }
 
 /// Runs the lexer and parser over one in-memory source file.

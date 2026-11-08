@@ -51,7 +51,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         "run" => cmd_build(&rest, true),
         "asm" => cmd_asm(&rest),
         "fmt" => cmd_fmt(&rest),
-        "lint" => not_yet("lint", "Phase 7 (developer experience)"),
+        "lint" => cmd_lint(&rest),
         "lsp" => not_yet("lsp", "Phase 7 (developer experience)"),
         other => {
             eprintln!("umay: unknown command `{other}`");
@@ -84,6 +84,7 @@ COMMANDS:
     ast <file>         Print the parsed syntax tree
     mir <file>         Print the lowered MIR (basic blocks)
     fmt <files...>     Rewrite whitespace to the standard style (--check: report only)
+    lint <files...>    Report style findings (--rules: list them)
     explain <CODE>     Explain a diagnostic code (e.g. umay explain E0101)
     doctor             Report toolchain and environment information
     new <name>         Create a new UMAY project
@@ -249,6 +250,72 @@ fn cmd_fmt(args: &[String]) -> u8 {
     }
     if check_only && changed_any {
         // A script asks "is this tree formatted" by the exit status alone.
+        return exit::COMPILE_ERROR;
+    }
+    exit::OK
+}
+
+/// `umay lint`: style and correctness tips the compiler has no stake in.
+///
+/// These are separate from `check` because they are opinions: the code compiles
+/// and does what it says, and a project should adopt the advice at its own pace
+/// rather than find it in every build. `--rules` prints the list so a reader can
+/// decide what to adopt.
+fn cmd_lint(args: &[String]) -> u8 {
+    if args.iter().any(|a| a == "--rules") {
+        print!("{}", umayc::lint::describe_rules());
+        return exit::OK;
+    }
+    let opts = match parse_options(args) {
+        Ok(o) => o,
+        Err((code, msg)) => {
+            eprintln!("umay: {msg}");
+            return code;
+        }
+    };
+    if opts.files.is_empty() {
+        eprintln!("umay: `lint` requires at least one source file");
+        return exit::USAGE;
+    }
+    let color = use_color(opts.color);
+    let mut any = false;
+    let mut io_failed = false;
+    let mut total = 0usize;
+    for file in &opts.files {
+        let path = Path::new(file);
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("umay: cannot read `{file}`: {e}");
+                io_failed = true;
+                continue;
+            }
+        };
+        // A file that does not parse has no tree to lint, and the parse errors
+        // are what the reader needs to see first. `lint_source` reports those
+        // instead of a finding list.
+        let (diags, map) = umayc::lint_source(path.to_string_lossy().to_string(), text);
+        let count = diags.items().len();
+        total += count;
+        if count > 0 {
+            any = true;
+        }
+        if opts.format_json {
+            println!("{}", render_json(&diags, &map));
+        } else if count > 0 {
+            print!("{}", umayc::render_all_full(&diags, &map, color, opts.explain));
+        }
+    }
+    if io_failed {
+        return exit::IO_ERROR;
+    }
+    if !opts.format_json {
+        eprintln!(
+            "{total} finding{}",
+            if total == 1 { "" } else { "s" }
+        );
+    }
+    if any {
         return exit::COMPILE_ERROR;
     }
     exit::OK

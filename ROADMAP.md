@@ -466,7 +466,14 @@ a stack-argument bug, all now fixed and tested:
   thing it will not decide is whether a `<` brackets a type's arguments or
   compares two values: that cannot be told from the token stream, so the
   author's spacing is kept there rather than guessed at.
-- `umay lint` — style and correctness lints (`W*` codes).
+- [x] `umay lint` — style tips the compiler has no stake in, kept separate from
+  `check` because they are opinions a project adopts at its own pace. Five
+  rules (`L0101`–`L0105`): trailing whitespace, unfinished-work markers, an
+  empty body that promises a value, an `else` after a returning branch, and an
+  unused parameter. `--rules` lists them. Every rule works on the syntax tree
+  and the source text and never on types, so each one is one sentence long and
+  fixable without understanding the program. The standard library and examples
+  come out clean, which is what the tests assert.
 - JSON diagnostics for build and run, not just check.
 - Stable machine-readable compiler metadata (symbol and type dumps).
 

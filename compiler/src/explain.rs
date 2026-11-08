@@ -506,6 +506,45 @@ pub static EXPLAIN: &[ExplainEntry] = &[
          one, so the result is dropped. End the block with `;` if discarding is intended.",
         Some("if ready { do_work() }   // result discarded"),
     ),
+    // ---- lint -------------------------------------------------------------
+    e(
+        "L0101",
+        "a line ends in spaces or tabs",
+        "Trailing whitespace shows up in every future diff of the line and in nothing else. \
+         Reported by `umay lint`; `umay fmt` removes it.",
+        Some("let x = 1   // the spaces after `1` are reported"),
+    ),
+    e(
+        "L0102",
+        "a comment marks unfinished work",
+        "A comment contains `TODO`, `FIXME`, `XXX` or `HACK` in upper case. The marker is a \
+         note to whoever reads the file next; naming it makes the list visible without reading \
+         every comment. Prose that happens to use the word in lower case is not a marker.",
+        Some("// TODO: handle the empty case"),
+    ),
+    e(
+        "L0103",
+        "a function body is empty where the signature promises a value",
+        "An empty block is a valid body, so this compiles when the return type allows it. If the \
+         function is not written yet, `unimplemented!` says so more clearly than a body that \
+         happens to typecheck.",
+        Some("fn get(&self) -> i64 {\n    // nothing returns a value here\n}   // L0103"),
+    ),
+    e(
+        "L0104",
+        "an `else` follows a branch that always returns",
+        "The `then` branch returns, so the `else` is only reached by falling through. Writing the \
+         second branch after the `if` takes one level of nesting out of the function body.",
+        Some("if ready {\n    return 1\n} else {   // L0104\n    return 2\n}\n// clearer:\nif ready {\n    return 1\n}\nreturn 2"),
+    ),
+    e(
+        "L0105",
+        "a parameter is never mentioned in the body",
+        "A parameter the body ignores is either a leftover from an earlier shape of the function \
+         or a bug. A leading underscore is how a reader says it is kept on purpose, and it \
+         silences this rule.",
+        Some("fn f(kept: i64, ignored: i64) -> i64 {\n    return kept   // L0105 names `ignored`\n}"),
+    ),
     e(
         "W0010",
         "attribute has no effect yet",
