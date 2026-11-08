@@ -161,12 +161,43 @@ impl<'a> Checker<'a> {
         }
 
         // ---- nested modules ----
+        //
+        // A module's items are reachable two ways: by their bare name, which is
+        // how an inline module has always worked and how the prelude is used,
+        // and by `module::name`. Only the second needs the prefix, so both are
+        // registered rather than moving everything behind a path.
         for item in items {
             if let ast::Item::Mod(m) = item {
                 if let Some(inner) = &m.items {
-                    self.collect_items_in(inner);
+                    self.collect_items_qualified(inner, &m.name);
                 }
             }
+        }
+    }
+
+    /// Collects the items of a module, registering each under `module::name` too.
+    ///
+    /// The names a module declares are exactly the names that were not in the
+    /// table before it was collected, so the difference is taken rather than a
+    /// list being threaded through every `collect_*` helper.
+    fn collect_items_qualified(&mut self, items: &[ast::Item], module: &str) {
+        let before: std::collections::HashSet<String> =
+            self.items.all_names().into_iter().map(str::to_string).collect();
+        self.collect_items_in(items);
+
+        // A module nested inside this one was registered as `inner::name`; from
+        // here it is reachable as `this::inner::name`, so the prefix is applied
+        // to every name the module added, however many segments it has.
+        let added: Vec<(String, ItemEntry)> = self
+            .items
+            .user_items()
+            .filter(|(name, _)| !before.contains(*name))
+            .map(|(name, entry)| (format!("{module}::{name}"), entry.clone()))
+            .collect();
+        for (key, entry) in added {
+            // A module may be declared in two files; the qualified spelling is
+            // a second way to reach a name, not a second definition of it.
+            let _ = self.items.declare(key, entry);
         }
     }
 

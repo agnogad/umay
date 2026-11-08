@@ -524,8 +524,18 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   no cache entries, an edit does, and `-O0` and `-O2` never share one.
 - [x] `umay doctor` reports the cache's entry count and size, the inputs the key
   is derived from, and the real phase status.
-- Module-level invalidation; parallel compilation. The compiler is single-file
-  today, so there is nothing to invalidate at module granularity yet.
+- [x] Modules from files: `mod name;` loads `name.um` or `name/mod.um`. Before
+  this, the line parsed and did nothing, so a program that used the module said
+  `unknown name` whether the file was there or not -- accepted syntax that
+  cannot be debugged. A missing file, a cycle and the same file named twice are
+  all errors with the paths in them; an error inside a module is reported
+  against that module's file.
+- [x] Module-level invalidation: the cache key covers every module file that
+  goes into the assembly, not just the entry point. Keying on the entry alone
+  let an edited module reuse the previous assembly, so the program silently kept
+  its old behaviour.
+- [ ] Parallel compilation. There is one unit of work per build today, so there
+  is nothing to run in parallel yet.
 - [x] Reproducible builds, checked: two clean builds of the same source in two
   different directories produce byte-identical assembly, object files and
   executable (including the linker's build id). Pinned by tests, because an
@@ -553,7 +563,8 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   claiming to have pinned something it never fetched.
 
 Exit criteria: incremental rebuild after a one-module edit does not recompile
-independent modules; no `target/` ever appears in a project; two clean builds of
+independent modules (met: the cache key covers the whole module tree, so a
+module edit misses the cache rather than reusing stale assembly); no `target/` ever appears in a project; two clean builds of
 the same input produce identical artifacts.
 
 ---

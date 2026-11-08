@@ -35,6 +35,7 @@ pub mod isel;
 pub mod machine;
 pub mod lsp;
 pub mod lock;
+pub mod modules;
 pub mod manifest;
 pub mod lower_expr;
 pub mod lower_flow;
@@ -151,7 +152,12 @@ pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
     if diagnostics.has_errors() {
         return (diagnostics, map);
     }
-    let (program, prelude_diagnostics) = prelude::with_prelude(out.program, &mut map);
+    // Modules are read from disk before the prelude is prepended, so everything
+    // downstream sees one flat list of items and needs no idea of files.
+    let (program, module_diagnostics) =
+        modules::load_from_entry(out.program, std::path::Path::new(name), &mut map);
+    append_all(&mut diagnostics, &module_diagnostics);
+    let (program, prelude_diagnostics) = prelude::with_prelude(program, &mut map);
     append_all(&mut diagnostics, &prelude_diagnostics);
 
     let mut sema = sema::analyze(&program, &map);
@@ -377,8 +383,14 @@ fn codegen_source_impl(
     if diagnostics.has_errors() {
         return Err((diagnostics, map));
     }
+    // Modules load before the prelude, so the prelude's items sit in front of a
+    // program that is already complete. The runtime compiles without the prelude
+    // and has no modules of its own, so it takes the plain path.
     let program = if with_prelude {
-        let (program, prelude_diagnostics) = prelude::with_prelude(out.program, &mut map);
+        let (program, module_diagnostics) =
+            modules::load_from_entry(out.program, std::path::Path::new(name), &mut map);
+        append_all(&mut diagnostics, &module_diagnostics);
+        let (program, prelude_diagnostics) = prelude::with_prelude(program, &mut map);
         append_all(&mut diagnostics, &prelude_diagnostics);
         program
     } else {

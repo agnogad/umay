@@ -219,6 +219,15 @@ Design position for the rest:
   builds are reproducible.
 - No scripts run on install; dependency resolution is declarative.
 
+### Modules in the key
+
+The key covers every module file that went into the assembly, not only the entry
+point. Understanding why: the first version hashed the entry file alone, so
+editing a module was a cache hit — the program kept its old behaviour while the
+source said otherwise, which is the worst kind of stale. The module files are
+named by their path relative to the entry point, so the key does not depend on
+where the project sits and reproducible builds still hold.
+
 ### What is not cached, deliberately
 
 A build that produced a warning is not cached. The cache holds the assembly text

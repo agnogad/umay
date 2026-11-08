@@ -790,6 +790,35 @@ fn report_warnings(diags: &Diagnostics, map: &SourceMap, opts: &Options) {
     }
 }
 
+/// The source text of every module `text` would load, for the cache key.
+///
+/// Best-effort on purpose: the frontend reports the error properly, and a cache
+/// key that cannot be computed must not be a second, worse error message.
+fn module_sources_for(text: &str, path: &Path) -> Vec<(String, String)> {
+    let (frontend, map) = umayc::parse_source(path.to_string_lossy().into_owned(), text.to_string());
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    umayc::modules::module_sources(&frontend.program, base)
+        .into_iter()
+        .map(|(name, source)| {
+            // The path is absolute on one machine and different on another. The
+            // key must not depend on where the project sits, so the module is
+            // named by its path relative to the entry point.
+            let relative = Path::new(&name)
+                .strip_prefix(base)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| {
+                    // `base` is the entry's directory, which is not always the
+                    // canonical parent; fall back to the file name.
+                    Path::new(&name)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or(name)
+                });
+            (relative, source)
+        })
+        .collect()
+}
+
 /// The entry point named by `umay.toml` in the current directory.
 fn entry_from_manifest() -> Result<String, u8> {
     if !Path::new("umay.toml").exists() {
@@ -842,11 +871,19 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     // the previous compile's exact answer. A miss is the normal first build.
     let cache = umayc::build::Cache::open();
     let level = opt_level_name(opts.opt_level);
+    // The key covers every file that goes into the assembly, not just the entry
+    // point. Keying on the entry alone let an edited module reuse the previous
+    // assembly: the program silently kept its old behaviour.
+    let module_sources = module_sources_for(&text, path);
+    let extra: Vec<(&str, &str)> = module_sources
+        .iter()
+        .map(|(name, text)| (name.as_str(), text.as_str()))
+        .collect();
     let program_key = umayc::build::CacheKey::derive(
         umayc::build::Artifact::ProgramAsm,
         level,
         text.as_bytes(),
-        &[],
+        &extra,
     );
 
     let cached_assembly = cache.read(&program_key, umayc::build::Artifact::ProgramAsm);

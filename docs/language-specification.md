@@ -169,6 +169,23 @@ use_decl   ::= 'use' path ('::' '{' identifier (',' identifier)* ','? '}')? ('as
 mod_decl   ::= 'mod' identifier (block | ';')
 ```
 
+A module written with a body (`mod inner { ... }`) keeps its items in the same
+file. A module written with `;` is read from disk: `mod name;` in `dir/main.um`
+loads `dir/name.um`, or `dir/name/mod.um` if the first does not exist. The first
+of those that exists wins; if neither does, the program is rejected and the error
+names both paths.
+
+A module file is an ordinary UMAY file, and its own `mod` declarations resolve
+against its own directory, so `a/mod.um` declaring `mod b;` loads
+`a/b.um`. A file that reaches itself, directly or through other modules, is an
+error rather than an expansion that runs until the stack is gone. The same file
+named twice is loaded once.
+
+Items in a module are reachable by their bare name and by the module path:
+`answer()` and `helper::answer()` both work, and nesting extends the path
+(`a::b::answer()`). Errors inside a module are reported against the module's own
+file and line.
+
 ---
 
 ## 5. Statements

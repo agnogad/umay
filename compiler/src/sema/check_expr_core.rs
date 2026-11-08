@@ -407,6 +407,18 @@ impl FnChecker<'_, '_> {
                 return HirExpr { kind: HirExprKind::FnRef(fn_id), ty, span };
             }
         }
+        // `module::function` names a function declared in a module. The item
+        // collector registers those under the qualified key, so this is the only
+        // place that has to know about it -- and it is checked for every path
+        // length, because `a::b::name` is as valid as `a::name`.
+        if path.segments.len() >= 2 {
+            if let Some(entry) = self.cx.items.lookup(&path.as_string()).cloned() {
+                if let crate::hir::Res::Fn(fn_id) = entry.res {
+                    let ty = self.fn_type(fn_id);
+                    return HirExpr { kind: HirExprKind::FnRef(fn_id), ty, span };
+                }
+            }
+        }
         if path.segments.len() == 1 {
             return self.check_ident(&path.segments[0].name, span);
         }
