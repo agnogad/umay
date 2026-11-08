@@ -20,6 +20,10 @@ pub mod exit {
     pub const COMPILE_ERROR: u8 = 1;
     pub const USAGE: u8 = 2;
     pub const IO_ERROR: u8 = 3;
+    /// Retired: no command exits with this any more, since every command in
+    /// `umay --help` is implemented. The value is kept so that the numbers after
+    /// it do not shift, and so a driver that still checks for it still compiles.
+    #[allow(dead_code)]
     pub const NOT_IMPLEMENTED: u8 = 4;
     pub const CODEGEN_ERROR: u8 = 5;
 }
@@ -66,12 +70,6 @@ pub fn run(args: Vec<String>) -> ExitCode {
     ExitCode::from(code)
 }
 
-fn not_yet(cmd: &str, phase: &str) -> u8 {
-    eprintln!("umay: `{cmd}` is not implemented yet; it is planned for {phase}.");
-    eprintln!("Every other command works; see ROADMAP.md for what is left.");
-    exit::NOT_IMPLEMENTED
-}
-
 fn print_help() {
     println!(
         "\
@@ -103,7 +101,7 @@ OPTIONS:
 
 EXIT CODES:
     0 success   1 compile error   2 usage error   3 I/O error
-    4 not implemented   5 code generation failed"
+    4 retired (no command uses it)   5 code generation failed"
     );
 }
 
@@ -814,7 +812,8 @@ fn names_a_main(text: &str, path: &Path) -> bool {
 /// Best-effort on purpose: the frontend reports the error properly, and a cache
 /// key that cannot be computed must not be a second, worse error message.
 fn module_sources_for(text: &str, path: &Path) -> Vec<(String, String)> {
-    let (frontend, map) = umayc::parse_source(path.to_string_lossy().into_owned(), text.to_string());
+    let (frontend, _map) =
+        umayc::parse_source(path.to_string_lossy().into_owned(), text.to_string());
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     umayc::modules::module_sources(&frontend.program, base)
         .into_iter()
