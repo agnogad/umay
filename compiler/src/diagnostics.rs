@@ -200,6 +200,15 @@ impl Diagnostics {
         self.items.extend(other);
     }
 
+    /// Keeps only the diagnostics `keep` returns true for.
+    ///
+    /// Used to take the compiler's own source out of the report: the prelude is
+    /// appended to every program, and a warning about it is not about anything
+    /// the user wrote.
+    pub fn retain(&mut self, mut keep: impl FnMut(&Diagnostic) -> bool) {
+        self.items.retain(|d| keep(d));
+    }
+
     pub fn items(&self) -> &[Diagnostic] {
         &self.items
     }

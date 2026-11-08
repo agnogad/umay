@@ -132,6 +132,7 @@ pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
 
     let mut sema = sema::analyze(&program, &map);
     append_all(&mut diagnostics, &sema.diagnostics);
+    drop_prelude_warnings(&mut diagnostics, &map);
     diagnostics.sort();
     if diagnostics.has_errors() {
         return (diagnostics, map);
@@ -148,6 +149,7 @@ pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
     drop_elab::elaborate(&mut lowered.program, &sema.types);
     let ownership = ownership::check_program(&lowered.program, &sema.types);
     append_all(&mut diagnostics, &ownership);
+    drop_prelude_warnings(&mut diagnostics, &map);
     diagnostics.sort();
     (diagnostics, map)
 }
@@ -285,6 +287,11 @@ pub struct CodegenOutput {
     pub assembly: String,
     pub program: mir::MirProgram,
     pub types: types::TyCtxt,
+    /// Warnings that survived the build. A build is not a check, but a warning
+    /// it saw and threw away is one the user never gets to read, so they are
+    /// carried out with the assembly rather than dropped on success.
+    pub diagnostics: Diagnostics,
+    pub map: SourceMap,
 }
 
 /// Runs the whole pipeline from source text to assembly.
@@ -314,6 +321,25 @@ pub fn codegen_source_without_prelude(
     codegen_source_impl(name, text, level, false)
 }
 
+/// Drops warnings that point into the prelude.
+///
+/// The prelude is the compiler's own source: it is prepended to every program,
+/// the user cannot edit it, and nothing it does is a decision the user made.
+/// Warnings about it are therefore not advice, they are noise -- thirty-seven of
+/// them on a four-line program, which buried the one that was about the user's
+/// code. Errors are left alone: a broken prelude means the compiler is broken,
+/// and that must be visible.
+fn drop_prelude_warnings(diagnostics: &mut Diagnostics, map: &SourceMap) {
+    let Some(prelude) = crate::prelude::prelude_file(map) else {
+        return;
+    };
+    let is_noise = |d: &crate::diagnostics::Diagnostic| {
+        d.severity != crate::diagnostics::Severity::Error
+            && d.span.is_some_and(|s| s.file == prelude)
+    };
+    diagnostics.retain(|d| !is_noise(d));
+}
+
 fn codegen_source_impl(
     name: &str,
     text: &str,
@@ -337,6 +363,7 @@ fn codegen_source_impl(
 
     let mut sema = sema::analyze(&program, &map);
     append_all(&mut diagnostics, &sema.diagnostics);
+    drop_prelude_warnings(&mut diagnostics, &map);
     diagnostics.sort();
     if diagnostics.has_errors() {
         return Err((diagnostics, map));
@@ -351,6 +378,7 @@ fn codegen_source_impl(
     drop_elab::elaborate(&mut lowered.program, &sema.types);
     let ownership = ownership::check_program(&lowered.program, &sema.types);
     append_all(&mut diagnostics, &ownership);
+    drop_prelude_warnings(&mut diagnostics, &map);
     diagnostics.sort();
     if diagnostics.has_errors() {
         return Err((diagnostics, map));
@@ -359,7 +387,13 @@ fn codegen_source_impl(
     opt::optimize(&mut lowered.program, &sema.types, level);
 
     match codegen::generate(&lowered.program, &mut sema.types, &sema.hir) {
-        Ok(assembly) => Ok(CodegenOutput { assembly, program: lowered.program, types: sema.types }),
+        Ok(assembly) => Ok(CodegenOutput {
+            assembly,
+            program: lowered.program,
+            types: sema.types,
+            diagnostics,
+            map,
+        }),
         Err(errors) => {
             for error in errors {
                 diagnostics.push(

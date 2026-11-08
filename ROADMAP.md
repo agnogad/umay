@@ -474,7 +474,17 @@ a stack-argument bug, all now fixed and tested:
   and the source text and never on types, so each one is one sentence long and
   fixable without understanding the program. The standard library and examples
   come out clean, which is what the tests assert.
-- JSON diagnostics for build and run, not just check.
+- [x] JSON diagnostics for build and run, not just check. A failed build now
+  emits the same document `check` emits, so a driver needs one parser.
+- [x] `build` and `run` report the warnings they see. They used to drop them:
+  the same program warned under `check` and was silent under `build`, which
+  meant the warning was worth whatever command you happened to run. They now
+  render to the same stream as `check` too, so capturing the report does not
+  depend on which command produced it.
+- [x] Warnings from the prelude are no longer reported. The prelude is the
+  compiler's own source, prepended to every program and uneditable by the
+  user; a four-line program was reporting thirty-seven warnings about it,
+  which buried the one that was about the user's code.
 - Stable machine-readable compiler metadata (symbol and type dumps).
 
 Exit criteria: an editor session on a multi-file project shows live diagnostics

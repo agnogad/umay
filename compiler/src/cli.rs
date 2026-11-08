@@ -8,6 +8,8 @@
 
 use std::io::Write;
 
+use umayc::diagnostics::Diagnostics;
+use umayc::source::SourceMap;
 use umayc::render_json;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -624,6 +626,23 @@ fn wrap(text: &str, width: usize) -> String {
 /// `umay build [options] <file>` — compile to an executable in `dist/`.
 ///
 /// `run` compiles the same way and then executes the result.
+/// Prints the warnings a successful build carried out with it.
+///
+/// A build that succeeds is not silent about a warning it saw: `check` reports
+/// these, and a user who runs `build` instead should not get a different story.
+fn report_warnings(diags: &Diagnostics, map: &SourceMap, opts: &Options) {
+    if diags.items().is_empty() {
+        return;
+    }
+    if opts.format_json {
+        println!("{}", render_json(diags, map));
+    } else {
+        // `check` writes rendered diagnostics to stdout, so `build` does too: a
+        // wrapper that captures one command's report has to capture the other's.
+        print!("{}", umayc::render_all_full(diags, map, use_color(opts.color), opts.explain));
+    }
+}
+
 fn cmd_build(args: &[String], run: bool) -> u8 {
     let opts = match parse_options(args) {
         Ok(o) => o,
@@ -649,11 +668,21 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     let output = match umayc::codegen_source(path.to_string_lossy().as_ref(), &text, opts.opt_level) {
         Ok(o) => o,
         Err((diags, map)) => {
-            let rendered = umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
-            eprint!("{rendered}");
+            // A tool that drives the compiler reads JSON from every command, not
+            // just from `check`; a build that fails has to say so in the same
+            // shape or the driver needs two parsers.
+            if opts.format_json {
+                println!("{}", render_json(&diags, &map));
+            } else {
+                let rendered =
+                    umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
+                eprint!("{rendered}");
+            }
             return exit::COMPILE_ERROR;
         }
     };
+
+    report_warnings(&output.diagnostics, &output.map, &opts);
 
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
     // Artifacts go in `dist/` at the project root; the build never writes inside
