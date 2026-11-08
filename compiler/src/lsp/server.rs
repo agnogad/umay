@@ -408,7 +408,7 @@ impl Server {
             Some(w) => w,
             None => return result_response(id, Value::Null),
         };
-        match describe(&document.text, &word) {
+        match describe(&document.text, &document.source_name(), &word) {
             Some(text) => result_response(
                 id,
                 Value::object([
@@ -628,8 +628,11 @@ pub fn word_at(text: &str, offset: u32) -> Option<String> {
 }
 
 /// A one-line description of a symbol, for a hover box.
-fn describe(text: &str, word: &str) -> Option<String> {
-    for symbol in metadata::symbols_or_empty(text) {
+fn describe(text: &str, name: &str, word: &str) -> Option<String> {
+    // The document's own name, so a module's items are in the list: hovering
+    // `describe` in a file that only says `mod kinds;` found nothing when the
+    // compiler was pointed at that one file.
+    for symbol in metadata::symbols_or_empty_at(name, text) {
         if symbol.name() == word || symbol.name().ends_with(&format!("::{word}")) {
             let (_, _, detail) = symbol_summary(&symbol);
             return Some(format!("```umay\n{detail}\n```"));

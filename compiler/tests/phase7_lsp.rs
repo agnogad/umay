@@ -308,3 +308,35 @@ fn hover_finds_a_name_in_a_file_with_non_ascii_text() {
         "the hover should find `measure`, got {reply}"
     );
 }
+
+#[test]
+fn hover_finds_a_function_that_lives_in_a_module() {
+    // The editor asks the server for a document's symbols by handing it the text.
+    // The text on its own does not contain a module's items, so hover answered
+    // `null` for every name reached through `mod` -- the server had to be told
+    // which file the text came from so the module could be read from disk.
+    let dir = std::env::temp_dir().join(format!("umay_lsp_hover_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the directory");
+    std::fs::write(
+        dir.join("kinds.um"),
+        "pub fn weigh(k: i64) -> i64 {\n    return k\n}\n",
+    )
+    .expect("write the module");
+    let main = dir.join("main.um");
+    let text = "fn main() -> i32 {\n    println_i64(kinds::weigh(3i64))\n    return 0\n}\n\nmod kinds;\n";
+    std::fs::write(&main, text).expect("write the program");
+
+    let uri = format!("file://{}", main.display());
+    // The cursor sits inside `weigh`, at the character after its first.
+    let hover = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{{"textDocument":{{"uri":"{uri}"}},"position":{{"line":1,"character":24}}}}}}"#
+    );
+    let replies = exchange(&[initialize(), &open(&uri, text), &hover]);
+    let reply = reply_with_id(&replies, 2).expect("a hover reply");
+    assert!(
+        reply.contains("weigh"),
+        "hover in a module's function should describe it, got {reply}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
