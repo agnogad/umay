@@ -104,6 +104,32 @@ enum Result<T, E> {
 }
 
 #[test]
+fn less_than_is_not_generic_args_when_a_later_greater_than_exists() {
+    // A `<` comparison must not be read as a generic argument list just
+    // because a `>` appears later in the token stream. Both an operator and
+    // a literal after `<` used to let the lookahead run into a later statement.
+    assert_clean(
+        r#"
+fn cmp(x: i32, y: i32, z: i32, w: i32) -> i32 {
+    if x < y && z > (w) { return 1 }
+    return 0
+}
+"#,
+    );
+    assert_clean(
+        r#"
+fn loop_then_cmp() -> bool {
+    let mut i: i32 = 0i32
+    while (i < 6i32) && (i < 3i32) {
+        i = i + 1i32
+    }
+    return 1i32 > (0i32)
+}
+"#,
+    );
+}
+
+#[test]
 fn trait_and_impl_parse() {
     assert_clean(
         r#"
