@@ -28,3 +28,17 @@ Then visit `http://127.0.0.1:8080`.
 - `POST /api/notes` — Create a note from form field `text` (`1..=1000` bytes; `201 {"id":N}`, `422` on invalid input, `401` without session).
 - `DELETE /api/notes/:id` — Delete one of the signed-in user's notes (`204` on delete, `404` if missing or owned by another user, `401` without session).
 - `GET /static/*` — Serve static assets from `public/`.
+
+## Deploying
+
+The server speaks plain HTTP and sets the `sid` session cookie with the `Secure` attribute. Browsers accept a `Secure` cookie over plain HTTP only on `localhost`, so on any other host log-in silently fails unless the app is behind an HTTPS reverse proxy (such as Caddy or nginx) that terminates TLS.
+
+Minimal `Caddyfile`:
+
+```caddyfile
+example.com {
+    reverse_proxy localhost:8080
+}
+```
+
+At the default `APP_PBKDF2_ITERATIONS=100000`, sign-up and log-in take ~1 s; a lower value is fine for local development only (keep `100000` or higher in production, and set `APP_SECRET` so sessions survive restarts).

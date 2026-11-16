@@ -450,8 +450,10 @@ fn app_static(req: &Request, res: &mut Response) {
 }
 
 fn app_log_listening(port: u16) {
-    let msg = alloc(64)
-    let mut n = put_text(msg, 0, Bytes::from_str("listening on http://127.0.0.1:"))
+    let msg = alloc(96)
+    let mut n = put_text(msg, 0, Bytes::from_str("listening on port "))
+    n = put_decimal(msg, n, port as usize)
+    n = put_text(msg, n, Bytes::from_str(" (all interfaces): http://localhost:"))
     n = put_decimal(msg, n, port as usize)
     unsafe { write_byte((msg as usize + n) as *mut u8, 0u8) }
     eprintln(msg as *const u8)
