@@ -173,7 +173,7 @@ mod serde_like_json {
     #[derive(Debug, Clone)]
     pub enum Value {
         Null,
-        Bool(bool),
+        Bool,
         Number(f64),
         Str(String),
         Arr(Vec<Value>),
@@ -319,11 +319,11 @@ mod serde_like_json {
                 }
                 b't' if self.bytes[self.pos..].starts_with(b"true") => {
                     self.pos += 4;
-                    Some(Value::Bool(true))
+                    Some(Value::Bool)
                 }
                 b'f' if self.bytes[self.pos..].starts_with(b"false") => {
                     self.pos += 5;
-                    Some(Value::Bool(false))
+                    Some(Value::Bool)
                 }
                 b'n' if self.bytes[self.pos..].starts_with(b"null") => {
                     self.pos += 4;

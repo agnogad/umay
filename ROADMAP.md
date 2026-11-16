@@ -84,8 +84,8 @@ milestone and in §13 of the language specification.
       `umay explain` entry.
 - [x] `umay check` runs semantic analysis and reports schema-v1 JSON.
 
-Not yet: `pub` visibility enforcement, module resolution from an entry point,
-trait bound checking. These arrive with the module system and Phase 6.
+Not yet: trait bound checking. Module resolution from an entry point arrived
+with Phase 6, and `pub` visibility enforcement with Phase 8 (`E1018`).
 
 Exit criteria: 91 accept/reject tests cover every rule; no invalid program in
 the suite is accepted; every accepted program produces an HIR.
@@ -627,6 +627,12 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   for the other (`b::run()` called `a::run()`). Each module's items are now
   registered and emitted under their qualified name, so two modules may declare
   the same function and each is its own.
+- [x] `pub` visibility is enforced across module boundaries. `pub` used to be
+  parsed and thrown away, so a private `fn`, `struct`, `enum` or `const` in a
+  module was reachable from any other module by its qualified name. A qualified
+  reference to a non-`pub` item now reports `E1018`, while a module referring to
+  its own private item by its full name is still allowed. Existing module
+  fixtures that reached across a boundary were updated to say `pub`.
 - [x] The cache key covers a dependency's source, so editing one rebuilds the
   program that uses it, rather than keeping the previous assembly.
 - [x] `upm`: fetching from a registry. A dependency with no `path` is now
@@ -798,6 +804,32 @@ touch the frontend at all.
       has no Apple SDK and no MinGW-w64 runtime, so it assembles and links-fails.
       Running the test corpus on those two systems is the next step, and until
       it happens their status is "emits the right object", not "works".
+
+---
+
+## Production readiness (2026-11-16) · **done**
+
+The compiler now builds with zero warnings and the full suite passes.
+
+- [x] **Warnings.** Removed the remaining dead code and unused bindings across
+  `sema`, `isel`, `lsp`, `lint`, `lower` and `fmt`. `cargo build` and
+  `cargo test` compile without a single warning.
+- [x] **`&mut T` → `&T`.** A mutable reference reborrows as a shared one at
+  calls and in `if`/`let` positions without being moved, while a shared
+  reference still never coerces to a mutable one and a new exclusive borrow
+  still conflicts (`phase4_ownership`, `phase5_codegen`).
+- [x] **Computed-pointer assignment.** `*(p.offset(n)) = v` is lowered and
+  emitted, not just a write through a named pointer.
+- [x] **`pub` visibility.** Enforced across module boundaries as `E1018`, with
+  regressions for functions, structs, enums and constants and for the
+  same-module case.
+- [x] **Register allocation.** Non-address-taken scalar locals stay in virtual
+  registers; spill slots no longer collide with local frames, callee-saved
+  registers get their own frame slots, and redundant spill/reload pairs are
+  removed. `compute` 0.717 → 0.589 s, `fib` 0.772 → 0.663 s, `alloc` 0.077 →
+  0.058 s; see `docs/measurements.md`.
+- [x] **Docs.** This file, `docs/language-specification.md` and
+  `docs/measurements.md` record what changed and what the numbers are.
 
 ---
 

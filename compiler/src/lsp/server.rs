@@ -34,10 +34,6 @@ pub struct Document {
 }
 
 impl Document {
-    fn index(&self) -> LineIndex {
-        LineIndex::new(&self.text)
-    }
-
     /// The name to hand the compiler: the file's path, or a placeholder.
     fn source_name(&self) -> String {
         match &self.path {

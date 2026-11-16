@@ -62,11 +62,12 @@ impl<'a> Checker<'a> {
                         span: s.name_span,
                         def_id: def,
                         kind: DefKind::Struct,
-                        is_pub: true,
+                        is_pub: s.is_pub,
                     });
                     // Keyed by the name the item is reachable under, so a type
                     // inside a module is found as `module::Name`.
                     self.def_by_name.insert(self.scoped_name(&s.name), def);
+                    self.visibility.insert(self.scoped_name(&s.name), s.is_pub);
                 }
                 ast::Item::Enum(e) => {
                     let def = DefId(self.next_def_id());
@@ -83,9 +84,10 @@ impl<'a> Checker<'a> {
                         span: e.name_span,
                         def_id: def,
                         kind: DefKind::Enum,
-                        is_pub: true,
+                        is_pub: e.is_pub,
                     });
                     self.def_by_name.insert(self.scoped_name(&e.name), def);
+                    self.visibility.insert(self.scoped_name(&e.name), e.is_pub);
                 }
                 _ => {}
             }
@@ -122,7 +124,7 @@ impl<'a> Checker<'a> {
         // ---- functions (free functions) ----
         for item in items {
             if let ast::Item::Fn(f) = item {
-                self.register_fn_name(&f.name, f.name_span, f.params.len());
+                self.register_fn_name(&f.name, f.name_span, f.params.len(), f.is_pub);
             }
         }
 
@@ -142,6 +144,7 @@ impl<'a> Checker<'a> {
                     // Keyed the way the body pass will look it up, so a module's
                     // constant is found under `module::NAME`.
                     self.const_by_name.insert(self.scoped_name(&c.name), id);
+                    self.visibility.insert(self.scoped_name(&c.name), c.is_pub);
                     self.hir.consts.push(HirConst {
                         // A module's constant is emitted under its qualified name,
                         // for the same reason a function is: two modules may each
@@ -254,6 +257,36 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Rejects a cross-module reference to an item that was not declared `pub`.
+    ///
+    /// Only a qualified spelling crosses a module boundary. A name whose owner
+    /// is the current module is that module referring to its own item by its
+    /// full name, which is always allowed.
+    ///
+    /// ponytail: a bare name that resolves through the "only one module
+    /// declares it" fallback is not checked; that needs a reverse
+    /// `DefId -> owner` map, and no current caller relies on it for privacy.
+    pub(crate) fn check_path_visibility(&mut self, spelled: &str, span: Span, what: &str) {
+        let Some((owner, _)) = spelled.rsplit_once("::") else { return };
+        if self.module_prefix.as_deref() == Some(owner) {
+            return;
+        }
+        if self.visibility.get(spelled).copied() == Some(false) {
+            self.push(
+                Diagnostic::error("E1018", format!("`{spelled}` is private"))
+                    .at(span)
+                    .with_cause(format!(
+                        "a {what} declared without `pub` is visible only inside its own module `{owner}`"
+                    ))
+                    .with_explanation(format!(
+                        "Write `pub {what} {name}` in the module that declares it to make it part \
+                         of that module's public surface.",
+                        name = spelled.rsplit("::").next().unwrap_or(spelled)
+                    )),
+            );
+        }
+    }
+
     fn register_type_name(
         &mut self,
         name: &str,
@@ -270,7 +303,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn register_fn_name(&mut self, name: &str, span: Span, arity: usize) -> FnId {
+    fn register_fn_name(&mut self, name: &str, span: Span, arity: usize, is_pub: bool) -> FnId {
         let id = FnId(self.hir.fns.len() as u32);
         let entry = ItemEntry {
             res: crate::hir::Res::Fn(id),
@@ -279,6 +312,7 @@ impl<'a> Checker<'a> {
             arity,
         };
         let key = self.scoped_name(name);
+        self.visibility.insert(key.clone(), is_pub);
         if let Err(existing) = self.declare_scoped(name, entry) {
             self.duplicate_name(name, span, existing.span, existing.kind);
             return id;
@@ -307,7 +341,7 @@ impl<'a> Checker<'a> {
             self_by_ref: false,
             locals: Vec::new(),
             body: None,
-            is_pub: true,
+            is_pub,
             owner: None,
             link_name: None,
             declared_local_tys: Default::default(),
@@ -371,7 +405,7 @@ impl<'a> Checker<'a> {
                 self_by_ref: method.self_param.as_ref().map(|s| s.by_ref.is_some()).unwrap_or(false),
                 locals: Vec::new(),
                 body: None,
-                is_pub: true,
+                is_pub: method.is_pub,
                 owner: Some(self_ty_name.clone()),
                 link_name: None,
                 declared_local_tys: Default::default(),
@@ -669,6 +703,7 @@ impl<'a> Checker<'a> {
                     let args: Vec<TyId> =
                         seg.args.iter().map(|a| self.resolve_type(a, generics)).collect();
                     let spelled = path.as_string();
+                    self.check_path_visibility(&spelled, path.span, "type");
                     if let Some(def) = self.def_by_name.get(&spelled).copied() {
                         return self.cx.adt(def, args);
                     }

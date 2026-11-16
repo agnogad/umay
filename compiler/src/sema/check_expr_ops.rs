@@ -9,10 +9,6 @@ use crate::types::{TyId, TyKind};
 impl FnChecker<'_, '_> {
     // ---- unary -----------------------------------------------------------
 
-    pub fn check_unary(&mut self, op: ast::UnaryOp, operand: &ast::Expr, span: crate::source::Span) -> HirExpr {
-        self.check_unary_hinted(op, operand, span, None)
-    }
-
     /// `-n` takes its width from the context: a `-1` passed to an `i64`
     /// parameter is an `i64`, not an `i32` widened on the way out.
     pub fn check_unary_hinted(

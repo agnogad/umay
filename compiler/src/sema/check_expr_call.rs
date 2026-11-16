@@ -1019,6 +1019,7 @@ impl FnChecker<'_, '_> {
         // suggestion offered `print`, which is what a two-segment substitution
         // guess looks like when the real name is not in the table at all.
         let spelled = path.as_string();
+        self.cx.check_path_visibility(&spelled, path.span, "struct");
         let found = self
             .cx
             .def_by_name

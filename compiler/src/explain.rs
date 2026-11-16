@@ -354,6 +354,15 @@ pub static EXPLAIN: &[ExplainEntry] = &[
          the answer, and forgetting it is an error rather than a silent unsafe move.",
         Some("impl Send for Job {}\nlet t = thread_spawn::<Job, i64>(work, job)"),
     ),
+    e(
+        "E1018",
+        "item is private to its module",
+        "A name from another module was reached without `pub`. A module's items belong to that \
+         module, so a function, type, enum or constant it declares is reachable from outside only \
+         when it is written `pub`. The name still resolves, which is why the error is about \
+         visibility rather than an unknown name.",
+        Some("mod util;\nfn main() { util::helper() }   // helper must be `pub fn` in util.um"),
+    ),
     // ---- ownership and borrowing ------------------------------------------
     e(
         "E0201",

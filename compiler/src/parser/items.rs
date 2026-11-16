@@ -254,6 +254,7 @@ impl Parser {
             body,
             attrs: Vec::new(),
             is_extern: false,
+            is_pub: false, // free functions are set by `apply_attrs`, methods by the impl parser
             link_name: None,
             link_name_span: None,
             fn_span: name_span,
@@ -358,7 +359,7 @@ impl Parser {
             self.expect(TokenKind::RBrace, "E0132", "struct body");
         }
         let end = self.prev_span();
-        Some(StructDecl { name, name_span, generics, fields, attrs: Vec::new(), span: name_span.to(end) })
+        Some(StructDecl { name, name_span, generics, fields, attrs: Vec::new(), is_pub: false, span: name_span.to(end) })
     }
 
     fn parse_field(&mut self) -> Option<FieldDecl> {
@@ -392,7 +393,7 @@ impl Parser {
             self.expect(TokenKind::RBrace, "E0142", "enum body");
         }
         let end = self.prev_span();
-        Some(EnumDecl { name, name_span, generics, variants, attrs: Vec::new(), span: name_span.to(end) })
+        Some(EnumDecl { name, name_span, generics, variants, attrs: Vec::new(), is_pub: false, span: name_span.to(end) })
     }
 
     fn parse_enum_variant(&mut self) -> Option<EnumVariant> {
@@ -451,11 +452,14 @@ impl Parser {
                 }
                 // A method may carry a visibility and attributes, the same as a
                 // free function.
-                self.skip_method_decorations();
+                let is_pub = self.skip_method_decorations();
                 if self.at_keyword(Keyword::Fn) {
                     self.advance();
                     match self.parse_fn_body(true) {
-                        Some(f) => methods.push(f),
+                        Some(mut f) => {
+                            f.is_pub = is_pub;
+                            methods.push(f);
+                        }
                         None => break,
                     }
                 } else {
@@ -497,11 +501,14 @@ impl Parser {
                 // so `pub fn` inside an `impl` was a parse error -- in a module,
                 // where a method is normally written `pub`, that made the
                 // ordinary way to write an `impl` unusable.
-                self.skip_method_decorations();
+                let is_pub = self.skip_method_decorations();
                 if self.at_keyword(Keyword::Fn) {
                     self.advance();
                     match self.parse_fn_body(true) {
-                        Some(f) => methods.push(f),
+                        Some(mut f) => {
+                            f.is_pub = is_pub;
+                            methods.push(f);
+                        }
                         None => break,
                     }
                 } else {
@@ -515,13 +522,14 @@ impl Parser {
         Some(ImplBlock { generics, trait_path, self_ty, methods, span: start.to(end) })
     }
 
-    /// Consumes the attributes and visibility that may precede a method.
-    fn skip_method_decorations(&mut self) {
+    /// Consumes the attributes and visibility that may precede a method,
+    /// returning whether it was `pub`.
+    fn skip_method_decorations(&mut self) -> bool {
         // `parse_attribute` consumes a `#` before looking, so it is only called
         // when one is there -- otherwise every non-attribute token after a method
         // became "expected `[` after `#`".
         while self.at(&TokenKind::Hash) && self.parse_attribute().is_some() {}
-        self.eat_keyword(Keyword::Pub);
+        self.eat_keyword(Keyword::Pub)
     }
 
     fn parse_const(&mut self) -> Option<ConstDecl> {
@@ -534,7 +542,7 @@ impl Parser {
         let value = self.parse_expr();
         self.eat_semi();
         let end = self.prev_span();
-        Some(ConstDecl { name, name_span, ty, value, attrs: Vec::new(), span: name_span.to(end) })
+        Some(ConstDecl { name, name_span, ty, value, attrs: Vec::new(), is_pub: false, span: name_span.to(end) })
     }
 
     fn parse_use(&mut self) -> Option<UseDecl> {
@@ -836,10 +844,9 @@ impl Parser {
     }
 }
 
-/// Attaches attributes and visibility onto an item. For Phase 1 the presence
-/// of attributes/`pub` is validated but not semantically meaningful yet.
+/// Attaches attributes and visibility onto an item. Visibility is kept so that
+/// semantic analysis can refuse a cross-module reference to a private item.
 fn apply_attrs(item: &mut Item, attrs: Vec<Attribute>, pub_keyword: bool, p: &mut Parser) {
-    let _ = pub_keyword; // visibility semantics arrive with HIR (Phase 2)
     // Phase 1 recognises attribute syntax but implements no attributes yet.
     // Reporting W0010 keeps builds honest instead of silently dropping them.
     for attr in &attrs {
@@ -852,10 +859,22 @@ fn apply_attrs(item: &mut Item, attrs: Vec<Attribute>, pub_keyword: bool, p: &mu
         );
     }
     match item {
-        Item::Fn(f) => f.attrs = attrs,
-        Item::Struct(s) => s.attrs = attrs,
-        Item::Enum(e) => e.attrs = attrs,
-        Item::Const(c) => c.attrs = attrs,
+        Item::Fn(f) => {
+            f.attrs = attrs;
+            f.is_pub = pub_keyword;
+        }
+        Item::Struct(s) => {
+            s.attrs = attrs;
+            s.is_pub = pub_keyword;
+        }
+        Item::Enum(e) => {
+            e.attrs = attrs;
+            e.is_pub = pub_keyword;
+        }
+        Item::Const(c) => {
+            c.attrs = attrs;
+            c.is_pub = pub_keyword;
+        }
         _ => {}
     }
 }
