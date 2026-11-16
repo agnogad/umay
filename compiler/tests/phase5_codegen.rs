@@ -37,6 +37,11 @@ fn have_toolchain() -> bool {
 /// Compiles `src` and returns the program's exit code, or `None` when the
 /// toolchain is unavailable.
 fn run_program(name: &str, src: &str) -> Option<i32> {
+    run_program_opt(name, src, "")
+}
+
+/// Like [`run_program`], with an extra build flag such as `-O2`.
+fn run_program_opt(name: &str, src: &str, opt: &str) -> Option<i32> {
     if !have_toolchain() {
         eprintln!("skipping {name}: `as` or `cc` is not available");
         return None;
@@ -47,12 +52,12 @@ fn run_program(name: &str, src: &str) -> Option<i32> {
     let source = dir.join("main.um");
     std::fs::write(&source, src).expect("write source");
 
-    let output = Command::new(compiler())
-        .current_dir(&dir)
-        .arg("build")
-        .arg(&source)
-        .output()
-        .expect("run umay");
+    let mut command = Command::new(compiler());
+    command.current_dir(&dir).arg("build");
+    if !opt.is_empty() {
+        command.arg(opt);
+    }
+    let output = command.arg(&source).output().expect("run umay");
     assert!(
         output.status.success(),
         "compilation failed for {name}:\n{}\n{}",
@@ -358,6 +363,36 @@ fn a_function_value_is_called_through_its_pointer() {
     let program = dir.join("dist").join("main");
     let ran = Command::new(&program).output().expect("run program");
     assert_eq!(ran.status.code(), Some(6), "`apply(twice, 3)` must return 6");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn constant_folding_keeps_the_operand_width_of_bitwise_not() {
+    // A differential seed found `(!255u8) as i64` printing -256 at -O2: the
+    // folder applied `!` in an i128 scratch integer and forgot the u8 width.
+    if !have_toolchain() {
+        eprintln!("skipping constant_folding_keeps_the_operand_width_of_bitwise_not: no toolchain");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("umay_e2e_fold_not_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let source = dir.join("main.um");
+    std::fs::write(
+        &source,
+        "fn main() -> i32 {\n    println_i64((!255u8) as i64)\n    return 0\n}\n",
+    )
+    .expect("write source");
+    let build = Command::new(compiler())
+        .current_dir(&dir)
+        .args(["build", "-O2"])
+        .arg(&source)
+        .output()
+        .expect("run umay");
+    assert!(build.status.success(), "build failed:\n{}", String::from_utf8_lossy(&build.stderr));
+    let ran = Command::new(dir.join("dist").join("main")).output().expect("run program");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert_eq!(out.trim(), "0", "`!255u8` folded at the wrong width: {out:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

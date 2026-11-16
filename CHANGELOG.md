@@ -144,9 +144,16 @@ implementation-only changes.
   and the build failed with `invalid instruction suffix`. The selector now
   multiplies at 16 bits and keeps the low byte, which is the same result modulo
   2^8 for signed and unsigned operands. A differential fuzzing harness found it;
-  that harness is kept as a manual tool (`UMAY_DIFF_COUNT=N cargo test --test
-  backend_diff`), not a CI gate, because its generator still emits some invalid
-  programs and one input on which `umay check` does not terminate.
+  it stays a manual tool (`UMAY_DIFF_COUNT=N cargo test --test backend_diff`)
+  because its generator still emits programs that desynchronise the parser.
+- **`-O2` folded `!255u8` to -256.** Unary constant folding ran in an i128
+  scratch integer and never truncated back to the operand's width, so a later
+  cast widened the wrong value. Bitwise not and negation now truncate to the
+  value's own type.
+- **The parser could spin forever on a malformed `impl` body.** Error recovery
+  stops at a top-level keyword so the program loop can parse the next item; a
+  body loop calling it on a stray `impl` saw the same token again forever. Body
+  recovery now guarantees one token of progress.
 - **The cache grew without bound.** Every source edit creates new content keys,
   so the cache had reached 1.3 GiB / 19,000 entries on an active machine. New
   key directories now trigger eviction of the oldest entries down to 512 MiB;

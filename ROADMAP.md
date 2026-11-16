@@ -849,13 +849,18 @@ The compiler now builds with zero warnings and the full suite passes.
   was run end to end and its checksum verified.
 - [x] **Cache eviction.** New key directories trigger eviction down to 512 MiB,
   configurable with `UMAY_CACHE_MAX_BYTES` and reported by `umay doctor`.
-- [x] **8-bit `imul` fixed.** The differential harness found that byte-width
-  multiplication emitted an instruction the assembler rejects. The harness
-  (`compiler/tests/backend_diff.rs`) is kept as a manual tool: it is opt-in via
-  `UMAY_DIFF_COUNT`, because its generator still emits some ill-typed programs.
-- [ ] **Compiler hangs on one fuzz input.** Seed 3 from the differential run
-  does not terminate in `umay check` (reproduction saved in
-  `compiler/tests/fixtures/fuzz_hang_check.um`). Needs isolation and a fix.
+- [x] **Differential fuzzing found and fixed two more compiler bugs.** Byte-width
+  multiplication emitted an invalid two-operand `imulb`; -O2 constant folding of
+  `!255u8` produced -256 because `!` was computed at i128 width. Both have
+  regressions in `phase5_codegen`. The harness also found an infinite loop in
+  parser recovery: `recover_item` stops at a top-level keyword to let the
+  program loop parse the next item, but an impl-body loop calling it on a stray
+  `impl` never advanced. Body recovery now forces progress, covered by
+  `recovery_inside_an_impl_body_always_makes_progress`.
+- [ ] **The fuzz generator still produces invalid programs on one seed.** With
+  the two compiler bugs fixed, six seeds leave a single case where generated
+  source desynchronises the parser. The harness stays opt-in via
+  `UMAY_DIFF_COUNT`; fixing the generator remains manual work.
 
 ---
 

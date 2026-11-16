@@ -51,3 +51,23 @@ fn sema_never_panics_on_mutated_programs() {
         let _ = umayc::sema::analyze(&parsed.program, &map);
     }
 }
+
+#[test]
+fn recovery_inside_an_impl_body_always_makes_progress() {
+    // `recover_item` stops at a top-level keyword so the program loop can parse
+    // the next item. Called from inside an impl body on a stray `impl`, it used
+    // to return without consuming, and the body loop span forever.
+    let src = "impl A { fn m() -> bool {\n    while (1i32 < 2i32) {}\n    return (1u8) > (2u8)\n} }\nimpl B {\n";
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut map = umayc::source::SourceMap::new();
+        let id = map.add("<recover>", src);
+        let (tokens, errs) = umayc::lexer::tokenize(src, id);
+        let parsed = umayc::parser::parse(tokens, errs, id);
+        let _ = tx.send(parsed.diagnostics.len());
+    });
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+        "the parser did not terminate on a malformed impl body"
+    );
+}

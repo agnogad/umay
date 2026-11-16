@@ -266,6 +266,20 @@ impl Parser {
         self.eat(&TokenKind::Semi)
     }
 
+    /// Recovery inside a body (trait, impl, inline module).
+    ///
+    /// `recover_item` deliberately stops *at* a top-level keyword so the
+    /// program loop can parse the next item. A body loop that calls it on a
+    /// stray keyword would then see the same token again and spin forever.
+    /// Force one token of progress in that case.
+    fn recover_item_in_body(&mut self) {
+        let before = self.pos;
+        self.recover_item();
+        if self.pos == before && !self.at_eof() {
+            self.advance();
+        }
+    }
+
     /// Skips tokens until a likely item/statement boundary (error recovery).
     fn recover_item(&mut self) {
         let mut depth = 0i32;

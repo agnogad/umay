@@ -165,10 +165,11 @@ fn backend_differential_ci() {
     let work_root = std::env::temp_dir().join(format!("umay_diff_ci_{pid}"));
     let fail_root = std::env::temp_dir().join(format!("umay_diff_ci_fail_{pid}"));
     let mut failures = Vec::new();
+    let shrink = std::env::var("UMAY_DIFF_SHRINK").is_ok();
     for seed in 1..=count {
         // Shrinking is for a human investigating a saved case; in CI it adds
         // dozens of builds to a failure and hides which seed broke first.
-        if let Err(msg) = run_one_seed(seed, &work_root, &fail_root, false) {
+        if let Err(msg) = run_one_seed(seed, &work_root, &fail_root, shrink) {
             failures.push(msg);
         }
     }

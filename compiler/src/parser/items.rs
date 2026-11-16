@@ -464,7 +464,7 @@ impl Parser {
                     }
                 } else {
                     self.error("E0152", "expected `fn` in trait body", self.span());
-                    self.recover_item();
+                    self.recover_item_in_body();
                 }
             }
             self.expect(TokenKind::RBrace, "E0153", "trait body");
@@ -513,7 +513,7 @@ impl Parser {
                     }
                 } else {
                     self.error("E0162", "expected `fn` in impl body", self.span());
-                    self.recover_item();
+                    self.recover_item_in_body();
                 }
             }
             self.expect(TokenKind::RBrace, "E0163", "impl body");
@@ -597,7 +597,7 @@ impl Parser {
                 match self.parse_item() {
                     Some(i) => list.push(i),
                     None => {
-                        self.recover_item();
+                        self.recover_item_in_body();
                     }
                 }
             }

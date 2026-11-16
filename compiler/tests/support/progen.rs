@@ -715,7 +715,13 @@ impl<'a> GenCx<'a> {
         let mut used = self.borrowed.clone();
         for p in params {
             if p.is_mut_ref {
-                let found = vars.iter().find(|v| v.is_mut && v.ty == p.ty && !used.contains(&v.name));
+                // A `&mut` parameter is already a reference: emitting `&mut v`
+                // for it would take a reference to a reference. The compiler
+                // reborrows `&mut T` directly, so those variables are not
+                // candidates for a fresh `&mut` borrow here.
+                let found = vars.iter().find(|v| {
+                    v.is_mut && !v.is_mut_ref && v.ty == p.ty && !used.contains(&v.name)
+                });
                 if let Some(v) = found {
                     used.insert(v.name.clone());
                 } else {
@@ -731,7 +737,13 @@ impl<'a> GenCx<'a> {
         used.insert(recv.to_string());
         for p in params {
             if p.is_mut_ref {
-                let found = vars.iter().find(|v| v.is_mut && v.ty == p.ty && !used.contains(&v.name));
+                // A `&mut` parameter is already a reference: emitting `&mut v`
+                // for it would take a reference to a reference. The compiler
+                // reborrows `&mut T` directly, so those variables are not
+                // candidates for a fresh `&mut` borrow here.
+                let found = vars.iter().find(|v| {
+                    v.is_mut && !v.is_mut_ref && v.ty == p.ty && !used.contains(&v.name)
+                });
                 if let Some(v) = found {
                     used.insert(v.name.clone());
                 } else {
@@ -745,7 +757,7 @@ impl<'a> GenCx<'a> {
     fn pick_mut_var(&mut self, ty: Ty, vars: &[ScopeVar]) -> Option<String> {
         let mut cands: Vec<String> = vars
             .iter()
-            .filter(|v| v.is_mut && v.ty == ty && !self.borrowed.contains(&v.name))
+            .filter(|v| v.is_mut && !v.is_mut_ref && v.ty == ty && !self.borrowed.contains(&v.name))
             .map(|v| v.name.clone())
             .collect();
         if cands.is_empty() {
@@ -799,8 +811,14 @@ impl<'a> GenCx<'a> {
                 let cond = self.gen_expr(PrimTy::Bool, vars, 2, true);
                 let then_len = 1 + self.rng.gen_range(3);
                 let else_len = 1 + self.rng.gen_range(3);
-                let then_body = self.gen_block(vars, then_len, nest_depth - 1, in_main, ret_ty);
-                let else_body = self.gen_block(vars, else_len, nest_depth - 1, in_main, ret_ty);
+                // UMAY types `if`/`else` as an expression, so both arms must
+                // produce the same value. No early returns inside an arm, and a
+                // trailing print makes each arm's type `()`.
+                let mut then_body = self.gen_block(vars, then_len, nest_depth - 1, in_main, None);
+                let mut else_body = self.gen_block(vars, else_len, nest_depth - 1, in_main, None);
+                let unit = || Stmt::Print(Expr::Lit(Val::I64(0)));
+                then_body.push(unit());
+                else_body.push(unit());
                 stmts.push(Stmt::If { cond, then_body, else_body });
             } else if kind < 84 && nest_depth > 0 {
                 // Bounded while loop
