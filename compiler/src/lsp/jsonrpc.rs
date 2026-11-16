@@ -391,14 +391,12 @@ pub fn frame(body: &str) -> Vec<u8> {
 /// the blank line, then exactly `Content-Length` bytes, is the whole protocol.
 pub fn read_frame(input: &mut impl std::io::BufRead) -> std::io::Result<Option<String>> {
     let mut length: Option<usize> = None;
-    let mut saw_header = false;
     loop {
         let mut line = String::new();
         let read = input.read_line(&mut line)?;
         if read == 0 {
             return Ok(None);
         }
-        saw_header = true;
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
             // The blank line ends the headers.
@@ -408,9 +406,6 @@ pub fn read_frame(input: &mut impl std::io::BufRead) -> std::io::Result<Option<S
             length = rest.trim().parse().ok();
         }
         // Every other header (Content-Type) is allowed and ignored.
-    }
-    if !saw_header {
-        return Ok(None);
     }
     let Some(length) = length else {
         return Err(std::io::Error::new(

@@ -383,9 +383,10 @@ resolved in favour of the `impl`.
 Known gaps this step depends on, none of which are covered yet:
 
 - Field-wise drop order is not checked (`E0208`/`E0209` are not enforced).
-- An assignment through a computed pointer, `*(p.offset(n)) = v`, is rejected;
-  only a write through a named pointer works, which is why `write_byte` exists.
-- `&mut T` does not coerce to `&T` (`E1001`).
+- An assignment through a computed pointer, `*(p.offset(n)) = v`, now works
+  and is covered by `computed_pointer_deref_assignment_works`.
+- `&mut T` now coerces to `&T` via reborrow without moving the mutable
+  reference, covered by `phase4_ownership` and `phase5_codegen`.
 - A literal local used at a wider type (`let mut i = 0` used as a `usize`) is
   now settled to that type and stored at its width.
 
@@ -438,9 +439,8 @@ Three more defects surfaced on the way:
 
 Known gaps this step depends on, now listed rather than assumed:
 
-- `push` takes and returns the vector by value, so a caller must write
-  `v = v.push(x)`. An `&mut self` method that reallocates would be the better
-  shape, but `&mut T` does not coerce to `&T` yet.
+- `push` still takes and returns the vector by value (`v = v.push(x)`) for
+  compatibility, though `&mut T` → `&T` coercion is now supported.
 
 Fixing the aggregate-ABI work also turned up two printed-MIR round-trip holes and
 a stack-argument bug, all now fixed and tested:

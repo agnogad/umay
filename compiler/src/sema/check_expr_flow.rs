@@ -73,6 +73,8 @@ impl FnChecker<'_, '_> {
                     } else {
                         then_ty
                     }
+                } else if self.cx.types_compatible(else_ty, then_ty) {
+                    else_ty
                 } else {
                     let a = self.cx.ty_name(then_ty);
                     let b = self.cx.ty_name(else_ty);
@@ -186,6 +188,8 @@ impl FnChecker<'_, '_> {
                         body_ty
                     } else if self.cx.types_compatible(prev, body_ty) {
                         prev
+                    } else if self.cx.types_compatible(body_ty, prev) {
+                        body_ty
                     } else {
                         let a = self.cx.ty_name(prev);
                         let b = self.cx.ty_name(body_ty);
@@ -354,12 +358,6 @@ impl FnChecker<'_, '_> {
         // The return type is a hint: it is what tells `Option::None` which `T` it
         // is, since the variant itself carries no value to name one.
         let v = value.map(|e| Box::new(self.check_expr_hinted(e, Some(ret))));
-        // A return type settles a literal: `let x = 8` followed by `return x` from
-        // a function returning `i64` gives `x` the width it is returned at, rather
-        // than leaving it `i32` and letting the call read past it.
-        if let Some(expr) = &v {
-
-        }
         match &v {
             Some(expr) => {
                 if !self.cx.cx.is_error(ret) && !self.cx.cx.is_error(expr.ty) && !self.cx.types_compatible(ret, expr.ty) {

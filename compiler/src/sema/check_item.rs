@@ -852,6 +852,7 @@ impl<'a> Checker<'a> {
             }
             (TyKind::Slice(e1), TyKind::Slice(e2)) => self.types_compatible(e1, e2),
             (TyKind::Ref(e1), TyKind::Ref(e2)) => self.types_compatible(e1, e2),
+            (TyKind::Ref(e1), TyKind::RefMut(e2)) => self.types_compatible(e1, e2),
             // A `*mut T` may be passed where a `*const T` is expected. Both are
             // one address with the same layout, and the callee only gains the
             // promise not to write, so no conversion is needed at the call; this

@@ -519,3 +519,34 @@ fn two_pointer_reads_in_one_expression_keep_their_bases() {
     }";
     expect_exit("two_pointer_bases", src, 42);
 }
+
+#[test]
+fn mut_ref_coerces_to_shared_ref_end_to_end() {
+    let src = "struct Counter { val: i64 }\n\
+        fn read_val(c: &Counter) -> i64 { c.val }\n\
+        fn add_val(c: &mut Counter, d: i64) { c.val = c.val + d }\n\
+        fn main() -> i32 {\n\
+            let mut c = Counter { val: 10 }\n\
+            let r = &mut c\n\
+            let a = read_val(r)\n\
+            add_val(r, 22)\n\
+            let b = read_val(r)\n\
+            return (a + b) as i32\n\
+        }";
+    expect_exit("mut_ref_coerces_shared", src, 42);
+}
+
+#[test]
+fn computed_pointer_deref_assignment_works() {
+    let src = "fn main() -> i32 {\n\
+        let p = alloc(16) as *mut i64\n\
+        unsafe {\n\
+            *(p.offset(0)) = 19\n\
+            *(p.offset(1)) = 23\n\
+        }\n\
+        let sum = unsafe { *(p.offset(0)) + *(p.offset(1)) }\n\
+        dealloc(p as *mut u8)\n\
+        return sum as i32\n\
+    }";
+    expect_exit("computed_ptr_assign", src, 42);
+}

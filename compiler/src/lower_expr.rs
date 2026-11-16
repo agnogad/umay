@@ -64,7 +64,7 @@ impl Lowering<'_> {
                 // value to the first binding and only reserving storage for the
                 // rest left them uninitialised, which the checker then reported
                 // the moment one was read.
-                let mut whole: Option<Place> = None;
+                let whole: Option<Place> = None;
                 let mut binding_index: usize = 0;
                 let mut to_bind: Vec<(LocalId, Operand)> = Vec::new();
                 collect_bindings(pattern, &bindings, &mut binding_index, &mut |b, path| {
@@ -91,13 +91,6 @@ impl Lowering<'_> {
                         to_bind.push((b, src));
                     }
                 });
-                if let Some(v) = &value {
-                    if matches!(pattern.kind, HirPatternKind::Binding { .. } | HirPatternKind::Wildcard) {
-                        if let (Operand::Copy(p) | Operand::Move(p), Some(_)) = (v.clone(), to_bind.first()) {
-                            whole = Some(p);
-                        }
-                    }
-                }
                 for b in bindings.iter() {
                     let mir_local = self.map_local(*b);
                     self.emit(Statement::StorageLive(mir_local));

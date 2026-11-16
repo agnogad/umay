@@ -521,8 +521,6 @@ pub fn describe_rules() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     fn findings(src: &str) -> Vec<String> {
         let (diags, _map) = crate::lint_source("t.um", src);
         let mut codes: Vec<String> = diags

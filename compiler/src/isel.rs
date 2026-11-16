@@ -55,6 +55,10 @@ pub struct Isel<'a, 't> {
     /// selection are identical for both, which is why this is a field and not a
     /// second selector.
     pub(crate) abi: crate::target::Abi,
+    /// Non-address-taken scalar locals promoted to virtual registers so they
+    /// stay in registers across statements and loops instead of round-tripping
+    /// through their stack slots.
+    pub(crate) local_regs: std::collections::HashMap<LocalId, Reg>,
 }
 
 impl<'a, 't> Isel<'a, 't> {
@@ -100,7 +104,13 @@ pub fn select<'t>(
         fn_symbols,
         reserved: Vec::new(),
         abi,
+        local_regs: std::collections::HashMap::new(),
     };
+    let promotable = promotable_locals(body, isel.layouts);
+    for local_id in promotable {
+        let reg = isel.vreg();
+        isel.local_regs.insert(local_id, reg);
+    }
     for (index, block) in body.blocks.iter().enumerate() {
         // Unreachable blocks were emptied by optimisation. Emitting them would
         // make the assembler complain about duplicate or dead labels, so they
@@ -113,6 +123,26 @@ pub fn select<'t>(
             label: isel.block_labels[index],
             insts: vec![Inst::Label(isel.block_labels[index])],
         });
+        if index == 0 {
+            // Load promoted parameter locals once from their prologue slots.
+            for arg_idx in 0..body.arg_count {
+                let local_id = LocalId(arg_idx);
+                if let Some(&reg) = isel.local_regs.get(&local_id) {
+                    let ty = isel.frame.slot(local_id).ty;
+                    let width = isel.width(ty)?;
+                    let mem = isel.frame.place_mem(local_id);
+                    let kind = match width {
+                        RegWidth::W8 | RegWidth::W16 => MoveKind::ZeroExtend { from: width, to: RegWidth::W32 },
+                        _ => MoveKind::Move(width),
+                    };
+                    isel.emit(Inst::Load {
+                        kind,
+                        src: mem,
+                        dst: MOperand::Reg(reg),
+                    });
+                }
+            }
+        }
         for statement in &block.statements {
             isel.statement(statement)?;
         }
@@ -348,8 +378,21 @@ impl<'a, 't> Isel<'a, 't> {
         let slot = self.frame.slot(place.local);
         let mut mem = Mem::stack(slot.offset);
         let mut current_ty = slot.ty;
+        let mut proj_start = 0;
 
-        for projection in &place.projection {
+        if let Some(&reg) = self.local_regs.get(&place.local) {
+            if matches!(place.projection.first(), Some(Projection::Deref)) {
+                mem = Mem::base(reg);
+                current_ty = match self.types().kind_owned(current_ty) {
+                    TyKind::Ref(inner) | TyKind::RefMut(inner) => inner,
+                    TyKind::RawPtr(inner) | TyKind::RawPtrMut(inner) => inner,
+                    other => return Err(format!("deref of non-pointer {other:?}")),
+                };
+                proj_start = 1;
+            }
+        }
+
+        for projection in &place.projection[proj_start..] {
             match projection {
                 Projection::Field(index) => {
                     let offset = self.field_offset(current_ty, *index)?;
@@ -435,7 +478,7 @@ impl<'a, 't> Isel<'a, 't> {
         if !matches!(last, Projection::Deref) {
             return None;
         }
-        let mut probe = Place { local: place.local, projection: place.projection[..place.projection.len() - 1].to_vec() };
+        let probe = Place { local: place.local, projection: place.projection[..place.projection.len() - 1].to_vec() };
         let ty = self.place_ty(&probe);
         if matches!(self.types().kind_owned(ty), TyKind::RawPtr(inner) | TyKind::Ref(inner) | TyKind::RefMut(inner) if matches!(self.types().kind_owned(inner), TyKind::FnPtr { .. })) {
             return Some(probe);
@@ -465,8 +508,18 @@ impl<'a, 't> Isel<'a, 't> {
                 // holds the address itself; loading what it points at would fetch
                 // the first instruction byte and call that as an address.
                 if let Some(inner) = self.fn_ptr_place(place) {
+                    if inner.projection.is_empty() {
+                        if let Some(&reg) = self.local_regs.get(&inner.local) {
+                            return Ok(reg);
+                        }
+                    }
                     let mem = self.place_addr(&inner)?;
                     return self.load_place_mem(&mem, ty);
+                }
+                if place.projection.is_empty() {
+                    if let Some(&reg) = self.local_regs.get(&place.local) {
+                        return Ok(reg);
+                    }
                 }
                 let mem = self.place_addr(place)?;
                 self.load_place_mem(&mem, ty)
@@ -527,6 +580,11 @@ impl<'a, 't> Isel<'a, 't> {
                 Ok(MOperand::Imm(value))
             }
             Operand::Copy(place) | Operand::Move(place) => {
+                if place.projection.is_empty() {
+                    if let Some(&reg) = self.local_regs.get(&place.local) {
+                        return Ok(MOperand::Reg(reg));
+                    }
+                }
                 let mem = self.place_addr(place)?;
                 Ok(MOperand::Mem(mem))
             }
@@ -601,8 +659,33 @@ impl<'a, 't> Isel<'a, 't> {
         out: &mut Vec<Inst>,
     ) -> Result<(), String> {
         let ty = self.place_ty(place);
-        let mem = self.place_addr(place)?;
         let width = self.width(ty)?;
+        if place.projection.is_empty() {
+            if let Some(&reg) = self.local_regs.get(&place.local) {
+                match (width, &src) {
+                    (RegWidth::W8 | RegWidth::W16, MOperand::Imm(v)) => {
+                        let mask = if width == RegWidth::W8 { 0xff } else { 0xffff };
+                        out.push(Inst::Move {
+                            kind: MoveKind::Move(RegWidth::W32),
+                            src: MOperand::Imm(*v & mask),
+                            dst: MOperand::Reg(reg),
+                        });
+                    }
+                    (RegWidth::W8 | RegWidth::W16, _) => {
+                        out.push(Inst::Move {
+                            kind: MoveKind::ZeroExtend { from: width, to: RegWidth::W32 },
+                            src,
+                            dst: MOperand::Reg(reg),
+                        });
+                    }
+                    _ => {
+                        out.push(Inst::Move { kind: MoveKind::Move(width), src, dst: MOperand::Reg(reg) });
+                    }
+                }
+                return Ok(());
+            }
+        }
+        let mem = self.place_addr(place)?;
         out.push(Inst::Store { kind: MoveKind::Move(width), src, dst: mem });
         Ok(())
     }
@@ -610,8 +693,33 @@ impl<'a, 't> Isel<'a, 't> {
     /// Stores `src` to a place.
     pub(crate) fn store_place(&mut self, place: &Place, src: MOperand) -> Result<(), String> {
         let ty = self.place_ty(place);
-        let mem = self.place_addr(place)?;
         let width = self.width(ty)?;
+        if place.projection.is_empty() {
+            if let Some(&reg) = self.local_regs.get(&place.local) {
+                match (width, &src) {
+                    (RegWidth::W8 | RegWidth::W16, MOperand::Imm(v)) => {
+                        let mask = if width == RegWidth::W8 { 0xff } else { 0xffff };
+                        self.emit(Inst::Move {
+                            kind: MoveKind::Move(RegWidth::W32),
+                            src: MOperand::Imm(*v & mask),
+                            dst: MOperand::Reg(reg),
+                        });
+                    }
+                    (RegWidth::W8 | RegWidth::W16, _) => {
+                        self.emit(Inst::Move {
+                            kind: MoveKind::ZeroExtend { from: width, to: RegWidth::W32 },
+                            src,
+                            dst: MOperand::Reg(reg),
+                        });
+                    }
+                    _ => {
+                        self.emit(Inst::Move { kind: MoveKind::Move(width), src, dst: MOperand::Reg(reg) });
+                    }
+                }
+                return Ok(());
+            }
+        }
+        let mem = self.place_addr(place)?;
         self.emit(Inst::Store { kind: MoveKind::Move(width), src, dst: mem });
         Ok(())
     }
@@ -638,4 +746,106 @@ pub(crate) fn constant_value(c: &Constant) -> Result<(i64, TyId), String> {
         Constant::Unit => (0, TyId(0)),
         other => return Err(format!("constant {other:?} needs a symbol, handled elsewhere")),
     })
+}
+
+/// Identifies scalar locals that never have their address taken and can live in
+/// virtual registers instead of round-tripping through stack slots.
+fn promotable_locals(body: &Body, layouts: &mut Layouts<'_>) -> Vec<LocalId> {
+    use std::collections::HashSet;
+
+    let mut disqualified: HashSet<LocalId> = HashSet::new();
+    let mut check_place = |p: &Place, disqualified: &mut HashSet<LocalId>| {
+        if !p.projection.is_empty() {
+            disqualified.insert(p.local);
+        }
+        for proj in &p.projection {
+            if let Projection::Index(op) = proj {
+                if let Operand::Copy(ip) | Operand::Move(ip) = op {
+                    if !ip.projection.is_empty() {
+                        disqualified.insert(ip.local);
+                    }
+                }
+            }
+        }
+    };
+    let check_op = |op: &Operand, disqualified: &mut HashSet<LocalId>, check_place: &mut dyn FnMut(&Place, &mut HashSet<LocalId>)| {
+        if let Operand::Copy(p) | Operand::Move(p) = op {
+            check_place(p, disqualified);
+        }
+    };
+
+    for (index, block) in body.blocks.iter().enumerate() {
+        if !body.is_reachable(BlockId(index as u32)) {
+            continue;
+        }
+        for stmt in &block.statements {
+            if let Statement::Assign { place, value, .. } = stmt {
+                check_place(place, &mut disqualified);
+                match value {
+                    Rvalue::Use(op) | Rvalue::Unary { operand: op, .. } | Rvalue::Cast { operand: op, .. } | Rvalue::PtrToInt(op) => {
+                        check_op(op, &mut disqualified, &mut check_place);
+                    }
+                    Rvalue::Binary { lhs, rhs, .. } => {
+                        check_op(lhs, &mut disqualified, &mut check_place);
+                        check_op(rhs, &mut disqualified, &mut check_place);
+                    }
+                    Rvalue::PtrOffset { ptr, count } => {
+                        check_op(ptr, &mut disqualified, &mut check_place);
+                        check_op(count, &mut disqualified, &mut check_place);
+                    }
+                    Rvalue::Aggregate { operands, .. } => {
+                        for op in operands {
+                            check_op(op, &mut disqualified, &mut check_place);
+                        }
+                    }
+                    Rvalue::Repeat { operand, .. } => {
+                        check_op(operand, &mut disqualified, &mut check_place);
+                    }
+                    Rvalue::Ref { place: p, .. }
+                    | Rvalue::Reborrow { place: p, .. }
+                    | Rvalue::Len(p)
+                    | Rvalue::Discriminant(p) => {
+                        disqualified.insert(p.local);
+                    }
+                }
+            }
+        }
+        match &block.terminator {
+            Terminator::Call { callee, args, destination, .. } => {
+                check_op(callee, &mut disqualified, &mut check_place);
+                for a in args {
+                    check_op(a, &mut disqualified, &mut check_place);
+                }
+                if let Some(dest) = destination {
+                    check_place(dest, &mut disqualified);
+                }
+            }
+            Terminator::SwitchInt { discr, .. } => {
+                check_op(discr, &mut disqualified, &mut check_place);
+            }
+            Terminator::Drop { place, .. } => {
+                disqualified.insert(place.local);
+            }
+            Terminator::Goto { .. } | Terminator::Return | Terminator::Unreachable => {}
+        }
+    }
+
+    let mut out = Vec::new();
+    for (i, local) in body.locals.iter().enumerate() {
+        let id = LocalId(i as u32);
+        if disqualified.contains(&id) {
+            continue;
+        }
+        if layouts.is_aggregate(local.ty) {
+            continue;
+        }
+        if matches!(layouts.types_ref().kind_owned(local.ty), TyKind::F32 | TyKind::F64) {
+            continue;
+        }
+        let size = layouts.layout(local.ty).map(|l| l.size).unwrap_or(0);
+        if matches!(size, 1 | 2 | 4 | 8) {
+            out.push(id);
+        }
+    }
+    out
 }

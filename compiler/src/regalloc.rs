@@ -89,11 +89,25 @@ pub fn allocate(function: &mut MachineFunction, abi: crate::target::Abi) -> Allo
     // Virtual registers used as a base or index, which cannot be spilled.
     let mut address_regs: BTreeSet<u32> = BTreeSet::new();
 
+    let mut block_start: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut back_edges: Vec<(u32, usize)> = Vec::new();
+
     for block in &function.blocks {
+        block_start.insert(block.label.0, point + 1);
         for inst in &block.insts {
             point += 1;
             if matches!(inst, Inst::Call { .. }) {
                 call_points.push(point);
+            }
+            match inst {
+                Inst::Jmp(target) | Inst::Jcc { target, .. } => {
+                    if let Some(&start_pt) = block_start.get(&target.0) {
+                        if start_pt <= point {
+                            back_edges.push((target.0, point));
+                        }
+                    }
+                }
+                _ => {}
             }
             for reg in inst.address_registers() {
                 if let Reg::Virtual(v) = reg {
@@ -113,6 +127,17 @@ pub fn allocate(function: &mut MachineFunction, abi: crate::target::Abi) -> Allo
     let mut intervals: Vec<Interval> = Vec::new();
     for v in 0..=max_vreg {
         let (Some(&start), Some(&end)) = (first.get(&v), last.get(&v)) else { continue };
+        let mut end = end;
+        // Extend intervals that enter a loop (or are live across its header)
+        // to the end of the loop's back-edge, so a value live after the loop
+        // or across iterations is not overwritten inside the loop body.
+        for &(target_label, loop_end) in &back_edges {
+            if let Some(&loop_start) = block_start.get(&target_label) {
+                if start < loop_start && end >= loop_start && end < loop_end {
+                    end = loop_end;
+                }
+            }
+        }
         let mut excluded = BTreeSet::new();
         // A live range that spans a call loses every caller-saved register.
         if call_points.iter().any(|&c| start < c && c < end) {
@@ -171,7 +196,7 @@ pub fn allocate(function: &mut MachineFunction, abi: crate::target::Abi) -> Allo
             .filter(|(_, (_, v, reg))| {
                 !interval.excluded.contains(reg)
                     && *v != interval.vreg
-                    && (!address_regs.contains(v) || interval.address)
+                    && !address_regs.contains(v)
             })
             .max_by_key(|(_, (end, _, _))| *end);
         match evictable {
@@ -194,11 +219,12 @@ pub fn allocate(function: &mut MachineFunction, abi: crate::target::Abi) -> Allo
         }
     }
 
-    // Spill slots, one eight-byte slot each.
+    // Spill slots, one eight-byte slot each, placed past the function's local
+    // frame slots so they never collide with `local_slots`.
     let mut spill_bytes = 0u64;
     for vreg in &spilled {
         spill_bytes += 8;
-        locations.insert(*vreg, Location::Stack(-(spill_bytes as i64)));
+        locations.insert(*vreg, Location::Stack(-((function.stack_size + spill_bytes) as i64)));
     }
 
     let allocation = Allocation {
@@ -435,18 +461,16 @@ fn coalesce_copies(function: &mut MachineFunction) -> usize {
                 removed += 1;
                 continue;
             }
-            if let Inst::Move { kind, src: MOperand::Reg(s), dst: MOperand::Reg(d) } = &inst {
-                if let Some(Inst::Move { src: MOperand::Reg(prev_src), dst: MOperand::Reg(prev_dst), .. }) = out.last() {
+            if let Inst::Move { kind: MoveKind::Move(w2), src: MOperand::Reg(s), dst: MOperand::Reg(d) } = &inst {
+                if let Some(Inst::Move { kind: MoveKind::Move(w1), src: MOperand::Reg(prev_src), dst: MOperand::Reg(prev_dst) }) = out.last() {
                     // `%prev_dst <- %prev_src`, then `%d <- %prev_dst`, with
                     // `%d == %prev_src`: the second move puts back the value the
-                    // first one copied from.
-                    if prev_dst == s && prev_src == d {
+                    // first one copied from (only when neither is a widening/narrowing).
+                    if w1 == w2 && prev_dst == s && prev_src == d {
                         removed += 1;
                         continue;
                     }
                 }
-                let _ = kind;
-                let _ = (s, d);
             }
             out.push(inst);
         }
@@ -691,6 +715,89 @@ fn rewrite_registers(function: &mut MachineFunction, allocation: &Allocation) {
                 });
                 continue;
             }
+            if let Inst::Move { kind: MoveKind::Move(_), src: MOperand::Reg(a), dst: MOperand::Reg(b) } = &inst {
+                if a == b {
+                    continue;
+                }
+            }
+            if let Inst::Move { kind: MoveKind::SignExtend { to, .. } | MoveKind::ZeroExtend { to, .. }, src, dst: MOperand::Mem(dst_mem) } = &inst {
+                let kind = match &inst {
+                    Inst::Move { kind, .. } => *kind,
+                    _ => unreachable!(),
+                };
+                let to_w = *to;
+                let scratch = Reg::Phys(crate::machine::SCRATCH);
+                out.push(Inst::Move {
+                    kind,
+                    src: src.clone(),
+                    dst: MOperand::Reg(scratch),
+                });
+                out.push(Inst::Store {
+                    kind: MoveKind::Move(to_w),
+                    src: MOperand::Reg(scratch),
+                    dst: dst_mem.clone(),
+                });
+                continue;
+            }
+            if let Inst::Alu { op, width, src: MOperand::Mem(src_mem), dst: MOperand::Mem(dst_mem) } = &inst {
+                let scratch = Reg::Phys(crate::machine::SCRATCH);
+                out.push(Inst::Load {
+                    kind: MoveKind::Move(*width),
+                    src: src_mem.clone(),
+                    dst: MOperand::Reg(scratch),
+                });
+                out.push(Inst::Alu {
+                    op: *op,
+                    width: *width,
+                    src: MOperand::Reg(scratch),
+                    dst: MOperand::Mem(dst_mem.clone()),
+                });
+                continue;
+            }
+            if let Inst::Cmp { width, lhs: MOperand::Mem(lhs_mem), rhs: MOperand::Mem(rhs_mem) } = &inst {
+                let scratch = Reg::Phys(crate::machine::SCRATCH);
+                out.push(Inst::Load {
+                    kind: MoveKind::Move(*width),
+                    src: lhs_mem.clone(),
+                    dst: MOperand::Reg(scratch),
+                });
+                out.push(Inst::Cmp {
+                    width: *width,
+                    lhs: MOperand::Reg(scratch),
+                    rhs: MOperand::Mem(rhs_mem.clone()),
+                });
+                continue;
+            }
+            if let Inst::Load { kind, src, dst: MOperand::Mem(dst_mem) } = &inst {
+                let w = match kind {
+                    MoveKind::Move(w) | MoveKind::SignExtend { to: w, .. } | MoveKind::ZeroExtend { to: w, .. } => *w,
+                };
+                let scratch = Reg::Phys(crate::machine::SCRATCH);
+                out.push(Inst::Load {
+                    kind: *kind,
+                    src: src.clone(),
+                    dst: MOperand::Reg(scratch),
+                });
+                out.push(Inst::Store {
+                    kind: MoveKind::Move(w),
+                    src: MOperand::Reg(scratch),
+                    dst: dst_mem.clone(),
+                });
+                continue;
+            }
+            if let Inst::Lea { src, dst: MOperand::Mem(dst_mem) } = &inst {
+                let scratch = Reg::Phys(crate::machine::SCRATCH);
+                out.push(Inst::Lea {
+                    src: src.clone(),
+                    dst: MOperand::Reg(scratch),
+                });
+                out.push(Inst::Store {
+                    kind: MoveKind::Move(RegWidth::W64),
+                    src: MOperand::Reg(scratch),
+                    dst: dst_mem.clone(),
+                });
+                continue;
+            }
             out.push(inst);
         }
         block.insts = out;
@@ -759,8 +866,10 @@ fn rewrite_inst(inst: &mut Inst, allocation: &Allocation) {
 
     match inst {
         Inst::Move { src, dst, kind: _ } => {
-            if let MOperand::Reg(r) = src {
-                *src = resolve(*r, width, allocation);
+            match src {
+                MOperand::Reg(r) => *src = resolve(*r, width, allocation),
+                MOperand::Mem(m) => fix_mem(m, allocation),
+                _ => {}
             }
             match dst {
                 MOperand::Reg(r) => *dst = resolve(*r, width, allocation),
@@ -785,16 +894,22 @@ fn rewrite_inst(inst: &mut Inst, allocation: &Allocation) {
             }
         }
         Inst::Cmp { lhs, rhs, .. } | Inst::Test { lhs, rhs, .. } => {
-            if let MOperand::Reg(r) = lhs {
-                *lhs = resolve(*r, width, allocation);
+            match lhs {
+                MOperand::Reg(r) => *lhs = resolve(*r, width, allocation),
+                MOperand::Mem(m) => fix_mem(m, allocation),
+                _ => {}
             }
-            if let MOperand::Reg(r) = rhs {
-                *rhs = resolve(*r, width, allocation);
+            match rhs {
+                MOperand::Reg(r) => *rhs = resolve(*r, width, allocation),
+                MOperand::Mem(m) => fix_mem(m, allocation),
+                _ => {}
             }
         }
         Inst::SetCc { dst, .. } => {
-            if let MOperand::Reg(r) = dst {
-                *dst = resolve(*r, RegWidth::W8, allocation);
+            match dst {
+                MOperand::Reg(r) => *dst = resolve(*r, RegWidth::W8, allocation),
+                MOperand::Mem(m) => fix_mem(m, allocation),
+                _ => {}
             }
         }
         Inst::Lea { src, dst } => {
@@ -826,8 +941,10 @@ fn rewrite_inst(inst: &mut Inst, allocation: &Allocation) {
             }
         }
         Inst::Push(op) | Inst::Pop(op) => {
-            if let MOperand::Reg(r) = op {
-                *op = resolve(*r, RegWidth::W64, allocation);
+            match op {
+                MOperand::Reg(r) => *op = resolve(*r, RegWidth::W64, allocation),
+                MOperand::Mem(m) => fix_mem(m, allocation),
+                _ => {}
             }
         }
         Inst::Jmp(_) | Inst::Jcc { .. } | Inst::Ret | Inst::SignExtendAcc { .. } | Inst::Label(_)

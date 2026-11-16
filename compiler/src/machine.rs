@@ -474,6 +474,9 @@ impl Inst {
         match self {
             Inst::Move { src, dst, .. } => {
                 from_operand(src, &mut out);
+                if let Operand::Mem(m) = src {
+                    from_mem(m, &mut out);
+                }
                 if let Operand::Mem(m) = dst {
                     from_mem(m, &mut out);
                 }
@@ -538,7 +541,8 @@ impl Inst {
             }
         };
         match self {
-            Inst::Move { dst: Operand::Mem(m), .. }
+            Inst::Move { src: Operand::Mem(m), .. }
+            | Inst::Move { dst: Operand::Mem(m), .. }
             | Inst::Load { src: m, .. }
             | Inst::Store { dst: m, .. }
             | Inst::Lea { src: m, .. } => from_mem(m, &mut out),

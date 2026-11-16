@@ -9,9 +9,6 @@ use super::*;
 use crate::hir::LocalId;
 use crate::machine::{MoveKind, RegWidth};
 
-/// Integer argument registers, in order.
-const ARG_REGS: [u8; 6] = [7, 6, 2, 1, 8, 9]; // rdi, rsi, rdx, rcx, r8, r9
-
 impl<'a, 't> Isel<'a, 't> {
     /// Selects a terminator, appending instructions to `out`.
     ///
@@ -124,6 +121,14 @@ impl<'a, 't> Isel<'a, 't> {
             return Ok(());
         }
         let width = self.width(ty)?;
+        if let Some(&reg) = self.local_regs.get(&local) {
+            out.push(Inst::Move {
+                kind: MoveKind::Move(width),
+                src: MOperand::Reg(reg),
+                dst: MOperand::Reg(Reg::Phys(0)),
+            });
+            return Ok(());
+        }
         out.push(Inst::Load { kind: MoveKind::Move(width), src: mem, dst: MOperand::Reg(Reg::Phys(0)) });
         Ok(())
     }
@@ -353,27 +358,25 @@ impl<'a, 't> Isel<'a, 't> {
                 },
             });
         }
-        for (i, arg_reg) in arg_regs_of_abi.iter().take(count).enumerate() {
-            out.push(Inst::Load {
-                kind: MoveKind::Move(RegWidth::W64),
-                src: Mem {
-                    base: Some(Reg::Phys(4)),
-                    offset: park_base as i64 + (i as i64) * 8,
-                    index: None,
-                    symbol: None,
-                },
-                dst: MOperand::Reg(Reg::Phys(*arg_reg)),
-            });
-        }
-        // Stack arguments are written above the parking area. The callee reads
-        // them upward from `16(%rbp)`, which is the bottom of this area, so the
-        // first byte of the first stack argument belongs at its lowest address.
+        // Stack arguments are written before loading the ABI argument registers
+        // so that a register-resident stack argument cannot be clobbered by the
+        // shuffle into %rdi..%r9.
         for piece in &plan.stack_pieces {
             let mut copied = 0u64;
             while copied < piece.size {
                 // The last partial eightbyte is copied byte by byte so a short
                 // aggregate does not read past its own storage.
-                let width = if piece.size - copied >= 8 { RegWidth::W64 } else { RegWidth::W8 };
+                let width = if piece.size - copied >= 8 {
+                    RegWidth::W64
+                } else if matches!(piece.source, StackSource::Imm(_)) && copied == 0 {
+                    match piece.size {
+                        4 => RegWidth::W32,
+                        2 => RegWidth::W16,
+                        _ => RegWidth::W8,
+                    }
+                } else {
+                    RegWidth::W8
+                };
                 let dst = Mem {
                     base: Some(Reg::Phys(4)),
                     // `piece.offset` counts from the bottom of the outgoing area.
@@ -409,6 +412,18 @@ impl<'a, 't> Isel<'a, 't> {
                 }
                 copied += width.bytes();
             }
+        }
+        for (i, arg_reg) in arg_regs_of_abi.iter().take(count).enumerate() {
+            out.push(Inst::Load {
+                kind: MoveKind::Move(RegWidth::W64),
+                src: Mem {
+                    base: Some(Reg::Phys(4)),
+                    offset: park_base as i64 + (i as i64) * 8,
+                    index: None,
+                    symbol: None,
+                },
+                dst: MOperand::Reg(Reg::Phys(*arg_reg)),
+            });
         }
 
         // A call target names a symbol, not a block label. Using a memory
@@ -580,7 +595,17 @@ impl<'a, 't> Isel<'a, 't> {
             } else {
                 // Past the register file every scalar is delivered on the stack.
                 let mem = match arg {
-                    Operand::Copy(p) | Operand::Move(p) => StackSource::Mem(self.place_addr(p)?),
+                    Operand::Copy(p) | Operand::Move(p) => {
+                        if p.projection.is_empty() {
+                            if let Some(&reg) = self.local_regs.get(&p.local) {
+                                StackSource::Imm(MOperand::Reg(reg))
+                            } else {
+                                StackSource::Mem(self.place_addr(p)?)
+                            }
+                        } else {
+                            StackSource::Mem(self.place_addr(p)?)
+                        }
+                    }
                     // A literal is written from its own bytes.
                     Operand::Constant(_) => StackSource::Imm(self.operand(arg)?),
                 };

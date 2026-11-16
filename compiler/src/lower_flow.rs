@@ -213,18 +213,18 @@ impl Lowering<'_> {
                     self.assign(tmp.clone(), Rvalue::Cast { operand: op, to: w }, a.span);
                     arg_ops.push(Operand::Copy(tmp));
                 }
-                // Passing a `&mut T` binding to a `&mut T` parameter is a fresh
-                // borrow, not a move: moving it would leave the caller unable to
-                // use the reference again, so a parser cannot pass its cursor to
-                // a helper twice.
+                // Passing a `&mut T` binding to a `&mut T` or `&T` parameter is a
+                // fresh reborrow, not a move: moving it would leave the caller
+                // unable to use the reference again, and `&mut T` coerces to `&T`.
                 Some(w)
                     if matches!(self.types.kind(a.ty), TyKind::RefMut(_))
-                        && matches!(self.types.kind(w), TyKind::RefMut(_))
+                        && matches!(self.types.kind(w), TyKind::RefMut(_) | TyKind::Ref(_))
                         && matches!(a.kind, HirExprKind::Local(_)) =>
                 {
                     let place = self.lower_place(a).deref();
                     let slot = self.temp_place(w);
-                    self.assign(slot.clone(), Rvalue::Reborrow { mutable: true, place }, a.span);
+                    let mutable = matches!(self.types.kind(w), TyKind::RefMut(_));
+                    self.assign(slot.clone(), Rvalue::Reborrow { mutable, place }, a.span);
                     arg_ops.push(Operand::Copy(slot));
                 }
                 _ => arg_ops.push(op),

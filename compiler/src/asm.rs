@@ -49,18 +49,19 @@ pub fn print_function(
         crate::target::Abi::SysV => 0,
         crate::target::Abi::Win64 => 32,
     };
-    let frame = align16(function.stack_size + spill_bytes + shadow);
+    let callee_bytes = (callee_saved.len() as u64) * 8;
+    let frame = align16(function.stack_size + spill_bytes + callee_bytes + shadow);
     let _ = writeln!(out, "    pushq %rbp");
     let _ = writeln!(out, "    movq %rsp, %rbp");
-    // Callee-saved registers are pushed before the frame is reserved, so they
-    // sit directly below the saved `rbp` and `leave` can unwind past them only
-    // after the explicit `popq`s in the epilogue. Reserving the frame first and
-    // pushing afterwards would put them below `rsp`'s restoration point.
-    for reg in callee_saved {
-        let _ = writeln!(out, "    pushq %{}", register_name(*reg, RegWidth::W64));
-    }
     if frame > 0 {
         let _ = writeln!(out, "    subq ${frame}, %rsp");
+    }
+    // Save callee-saved registers into their dedicated frame slots past locals
+    // and spill slots so they neither collide with local_slots nor shift rsp
+    // relative to rbp.
+    for (i, reg) in callee_saved.iter().enumerate() {
+        let off = -((function.stack_size + spill_bytes + (i as u64 + 1) * 8) as i64);
+        let _ = writeln!(out, "    movq %{}, {off}(%rbp)", register_name(*reg, RegWidth::W64));
     }
     // The frame is aligned here rather than relied upon to be aligned already.
     //
@@ -246,8 +247,9 @@ pub fn print_function(
     // The epilogue label is numbered past every block label in the function, so
     // it cannot collide with one. See `Isel::epilogue_label`.
     let _ = writeln!(out, ".L{}_{}:", symbol, function.block_count);
-    for reg in callee_saved.iter().rev() {
-        let _ = writeln!(out, "    popq %{}", register_name(*reg, RegWidth::W64));
+    for (i, reg) in callee_saved.iter().enumerate().rev() {
+        let off = -((function.stack_size + spill_bytes + (i as u64 + 1) * 8) as i64);
+        let _ = writeln!(out, "    movq {off}(%rbp), %{}", register_name(*reg, RegWidth::W64));
     }
     let _ = writeln!(out, "    leave");
     let _ = writeln!(out, "    ret");

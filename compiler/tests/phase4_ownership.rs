@@ -532,3 +532,74 @@ fn main() {
         let _ = umayc::analyze_source("trunc.um", &src[..end]);
     }
 }
+
+#[test]
+fn mut_ref_coerces_to_shared_ref_without_moving() {
+    ok(
+        r#"
+struct P { x: i64 }
+fn read_p(p: &P) -> i64 { p.x }
+fn bump(p: &mut P) { p.x = p.x + 1 }
+fn main() -> i64 {
+    let mut p = P { x: 10 }
+    let r = &mut p
+    let a = read_p(r)
+    bump(r)
+    let b = read_p(r)
+    a + b - 21
+}
+"#,
+    );
+}
+
+#[test]
+fn mut_ref_coerces_in_if_else_and_let() {
+    ok(
+        r#"
+fn pick(cond: bool, a: &mut i64, b: &i64) -> &i64 {
+    if cond { a } else { b }
+}
+fn main() -> i64 {
+    let mut x = 5
+    let mut z = 6
+    let y = 7
+    let r: &i64 = &mut z
+    let p = pick(true, &mut x, &y)
+    let _ = *r
+    let _ = *p
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn mut_ref_coerced_to_shared_still_conflicts_with_new_mut_borrow() {
+    err(
+        r#"
+fn main() {
+    let mut x = 5
+    let r: &i64 = &mut x
+    let q = &mut x
+    let _ = *r
+    let _ = *q
+}
+"#,
+        "E0204",
+    );
+}
+
+#[test]
+fn shared_ref_does_not_coerce_to_mut_ref() {
+    err(
+        r#"
+fn bump(p: &mut i64) { *p = *p + 1 }
+fn main() {
+    let x = 1
+    let r = &x
+    bump(r)
+}
+"#,
+        "E1001",
+    );
+}

@@ -1074,8 +1074,6 @@ impl FnChecker<'_, '_> {
         // which is what makes `Pair { a: 1, b: 2 }` one type and not two.
         let mut inferred: std::collections::HashMap<String, crate::types::TyId> =
             std::collections::HashMap::new();
-        let mut literal_inferred: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
         if !info.generics.is_empty() {
             // An explicit argument written with `::<..>` outranks anything the
             // fields suggest: the caller said what the type is.
@@ -1428,7 +1426,7 @@ impl FnChecker<'_, '_> {
         path: &ast::Path,
         args: &[ast::Expr],
         span: crate::source::Span,
-        hint: Option<crate::types::TyId>,
+        _hint: Option<crate::types::TyId>,
     ) -> HirExpr {
         let mut ty_args: Vec<TyId> = path.segments[0]
             .args

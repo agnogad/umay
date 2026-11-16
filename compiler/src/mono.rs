@@ -175,7 +175,7 @@ impl<'t> Mono<'t> {
             // after `make`'s copy exists, so `a.get()` demands its method for the
             // first time here. Demand before resolving again, or the call site is
             // looked up in a table that has no entry for it.
-            let mut demanded = false;
+            let demanded;
             {
                 let mut rw = Rewriter { mono: self, hir, collect: true, in_template: false };
                 for i in 0..rw.hir.fns.len() {
@@ -640,7 +640,7 @@ impl<'m, 't, 'h> Rewriter<'m, 't, 'h> {
                         .hir_ret(*method)
                         .and_then(|ret| fill_from_result(self.mono.types, base, ret, e.ty, &names));
                     let hint = from_result.unwrap_or(e.ty);
-                    let mut settled = self.mono.settle_binding(base, receiver.ty, hint);
+                    let settled = self.mono.settle_binding(base, receiver.ty, hint);
                     if !crate::sema::mentions_unresolved_param(self.mono.types, settled) {
                         receiver.ty = settled;
                     }
