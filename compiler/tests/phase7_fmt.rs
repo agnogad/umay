@@ -129,3 +129,32 @@ fn h() {
     assert_eq!(once.text, source);
     assert_eq!(umayc::fmt::format(&once.text).text, once.text);
 }
+
+/// Formats `src` and checks it is a fixed point: `want` out, and again `want`.
+fn assert_formats(src: &str, want: &str) {
+    let once = umayc::fmt::format(src).text;
+    assert_eq!(once, want);
+    assert_eq!(umayc::fmt::format(&once).text, want, "second pass changed it");
+}
+
+#[test]
+fn a_line_leading_deref_is_not_a_continuation() {
+    let src = "fn f(res: &mut i64) {\n*res = 1\n    let x = g(1)\n    *res = x\n}\n";
+    let want = "fn f(res: &mut i64) {\n    *res = 1\n    let x = g(1)\n    *res = x\n}\n";
+    assert_formats(src, want);
+}
+
+#[test]
+fn a_shift_by_a_group_keeps_its_space() {
+    let src = "fn f(x: u64) -> u64 {\n    x >> (a + 1) << (b)\n}\n";
+    assert_formats(src, src);
+    let call = "fn f() {\n    g::<Vec<Vec<u8>>>(x)\n}\n";
+    assert_formats(call, call);
+}
+
+#[test]
+fn a_continued_binary_expression_is_indented() {
+    let src = "fn f() {\n    let x = a\n    | b\n    ^ c\n    >> d\n    let y = a +\n    b\n}\n";
+    let want = "fn f() {\n    let x = a\n        | b\n        ^ c\n        >> d\n    let y = a +\n        b\n}\n";
+    assert_formats(src, want);
+}

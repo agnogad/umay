@@ -170,6 +170,14 @@ impl Parser {
         self.cur().line > prev.line
     }
 
+    /// A `*` that starts a line glued to its operand (`*res = x`) dereferences
+    /// and so begins a new statement; `* rhs` still continues a multiply.
+    fn deref_starts_line(&self) -> bool {
+        self.at(&TokenKind::Star)
+            && self.starts_new_line()
+            && self.tokens.get(self.pos + 1).is_some_and(|n| n.span.start == self.cur().span.end)
+    }
+
     fn prev_span(&self) -> Span {
         if self.pos == 0 {
             self.span()
