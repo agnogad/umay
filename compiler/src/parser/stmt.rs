@@ -152,6 +152,9 @@ impl Parser {
             if self.prev_requires_continuation() {
                 return false;
             }
+            if self.deref_starts_line() {
+                return true;
+            }
             return !self.next_can_continue_expr();
         }
         false

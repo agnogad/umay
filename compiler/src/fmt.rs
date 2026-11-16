@@ -229,6 +229,8 @@ struct Context {
     brace_is_expression: bool,
     /// True when a type name could start at the token being read.
     name_is_type: bool,
+    /// True when the token just read was a `>` or `>>` closing type arguments.
+    closed_angles: bool,
     /// True when the token just read was a name in a type's head, so a `<` after
     /// it opens that type's arguments.
     last_name_was_type: bool,
@@ -300,6 +302,13 @@ fn placement(prev: &Token, next: &Token, cx: &Context) -> Placement {
     if matches!(next.kind, K::LParen) && prev_is_operator(prev) && !cx.sigil_is_prefix {
         return Placement::Spaced;
     }
+    // `x >> (n)` shifts by a grouped value; only a `>>` closing type
+    // arguments, `f::<Vec<T>>(x)`, calls tight.
+    if matches!(next.kind, K::LParen) && matches!(prev.kind, K::Shl)
+        || matches!(next.kind, K::LParen) && matches!(prev.kind, K::Shr) && !cx.closed_angles
+    {
+        return Placement::Spaced;
+    }
     // `f::<T>(x)` closes a type's arguments and calls at once, so it is tight.
     if matches!(next.kind, K::LParen) && matches!(prev.kind, K::Gt | K::Shr) {
         return Placement::Tight;
@@ -363,6 +372,30 @@ fn prev_is_operator(tok: &Token) -> bool {
     )
 }
 
+/// True when `tok`, ending a line, leaves its expression unfinished.
+/// `<`, `>` and `>>` are left out: at a line's end they close a type.
+fn ends_with_operator(tok: &Token, cx: &Context) -> bool {
+    use TokenKind as K;
+    !cx.sigil_is_prefix
+        && matches!(
+            tok.kind,
+            K::Plus
+                | K::Minus
+                | K::Star
+                | K::Slash
+                | K::Percent
+                | K::Caret
+                | K::Amp
+                | K::Pipe
+                | K::Eq
+                | K::EqEq
+                | K::Ne
+                | K::AmpAmp
+                | K::PipePipe
+                | K::Shl
+        )
+}
+
 /// True for the keywords whose `(` opens a new phrase rather than a call.
 fn needs_space_before_paren(kw: Keyword) -> bool {
     matches!(
@@ -405,6 +438,7 @@ fn update_context(cx: &mut Context, tok: &Token, previous: Option<TokenKind>) {
                 | Some(K::Gt)
                 | Some(K::Arrow)
         );
+    cx.closed_angles = matches!(tok.kind, K::Gt | K::Shr) && cx.in_angles > 0;
     cx.in_angles = match tok.kind {
         K::Lt if name_is_type => cx.in_angles + 1,
         K::Gt => cx.in_angles.saturating_sub(1),
@@ -451,12 +485,23 @@ fn update_context(cx: &mut Context, tok: &Token, previous: Option<TokenKind>) {
 /// An operator at the start of a line is the clearest sign: a reader writes
 /// `|| x` on its own line to say the condition continues, and that extra indent
 /// is what shows the two lines are one statement.
-fn continues_line(tok: &Token) -> bool {
+fn continues_line(tok: &Token, next: Option<&Token>) -> bool {
     use TokenKind as K;
+    // `*res = x` starts a statement: a `*` glued to what follows dereferences,
+    // which is how the parser reads it too.
+    if matches!(tok.kind, K::Star) && next.is_some_and(|n| n.span.start == tok.span.end) {
+        return false;
+    }
     matches!(
         tok.kind,
         K::PipePipe
             | K::AmpAmp
+            | K::Pipe
+            | K::Caret
+            | K::Amp
+            | K::Percent
+            | K::Shl
+            | K::Shr
             | K::Plus
             | K::Minus
             | K::Star
@@ -523,6 +568,8 @@ fn rewrite(src: &str, tokens: &[Token]) -> String {
         let gap = &src[last_end as usize..tok.span.start as usize];
         let has_comment = gap.contains("//") || gap.contains("/*");
         let broke = gap.contains('\n');
+        // A line-leading `*` that dereferences: what follows it reads tight.
+        let mut line_deref = false;
 
         if has_comment {
             // Whatever line was being built ends here: the comment starts its
@@ -553,7 +600,10 @@ fn rewrite(src: &str, tokens: &[Token]) -> String {
             // the block's own indentation.
             // A line that carries on the one above it is indented one level
             // past the block, which is what shows the two are one statement.
-            w.continuation = if continues_line(tok) { 4 } else { 0 };
+            // An operator ending the line above says the same thing.
+            let carried = prev.is_some_and(|p| ends_with_operator(p, &cx));
+            w.continuation = if continues_line(tok, tokens.get(index + 1)) || carried { 4 } else { 0 };
+            line_deref = matches!(tok.kind, TokenKind::Star) && !continues_line(tok, tokens.get(index + 1));
         } else if let Some(p) = prev {
             // `{}` is one token pair, so nothing goes between them.
             let empty_block = w.pending_open_brace && matches!(tok.kind, TokenKind::RBrace);
@@ -646,6 +696,7 @@ fn rewrite(src: &str, tokens: &[Token]) -> String {
         }
 
         update_context(&mut cx, tok, prev.map(|p| p.kind.clone()));
+        cx.sigil_is_prefix |= line_deref;
         last_end = tok.span.end;
         prev = Some(tok);
     }

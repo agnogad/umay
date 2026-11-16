@@ -798,3 +798,20 @@ fn struct_literals_still_parse_outside_conditions() {
 fn while_condition_brace_opens_the_body() {
     assert_clean("fn f(c: bool) {\n    while c { let n = 1 }\n}");
 }
+
+#[test]
+fn a_line_leading_deref_starts_a_new_statement() {
+    // `*res` glued to its operand dereferences; it does not multiply the
+    // previous line's `)`. `* b` with a space still continues a multiply.
+    assert_clean(
+        r#"
+fn set(res: &mut i64, n: i64) {
+    let full = n + (1)
+    *res = full
+    let prod = full
+        * n
+    *res = prod
+}
+"#,
+    );
+}

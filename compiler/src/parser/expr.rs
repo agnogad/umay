@@ -129,7 +129,7 @@ impl Parser {
                 continue;
             }
             let Some((prec, op)) = Self::op_prec(self.kind()) else { break };
-            if prec < min_prec {
+            if prec < min_prec || self.deref_starts_line() {
                 break;
             }
             let start = lhs.span;
