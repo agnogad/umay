@@ -1,0 +1,26 @@
+// TCP sockets on a POSIX system: bindings only.
+//
+// Everything that can be written once -- the address layout, the retry loop
+// around a short write, the "closed means fd < 0" convention -- lives in
+// `stdlib/net.um`. What is left here is the handful of names the C library
+// spells, because those are the only part that differs between systems.
+//
+// The linker symbols are named explicitly so that UMAY names such as `read` and
+// `write` stay free for a program to use.
+
+// A descriptor is an `int` in C. It is declared `isize` here so that the one
+// hand-written `Socket` type in the portable half works on Windows too, where a
+// handle is 64 bits wide. A POSIX descriptor is small enough that the wider type
+// costs nothing and changes nothing: the C call receives the value it expects.
+extern fn "socket" umay_net_socket(domain: i32, kind: i32, protocol: i32) -> isize
+extern fn "bind" umay_net_bind(fd: isize, addr: *const u8, len: i32) -> i32
+extern fn "listen" umay_net_listen(fd: isize, backlog: i32) -> i32
+extern fn "accept" umay_net_accept(fd: isize, addr: *mut u8, len: *mut i32) -> isize
+extern fn "read" umay_net_read(fd: isize, buf: *mut u8, count: usize) -> i64
+extern fn "write" umay_net_write(fd: isize, buf: *const u8, count: usize) -> i64
+extern fn "close" umay_net_close(fd: isize) -> i32
+
+// Nothing to initialise: a POSIX socket library is ready when the process is.
+fn umay_platform_net_start() -> bool {
+    return true
+}

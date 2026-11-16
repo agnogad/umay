@@ -46,13 +46,10 @@ impl<T: Send> Send for Vec<T> {}
 impl<T: Send> Send for Option<T> {}
 impl<T: Sync> Sync for Vec<T> {}
 
-extern fn "pthread_create" umay_c_pthread_create(
-    thread: *mut u8,
-    attr: *const u8,
-    start: *const u8,
-    arg: *mut u8,
-) -> i32
-extern fn "pthread_join" umay_c_pthread_join(thread: *mut u8, result: *mut *mut u8) -> i32
+// `umay_c_pthread_create` and `umay_c_pthread_join` are declared by
+// `stdlib/platform/thread_<system>.um`, not here. The two operations and their
+// success convention are the same everywhere; what starts a thread is not --
+// POSIX has `pthread_create`, Windows has `CreateThread` and a handle to close.
 
 // A running thread.
 struct Thread {
@@ -77,46 +74,43 @@ fn thread_spawn<A: Send, R>(work: *const u8, value: A) -> R {
     if sizeof(R) > 8usize {
         panic("thread_spawn: the answer must fit in eight bytes")
     }
-    let pipe = alloc(8)
-    if umay_pipe(pipe) != 0 {
-        dealloc(pipe)
-        panic("thread_spawn: cannot create the result channel")
-    }
-    let read_end = read_u32(pipe) as i32
-    let write_end = read_u32(pipe.offset(4)) as i32
-    let pid = spawn()
-    if is_child(pid) {
-        umay_close(read_end)
-        let answer = call_one(work, value)
-        let out = alloc(8)
-        write_i64(out, answer as i64)
-        umay_write(write_end, out, 8usize)
-        dealloc(out)
-        umay_close(write_end)
-        exit(0)
-    }
-    umay_close(write_end)
-    let gathered = alloc(8)
-    let got = umay_read(read_end, gathered, 8usize)
-    umay_close(read_end)
-    dealloc(pipe)
-    let status = alloc(4)
-    umay_waitpid(pid, status as *mut i32, 0)
-    dealloc(status)
-    if got != 8isize {
-        dealloc(gathered)
-        panic("thread_spawn: the child left no answer")
-    }
-    let answer = read_i64(gathered)
-    dealloc(gathered)
-    return from_usize::<R>(answer as usize)
+    // The hand-off is one value in and one answer out, and every system can do
+    // that. How it is done differs: POSIX forks a child and reads the answer from
+    // a pipe, Windows starts a thread and asks it for its exit value because
+    // there is no `fork`. `umay_thread_spawn` picks between them, so this wrapper
+    // holds no system-specific code.
+    let answer = umay_thread_spawn(work, bits_of::<A>(value))
+    return from_usize::<R>(answer)
 }
 
-// Reads an `R` back out of the eight bytes the child left.
+// Reads a value's bits as the `usize` the thread entry receives.
 //
-// A cast cannot produce an arbitrary type, so the bytes are handed over by
-// address and read as the caller's type. The size check above is what makes this
-// sound: anything larger would be read past the end of the channel.
+// The reverse of `from_usize`, and only valid for a value that fits in eight
+// bytes -- which the answer side has already established and which a `usize` value
+// is by construction. Copying byte at a time is what makes this the exact inverse
+// without asking the compiler to name a pointer to a type it has not seen.
+fn bits_of<A>(value: A) -> usize {
+    if sizeof(A) > 8usize {
+        panic("thread_spawn: a value wider than eight bytes cannot cross")
+    }
+    let cell = alloc(8)
+    let source = unsafe { &value as *const A as *const u8 }
+    unsafe {
+        let mut start = 0 as usize
+        while start < sizeof(A) {
+            write_byte(cell.offset(start as isize), read_byte(source.offset(start as isize)))
+            start = start + 1 as usize
+        }
+    }
+    let bits = umay_read_i64(cell) as usize
+    dealloc(cell)
+    return bits
+}
+
+// Reads a value's bits back into an `R`.
+//
+// Copying byte at a time is what makes this sound: anything larger than the
+// channel would be read past its end.
 fn from_usize<R>(bits: usize) -> R {
     let cell = alloc(sizeof(R))
     unsafe {

@@ -5,19 +5,22 @@
 // address in particular: a port is two bytes in network order, and writing them
 // the intuitive way binds the wrong port without any error.
 
-// The linker symbols are named explicitly so that UMAY names such as `read` and
-// `write` stay free for a program to use.
-extern fn "socket" umay_net_socket(domain: i32, kind: i32, protocol: i32) -> i32
-extern fn "bind" umay_net_bind(fd: i32, addr: *const u8, len: i32) -> i32
-extern fn "listen" umay_net_listen(fd: i32, backlog: i32) -> i32
-extern fn "accept" umay_net_accept(fd: i32, addr: *mut u8, len: *mut i32) -> i32
-extern fn "read" umay_net_read(fd: i32, buf: *mut u8, count: usize) -> i64
-extern fn "write" umay_net_write(fd: i32, buf: *const u8, count: usize) -> i64
-extern fn "close" umay_net_close(fd: i32) -> i32
+// The seven bindings this file calls (`umay_net_socket`, `umay_net_bind`, ...)
+// are not declared here. They are the one part of the library that differs
+// between systems -- POSIX calls one set of names, Windows' Winsock another, and
+// Windows also needs `WSAStartup` before the first call and a wider handle type
+// -- so they live in `stdlib/platform/net_<system>.um` and the compiler puts the
+// right file in front of this one.
 
 // A listening or connected socket.
+// A socket handle.
+//
+// `isize`, not `i32`: a POSIX descriptor is a small integer, but a Windows
+// `SOCKET` is a 64-bit handle, and narrowing it to 32 bits loses the top half --
+// the socket then refers to nothing and the first call through it faults.
+// `isize` is wide enough for either and keeps "-1 means closed" working on both.
 struct Socket {
-    fd: i32,
+    fd: isize,
 }
 
 // A socket address: an IPv4 address and a port, in the layout `bind` expects.
@@ -58,19 +61,24 @@ fn release_address(a: Address) {
 
 // A closed socket, so a failure has a value to return.
 fn closed_socket() -> Socket {
-    return Socket { fd: -1 }
+    return Socket { fd: -1isize }
 }
 
 // True when the socket is not open.
 fn socket_is_closed(s: &Socket) -> bool {
-    return s.fd < 0
+    return s.fd < 0isize
 }
 
 // A TCP socket, or a closed one when the system would not give one.
 fn tcp_socket() -> Socket {
+    // A socket library that is not running returns nothing usable, and on
+    // Windows nothing is usable before `WSAStartup` has succeeded.
+    if !umay_platform_net_start() {
+        return closed_socket()
+    }
     // AF_INET is 2 and SOCK_STREAM is 1.
     let fd = umay_net_socket(2, 1, 0)
-    if fd < 0 {
+    if fd < 0isize {
         return closed_socket()
     }
     return Socket { fd: fd }
@@ -92,7 +100,7 @@ fn socket_listen(s: &Socket, backlog: i32) -> bool {
 // Accepts one connection, returning a closed socket when that fails.
 fn socket_accept(s: &Socket) -> Socket {
     let fd = umay_net_accept(s.fd, unsafe { 0 as *mut u8 }, unsafe { 0 as *mut i32 })
-    if fd < 0 {
+    if fd < 0isize {
         return closed_socket()
     }
     return Socket { fd: fd }
@@ -128,7 +136,7 @@ fn socket_write_all(s: &Socket, data: *const u8, count: usize) -> bool {
 // Taking a reference rather than the socket keeps a caller free to close after
 // its last use without the move being seen as ending the borrow order.
 fn socket_close(s: &Socket) {
-    if s.fd >= 0 {
+    if s.fd >= 0isize {
         umay_net_close(s.fd)
     }
 }

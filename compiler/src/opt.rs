@@ -172,7 +172,7 @@ pub fn simplify(body: &mut Body, types: &TyCtxt) -> usize {
             let dest_ty = body.locals.get(place.local.0 as usize).map(|l| l.ty);
             if let Some(ty) = dest_ty {
                 match &mut value {
-                    Rvalue::Binary { lhs, rhs, .. } => {
+                    Rvalue::Binary { op: op_ref, lhs, rhs } if !is_comparison(*op_ref) => {
                         retype_constant(lhs, ty);
                         retype_constant(rhs, ty);
                     }
@@ -234,6 +234,12 @@ pub fn simplify(body: &mut Body, types: &TyCtxt) -> usize {
         }
     }
     folded
+}
+
+/// True when `op` compares two values and produces a `bool`.
+fn is_comparison(op: BinOp) -> bool {
+    matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+        || matches!(op, BinOp::LogicalAnd | BinOp::LogicalOr)
 }
 
 /// Rewrites a constant's type annotation, keeping its value.
@@ -675,7 +681,9 @@ pub fn dce(body: &mut Body, types: &TyCtxt) -> usize {
                 let statement = body.blocks[index].statements[i].clone();
                 let dead = match &statement {
                     Statement::Assign { place, value, .. } => {
-                        !live.contains(&place.local) && !has_observable_effect(value)
+                        !live.contains(&place.local)
+                            && !has_observable_effect(value)
+                            && !place_writes_memory(place)
                     }
                     // Drop flags and storage markers are bookkeeping for passes
                     // that have already run. Drop elaboration turned every drop
@@ -695,9 +703,17 @@ pub fn dce(body: &mut Body, types: &TyCtxt) -> usize {
                         live.insert(local);
                     }
                 }
-                // A definition ends the liveness of its destination.
+                // A definition ends the liveness of its destination -- but only a
+                // definition *of that local*. A write through a projection
+                // (`_0.(deref) = 5`) stores to memory, not to `_0`; killing `_0`
+                // here erased the use that `statement_uses` had just recorded, so
+                // the statement that produced the pointer looked dead and was
+                // deleted. The program then stored through an undefined register
+                // and segfaulted at `-O1` and above.
                 if let Statement::Assign { place, .. } = &statement {
-                    live.remove(&place.local);
+                    if place.projection.is_empty() {
+                        live.remove(&place.local);
+                    }
                 }
             }
         }
@@ -715,6 +731,15 @@ fn statement_uses(stmt: &Statement) -> Vec<LocalId> {
     match stmt {
         Statement::Assign { place, value, .. } => {
             let mut out = rvalue_uses(value);
+            // Writing through a projection reads what it projects through.
+            // `_0.(deref) = 5` reads the *pointer* `_0` to find where to store;
+            // only `Index` was considered here, so that statement looked like it
+            // read nothing at all. Dead-code elimination then judged `_0` dead,
+            // deleted the two assignments that produced it, and the program
+            // stored through an uninitialised register.
+            if !place.projection.is_empty() {
+                out.push(place.local);
+            }
             for projection in &place.projection {
                 if let Projection::Index(op) = projection {
                     out.extend(operand_uses(op));
@@ -738,6 +763,22 @@ fn statement_uses(stmt: &Statement) -> Vec<LocalId> {
 /// costs one dead store and avoids a miscompile.
 fn has_observable_effect(value: &Rvalue) -> bool {
     matches!(value, Rvalue::Ref { .. } | Rvalue::Reborrow { .. })
+}
+
+/// True when writing to `place` changes memory a reader can observe.
+///
+/// A destination with a `Deref` in its projection is a write *through a pointer*:
+/// `*p = 5` stores to whatever `p` names, not to the local `p`. Dead-code
+/// elimination judged such a statement only by whether the pointer local was
+/// live, so `*p = 5` followed by a read that optimisation could not follow was
+/// deleted -- and the program then read uninitialised memory, which for
+/// `alloc`/`dealloc` turned into `double free or corruption`. A store through a
+/// pointer is always observable, so it is never removed.
+///
+/// A field write (`s.x = 1`) is not covered: it writes into a local aggregate
+/// that this pass tracks, and removing it when the aggregate is dead is correct.
+fn place_writes_memory(place: &Place) -> bool {
+    place.projection.iter().any(|p| matches!(p, Projection::Deref))
 }
 
 /// For each block, the locals live at its *exit*.
@@ -898,4 +939,20 @@ fn borrowed_places(block: &BasicBlock) -> Vec<&Place> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod deref_use_tests {
+    use super::*;
+
+    #[test]
+    fn a_deref_write_reads_its_base() {
+        let place = Place { local: LocalId(0), projection: vec![Projection::Deref] };
+        let stmt = Statement::Assign {
+            place,
+            value: Rvalue::Use(Operand::Constant(Constant::Bool(true))),
+            span: crate::source::Span::new(crate::source::FileId(0), 0, 0),
+        };
+        assert_eq!(statement_uses(&stmt), vec![LocalId(0)]);
+    }
 }

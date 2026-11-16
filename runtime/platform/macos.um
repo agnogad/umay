@@ -1,0 +1,129 @@
+// The runtime's operating-system layer: macOS (Darwin).
+//
+// The same POSIX surface as Linux, with three differences that matter and one
+// that does not:
+//
+//   * `errno` is reached through `__error()`, not `__errno_location()`. glibc's
+//     spelling does not exist in libSystem, and a program that declares it gets
+//     an undefined symbol at link time.
+//   * The `open` flags are numbered differently. They are not a superset of
+//     Linux's: macOS puts `O_CREAT` at 0x200, where Linux puts `O_TRUNC`. Using
+//     the Linux table here would create a file when the program meant to
+//     truncate one, which fails silently rather than loudly, and is exactly the
+//     class of bug that makes a platform port worth doing carefully.
+//   * `fork` exists but is documented as unusable in a process that has ever
+//     been multi-threaded. UMAY's runtime forks before any thread exists, so it
+//     is used, but the constraint is recorded here rather than rediscovered
+//     later.
+//
+// The one that does not matter: on macOS every symbol carries a leading
+// underscore in the object file. That is handled by the target's symbol prefix
+// in the code generator, not here, so the C names below are spelled exactly as
+// the C library declares them and the assembler source gets the underscore.
+
+// --- C bindings -------------------------------------------------------------
+
+extern fn "malloc" umay_c_malloc(size: usize) -> *mut u8
+extern fn "free" umay_c_free(ptr: *mut u8) -> ()
+extern fn "write" umay_c_write(fd: i32, buf: *const u8, count: usize) -> isize
+extern fn "exit" umay_c_exit(code: i32) -> ()
+extern fn "lseek" umay_c_lseek(fd: i32, offset: i64, whence: i32) -> i64
+extern fn "getenv" umay_c_getenv(name: *const u8) -> *const u8
+extern fn "pipe" umay_posix_pipe(fds: *mut u8) -> i32
+
+// Makes a pipe and writes its two ends into `fds`, eight bytes each.
+//
+// A POSIX descriptor is a small integer and a Windows handle is pointer-sized.
+// Storage in the portable runtime is eight bytes per end, so the narrowing on
+// this side happens once, here, rather than in every caller: the C call gets the
+// four-byte array it wants and the caller gets the shape it expects.
+fn umay_c_pipe(fds: *mut u8) -> i32 {
+    let raw = umay_alloc(8)
+    let rc = umay_posix_pipe(raw)
+    if rc == 0 {
+        let read_end = umay_read_u32(raw)
+        let write_end = umay_read_u32(unsafe { (raw as usize + 4) as *const u8 })
+        umay_write_i64(fds, read_end as i64)
+        umay_write_i64(unsafe { (fds as usize + 8) as *mut u8 }, write_end as i64)
+    }
+    umay_dealloc(raw)
+    return rc
+}
+extern fn "fork" umay_c_fork() -> i32
+extern fn "waitpid" umay_c_waitpid(pid: i32, status: *mut i32, options: i32) -> i32
+
+extern fn "open" umay_c_open(path: *const u8, flags: i32, mode: i32) -> i32
+extern fn "close" umay_c_close(fd: i32) -> i32
+extern fn "read" umay_c_read(fd: i32, buf: *mut u8, count: usize) -> isize
+extern fn "unlink" umay_c_unlink(path: *const u8) -> i32
+extern fn "rename" umay_c_rename(from: *const u8, to: *const u8) -> i32
+extern fn "mkdir" umay_c_mkdir(path: *const u8, mode: i32) -> i32
+
+// Darwin's errno accessor.
+extern fn __error() -> *mut i32
+
+// --- constants --------------------------------------------------------------
+
+// The `open` flags, as Darwin numbers them (from `<sys/fcntl.h>`).
+//
+// Note the ordering against Linux: `O_CREAT` is 0x200 here and 0x40 there,
+// while `O_TRUNC` is 0x400 here and 0x200 there -- the two swap places. That is
+// not a detail that can be shared between the two tables.
+const O_RDONLY: i32 = 0x0000
+const O_WRONLY: i32 = 0x0001
+const O_RDWR: i32 = 0x0002
+const O_CREAT: i32 = 0x0200
+const O_TRUNC: i32 = 0x0400
+const O_APPEND: i32 = 0x0008
+
+// --- accessors to the portable layer ---------------------------------------
+
+pub fn umay_platform_errno() -> i32 {
+    unsafe {
+        return *__error()
+    }
+}
+
+pub fn umay_platform_fork() -> i32 {
+    return umay_c_fork()
+}
+
+// The `open` flags and the create mode, as one target's own answer.
+//
+// POSIX takes a three-argument `open(path, flags, mode)` and the mode is a
+// permission mask in octal -- 420 is 0644, world-readable and owner-writable.
+// Windows' `_open` takes the same shape but ignores the mode for anything but
+// `_O_CREAT`, so it is passed as zero there.
+pub fn umay_platform_open_flags(flags: i32) -> i32 {
+    return flags
+}
+
+pub fn umay_platform_open_mode() -> i32 {
+    return 420
+}
+
+// True when this platform can create processes by copying this one.
+pub fn umay_platform_has_fork() -> bool {
+    return true
+}
+
+// Runs `work(value)` in a child process and returns what it answered.
+//
+// Only reached when `has_fork` is true: the portable runtime chooses between
+// this and a thread. The implementation lives in the portable body, which is
+// where the pipe hand-off is described.
+pub fn umay_platform_thread_spawn(work: *const u8, value: usize) -> usize {
+    return umay_thread_spawn(work, value)
+}
+
+// Renaming and directory creation.
+//
+// POSIX `rename` already replaces an existing target, which is why Linux and
+// macOS need no special case here; Windows does, and says so in its own layer.
+pub fn umay_platform_rename(from: *const u8, to: *const u8) -> i32 {
+    return umay_c_rename(from, to)
+}
+
+pub fn umay_platform_mkdir(path: *const u8) -> i32 {
+    return umay_c_mkdir(path, 493)
+}

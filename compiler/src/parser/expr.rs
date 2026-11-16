@@ -141,42 +141,62 @@ impl Parser {
         lhs
     }
 
-    fn parse_unary(&mut self) -> Expr {
+    /// A prefix operator's operand: one operand, with no `as` after it.
+    ///
+    /// `as` binds looser than every prefix operator, so `&v as *const T` is
+    /// `(&v) as *const T`, and `*p as usize` is `(*p) as usize`. Taking a whole
+    /// unary expression as the operand would read both the other way round -- the
+    /// cast would then apply to the thing being pointed at, which is a different
+    /// type and, for `&`, a different address.
+    fn parse_prefix_operand(&mut self) -> Expr {
         let start = self.span();
         match self.kind().clone() {
             TokenKind::Minus => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.parse_prefix_operand();
                 let span = start.to(operand.span);
                 Expr { kind: ExprKind::Unary { op: UnaryOp::Neg, operand: Box::new(operand) }, span }
             }
             TokenKind::Bang => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.parse_prefix_operand();
                 let span = start.to(operand.span);
                 Expr { kind: ExprKind::Unary { op: UnaryOp::Not, operand: Box::new(operand) }, span }
             }
             TokenKind::Star => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.parse_prefix_operand();
                 let span = start.to(operand.span);
                 Expr { kind: ExprKind::Unary { op: UnaryOp::Deref, operand: Box::new(operand) }, span }
             }
             TokenKind::Amp => {
                 self.advance();
                 let mutable = self.eat_keyword(Keyword::Mut);
-                let operand = self.parse_unary();
+                let operand = self.parse_prefix_operand();
                 let span = start.to(operand.span);
                 Expr { kind: ExprKind::Ref { mutable, operand: Box::new(operand) }, span }
             }
             TokenKind::Keyword(Keyword::Move) => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.parse_prefix_operand();
                 let span = start.to(operand.span);
                 Expr { kind: ExprKind::Move(Box::new(operand)), span }
             }
             _ => self.parse_postfix(),
         }
+    }
+
+    /// A unary expression, then any number of `as` casts.
+    fn parse_unary(&mut self) -> Expr {
+        let mut expr = self.parse_prefix_operand();
+        while self.at(&TokenKind::Keyword(Keyword::As)) {
+            let start = expr.span;
+            self.advance();
+            let ty = self.parse_type();
+            let span = start.to(ty.span());
+            expr = Expr { kind: ExprKind::Cast { expr: Box::new(expr), ty }, span };
+        }
+        expr
     }
 
     fn parse_postfix(&mut self) -> Expr {
@@ -277,13 +297,6 @@ impl Parser {
                     let start = expr.span;
                     let end = self.advance().span;
                     expr = Expr { kind: ExprKind::Try(Box::new(expr)), span: start.to(end) };
-                }
-                TokenKind::Keyword(Keyword::As) => {
-                    let start = expr.span;
-                    self.advance();
-                    let ty = self.parse_type();
-                    let span = start.to(ty.span());
-                    expr = Expr { kind: ExprKind::Cast { expr: Box::new(expr), ty }, span };
                 }
                 _ => break,
             }

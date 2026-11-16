@@ -1,0 +1,12 @@
+// Threads on a POSIX system: bindings only.
+//
+// `stdlib/thread.um` keeps the handle type and the join bookkeeping; this file
+// names the two POSIX calls that do the work.
+
+extern fn "pthread_create" umay_c_pthread_create(
+    thread: *mut u8,
+    attr: *const u8,
+    start: *const u8,
+    arg: *mut u8,
+) -> i32
+extern fn "pthread_join" umay_c_pthread_join(thread: *mut u8, result: *mut *mut u8) -> i32

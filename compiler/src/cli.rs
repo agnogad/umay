@@ -98,6 +98,9 @@ OPTIONS:
     --color auto|always|never
     --explain              Include the full explanation under each diagnostic
     -O0 .. -O3             Optimisation level for build, run and asm (-O = -O2)
+    --target <triple>      Build for another system (x86_64-unknown-linux-gnu,
+                           x86_64-apple-darwin, x86_64-pc-windows-gnu)
+    --emit-object-only     Also leave the object in dist/ (build, asm)
 
 EXIT CODES:
     0 success   1 compile error   2 usage error   3 I/O error
@@ -112,6 +115,14 @@ struct Options {
     color: Option<bool>,
     /// Optimisation level for `mir` and (later) `build`.
     opt_level: umayc::opt::OptLevel,
+    /// The system to emit code for. `None` means the host's own.
+    target: Option<umayc::target::Target>,
+    /// Stop after assembling, leaving the objects and linking nothing.
+    ///
+    /// A caller who only wants the object -- perhaps to link it elsewhere, or to
+    /// inspect it -- asks for this instead of `build`, so that producing an object
+    /// is a success and not the half of a build that could not finish.
+    emit_object_only: bool,
     files: Vec<String>,
 }
 
@@ -122,8 +133,17 @@ impl Default for Options {
             explain: false,
             color: None,
             opt_level: umayc::opt::OptLevel::O0,
+            target: None,
+            emit_object_only: false,
             files: Vec::new(),
         }
+    }
+}
+
+impl Options {
+    /// The target to build for: the one named, or the host's own.
+    fn target(&self) -> umayc::target::Target {
+        self.target.unwrap_or_else(umayc::target::Target::host)
     }
 }
 
@@ -150,6 +170,24 @@ fn parse_options(args: &[String]) -> Result<Options, (u8, String)> {
                     }
                 }
             }
+            // `--target <triple>`: compile for a named system. A triple the
+            // backend cannot produce is refused here, before any work is done,
+            // rather than at the linker.
+            "--target" => {
+                i += 1;
+                let name = match args.get(i) {
+                    Some(n) => n,
+                    None => return Err((exit::USAGE, "`--target` requires a triple".into())),
+                };
+                match umayc::target::Target::parse(name) {
+                    Ok(t) => opts.target = Some(t),
+                    Err(e) => return Err((exit::USAGE, e.to_string())),
+                }
+            }
+            // `--emit-object-only`: assemble and stop. Nothing is linked, so a
+            // target this host cannot link for is a success rather than a
+            // partial build.
+            "--emit-object-only" => opts.emit_object_only = true,
             "--format" => {
                 i += 1;
                 match args.get(i).map(String::as_str) {
@@ -906,6 +944,13 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
             Err(code) => return code,
         },
     };
+    if run && opts.emit_object_only {
+        // Running needs an executable, and `--emit-object-only` deliberately
+        // produces none. Refusing here beats a build that says it succeeded and a
+        // `dist` with nothing to run.
+        eprintln!("umay: `--emit-object-only` cannot be combined with `run`");
+        return exit::USAGE;
+    }
     let file = &file;
     if opts.files.len() > 1 {
         eprintln!("umay: `{}` takes at most one source file", if run { "run" } else { "build" });
@@ -953,21 +998,28 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         .iter()
         .map(|(name, text)| (name.as_str(), text.as_str()))
         .collect();
-    let program_key = umayc::build::CacheKey::derive(
+    // Everything below is per-target: the symbol spelling, the object file, the
+    // linker's flags and the runtime's platform layer. Resolving it once here
+    // means no later step can silently use the host's answer instead of the one
+    // that was asked for.
+    let target = opts.target();
+    let program_key = umayc::build::CacheKey::derive_for(
         umayc::build::Artifact::ProgramAsm,
         level,
         text.as_bytes(),
         &extra,
+        target,
     );
 
     let cached_assembly = cache.read(&program_key, umayc::build::Artifact::ProgramAsm);
     let assembly = match cached_assembly {
         Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         None => {
-            let output = match umayc::codegen_source(
+            let output = match umayc::codegen_source_for(
                 path.to_string_lossy().as_ref(),
                 &text,
                 opts.opt_level,
+                target,
             ) {
                 Ok(o) => o,
                 Err((diags, map)) => {
@@ -1013,7 +1065,7 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         return exit::IO_ERROR;
     }
     let asm_path = dist.join(format!("{stem}.s"));
-    let exe_path = dist.join(stem);
+    let exe_path = dist.join(target.executable_name(stem));
 
     if let Err(e) = std::fs::write(&asm_path, &assembly) {
         eprintln!("umay: cannot write `{}`: {e}", asm_path.display());
@@ -1023,28 +1075,34 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     // Assemble. The system assembler turns the text into an object file; the
     // backend stops at text deliberately, so that it never has to encode a
     // relocation itself.
-    let obj_path = dist.join(format!("{stem}.o"));
+    let obj_path = dist.join(format!("{stem}{}", target.object_extension));
 
     // The runtime is compiled the same way as the program: it is ordinary UMAY
     // source, so there is no separate prebuilt library to keep in step with the
     // compiler.
     let runtime_asm = dist.join("umay_runtime.s");
-    let runtime_obj = dist.join("umay_runtime.o");
+    let runtime_obj = dist.join(format!("umay_runtime{}", target.object_extension));
+    // The runtime's portable body plus this target's platform layer. Every
+    // system-specific line of the runtime -- the C symbols, the constant table,
+    // whether `fork` exists -- comes from here.
+    let runtime_source = umayc::runtime_source_for(target);
     // The runtime is the same source on every build, so its assembly is a cache
     // hit after the first build of a given compiler version and level.
-    let runtime_key = umayc::build::CacheKey::derive(
+    let runtime_key = umayc::build::CacheKey::derive_for(
         umayc::build::Artifact::RuntimeAsm,
         level,
-        umayc::RUNTIME_SOURCE.as_bytes(),
+        runtime_source.as_bytes(),
         &[],
+        target,
     );
     let runtime_assembly = match cache.read(&runtime_key, umayc::build::Artifact::RuntimeAsm) {
         Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         None => {
-            match umayc::codegen_source_without_prelude(
+            match umayc::codegen_source_without_prelude_for(
                 "umay_runtime",
-                umayc::RUNTIME_SOURCE,
+                &runtime_source,
                 opts.opt_level,
+                target,
             ) {
                 Ok(o) => {
                     let _ = cache.write(
@@ -1077,8 +1135,8 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     // source could then differ in what they printed.
     let (program_result, runtime_result) =
         std::thread::scope(|scope| {
-            let program = scope.spawn(|| assemble(&asm_path, &obj_path));
-            let runtime = scope.spawn(|| assemble(&runtime_asm, &runtime_obj));
+            let program = scope.spawn(|| assemble(&asm_path, &obj_path, target));
+            let runtime = scope.spawn(|| assemble(&runtime_asm, &runtime_obj, target));
             (
                 program.join().unwrap_or(Err(exit::CODEGEN_ERROR)),
                 runtime.join().unwrap_or(Err(exit::CODEGEN_ERROR)),
@@ -1091,16 +1149,37 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         return code;
     }
 
+    // `--emit-object-only` stops here. The objects are the whole request, so they
+    // are reported and nothing else is attempted: a target this host cannot link
+    // for is not an error when no link was asked for.
+    if opts.emit_object_only {
+        println!("built {}", obj_path.display());
+        println!("built {}", runtime_obj.display());
+        println!(
+            "  link it with: {}",
+            target.link_command(
+                &obj_path,
+                &runtime_obj,
+                &exe_path.display().to_string()
+            )
+        );
+        if let Some(caveat) = target.link_command_caveat() {
+            println!("  ({caveat})");
+        }
+        return exit::OK;
+    }
+
     // The linked executable is cached too, so an unchanged rebuild starts neither
     // `as` nor `cc`. The key is the program assembly plus the runtime assembly:
     // those two texts are everything that decides the objects, and the compiler
     // version is already part of the key, so a change to the runtime or the
     // backend cannot reuse a stale binary.
-    let exe_key = umayc::build::CacheKey::derive(
+    let exe_key = umayc::build::CacheKey::derive_for(
         umayc::build::Artifact::LinkedExe,
         level,
         assembly.as_bytes(),
         &[("runtime", &runtime_assembly)],
+        target,
     );
     let mut linked_from_cache = false;
     match cache.read(&exe_key, umayc::build::Artifact::LinkedExe) {
@@ -1115,15 +1194,26 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
     }
 
     if !linked_from_cache {
+        // A system cannot link for another system: that needs the other's C
+        // library and startup code. Assembling still worked, so the object is
+        // left where the user can find it and the message says so, rather than
+        // handing Mach-O to the GNU linker and printing its complaint about file
+        // formats.
+        if let Some(reason) = target.link_unavailable(&obj_path) {
+            eprintln!("umay: {reason}");
+            return exit::CODEGEN_ERROR;
+        }
         // Link with the C compiler driver, which knows where the C library and
         // crt objects live. Nothing else from C is used.
-        let status = std::process::Command::new("cc")
-            .arg("-o")
-            .arg(&exe_path)
-            .arg(&obj_path)
-            .arg(&runtime_obj)
-            .arg("-no-pie")
-            .status();
+        let mut link = std::process::Command::new(target.linker);
+        link.arg("-o").arg(&exe_path).arg(&obj_path).arg(&runtime_obj);
+        // The driver's own flags: `-no-pie` on Linux ELF, `-mconsole` on
+        // Windows PE, nothing on Mach-O. Passing the wrong one is a hard
+        // linker error rather than a warning.
+        for flag in target.linker_flags() {
+            link.arg(flag);
+        }
+        let status = link.status();
         match status {
             Ok(s) if s.success() => {}
             Ok(s) => {
@@ -1188,10 +1278,16 @@ fn cmd_asm(args: &[String]) -> u8 {
             return exit::IO_ERROR;
         }
     };
-    match umayc::codegen_source(file.as_str(), &text, opts.opt_level) {
+    match umayc::codegen_source_for(file.as_str(), &text, opts.opt_level, opts.target()) {
         Ok(o) => {
             print!("{}", o.assembly);
-            exit::OK
+            if !opts.emit_object_only {
+                return exit::OK;
+            }
+            // The assembly is already printed -- that is what `asm` is for. With
+            // `--emit-object-only` it also leaves the object beside it, so seeing
+            // the text and keeping the object are one command rather than two.
+            write_object(&o.assembly, file, opts.target())
         }
         Err((diags, map)) => {
             let rendered = umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
@@ -1224,13 +1320,50 @@ fn write_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Prints nothing on success and returns the message to show on failure, rather
 /// than printing it: two of these run at once, and interleaved output would make
 /// the same build say different things on different runs.
-fn assemble(source: &Path, object: &Path) -> Result<(), u8> {
-    let status = std::process::Command::new("as")
-        .arg("--64")
-        .arg("-o")
-        .arg(object)
-        .arg(source)
-        .status();
+/// Writes `assembly` to `dist/<stem>.s` and assembles it into `dist/<stem>.o`.
+///
+/// `asm --emit-object-only` needs the object without the rest of a build: no
+/// runtime, no link. It is the same three steps `build` takes -- make `dist`, write
+/// the text, run the assembler -- so it uses the same ones rather than repeating
+/// them.
+fn write_object(assembly: &str, source: &str, target: umayc::target::Target) -> u8 {
+    let stem = Path::new(source)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "out".to_string());
+
+    let dist = Path::new("dist");
+    if let Err(e) = std::fs::create_dir_all(dist) {
+        eprintln!("umay: cannot create `dist/`: {e}");
+        return exit::IO_ERROR;
+    }
+    let asm_path = dist.join(format!("{stem}.s"));
+    let obj_path = dist.join(format!("{stem}{}", target.object_extension));
+    if let Err(e) = std::fs::write(&asm_path, assembly) {
+        eprintln!("umay: cannot write `{}`: {e}", asm_path.display());
+        return exit::IO_ERROR;
+    }
+    if let Err(code) = assemble(&asm_path, &obj_path, target) {
+        return code;
+    }
+    println!("built {}", obj_path.display());
+    // No runtime object here -- `asm` compiles one file -- so the command names
+    // the object it made and leaves the runtime to the reader's own build.
+    if let Some(caveat) = target.link_command_caveat() {
+        println!("  (linking {caveat})");
+    }
+    exit::OK
+}
+
+fn assemble(source: &Path, object: &Path, target: umayc::target::Target) -> Result<(), u8> {
+    let mut command = std::process::Command::new(target.assembler);
+    // `--64` is a GNU `as` option that selects the target of an ELF object.
+    // Mach-O's `as` and Windows' do not take it and infer the architecture from
+    // the input, so the flag is a property of the target rather than a constant.
+    for arg in target.assembler_args {
+        command.arg(arg);
+    }
+    let status = command.arg("-o").arg(object).arg(source).status();
     match status {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => {
@@ -1241,7 +1374,7 @@ fn assemble(source: &Path, object: &Path) -> Result<(), u8> {
             Err(exit::CODEGEN_ERROR)
         }
         Err(e) => {
-            eprintln!("umay: cannot run `as`: {e}");
+            eprintln!("umay: cannot run `{}`: {e}", target.assembler);
             Err(exit::IO_ERROR)
         }
     }

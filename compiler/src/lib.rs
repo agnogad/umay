@@ -53,6 +53,7 @@ pub mod prelude;
 pub mod sema;
 pub mod sha256;
 pub mod source;
+pub mod target;
 pub mod token;
 pub mod types;
 pub mod upm;
@@ -197,7 +198,11 @@ pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
     let (program, module_diagnostics) =
         modules::load_from_entry_with_deps(out.program, std::path::Path::new(name), &mut map, &deps);
     append_all(&mut diagnostics, &module_diagnostics);
-    let (program, prelude_diagnostics) = prelude::with_prelude(program, &mut map);
+    // Analysis has no target: it is the same program on every system, and the
+    // prelude's platform bindings only matter for what gets emitted. The host's
+    // are used so the names still resolve.
+    let (program, prelude_diagnostics) =
+        prelude::with_prelude(program, &mut map, crate::target::Target::host());
     append_all(&mut diagnostics, &prelude_diagnostics);
 
     let mut sema = sema::analyze(&program, &map);
@@ -264,7 +269,8 @@ pub fn lower_to_mir_opt(
     if diagnostics.has_errors() {
         return Err((diagnostics, map));
     }
-    let (program, prelude_diagnostics) = prelude::with_prelude(out.program, &mut map);
+    let (program, prelude_diagnostics) =
+        prelude::with_prelude(out.program, &mut map, crate::target::Target::host());
     append_all(&mut diagnostics, &prelude_diagnostics);
     let mut sema = sema::analyze(&program, &map);
     for d in sema.diagnostics.items() {
@@ -350,7 +356,56 @@ pub fn diagnostic_with_context(code: &'static str, span: source::Span, message: 
 /// It is embedded in the binary rather than read from disk so that an installed
 /// compiler cannot be broken by a missing or edited runtime file: the runtime and
 /// the compiler that accepts it always ship together.
+///
+/// Only the portable body is here. What actually differs between systems -- the
+/// C symbols, the numeric constants, whether `fork` exists -- is in the platform
+/// layers below, and [`target::Target::runtime_platform_source`] concatenates the
+/// right one after this text.
 pub const RUNTIME_SOURCE: &str = include_str!("../../runtime/runtime.um");
+
+/// The Linux layer of the runtime: glibc, POSIX names, `fork`.
+pub const RUNTIME_PLATFORM_LINUX: &str = include_str!("../../runtime/platform/linux.um");
+
+/// The macOS layer of the runtime: libSystem, `__error`, Darwin's `O_*` table.
+pub const RUNTIME_PLATFORM_MACOS: &str = include_str!("../../runtime/platform/macos.um");
+
+/// The Windows layer of the runtime: the MSVC CRT, and threads where `fork`
+/// would be.
+/// The standard library's POSIX bindings, shared by Linux and macOS.
+pub const STDLIB_PLATFORM_POSIX: &str = concat!(
+    include_str!("../../stdlib/platform/net_posix.um"),
+    "\n",
+    include_str!("../../stdlib/platform/thread_posix.um"),
+);
+
+/// The standard library's Windows bindings.
+pub const STDLIB_PLATFORM_WINDOWS: &str = concat!(
+    include_str!("../../stdlib/platform/net_windows.um"),
+    "\n",
+    include_str!("../../stdlib/platform/thread_windows.um"),
+);
+
+pub const RUNTIME_PLATFORM_WINDOWS: &str = include_str!("../../runtime/platform/windows.um");
+
+/// The whole runtime for one target: the portable body, then its platform
+/// layer.
+///
+/// The order matters. The portable body calls `umay_platform_*` functions that
+/// the layer defines, and the layer calls `umay_alloc`/`umay_read_*` that the
+/// body defines. UMAY resolves items across a whole compilation unit rather
+/// than top-down, so a single file in this order satisfies both directions,
+/// and the concatenation is what makes the runtime one unit instead of two
+/// mutually dependent ones.
+pub fn runtime_source_for(target: target::Target) -> String {
+    let mut out = String::with_capacity(RUNTIME_SOURCE.len() + 4096);
+    out.push_str(RUNTIME_SOURCE);
+    out.push_str("\n\n// ---------------------------------------------------------------------------\n");
+    out.push_str("// Platform layer: ");
+    out.push_str(target.triple);
+    out.push_str("\n// ---------------------------------------------------------------------------\n\n");
+    out.push_str(target.runtime_platform_source());
+    out
+}
 
 /// Everything needed to generate code, or the diagnostics that prevent it.
 pub struct CodegenOutput {
@@ -374,7 +429,21 @@ pub fn codegen_source(
     text: &str,
     level: opt::OptLevel,
 ) -> Result<CodegenOutput, (Diagnostics, SourceMap)> {
-    codegen_source_impl(name, text, level, true)
+    codegen_source_for(name, text, level, target::Target::host())
+}
+
+/// Compiles a source text for one specific target.
+///
+/// This is what a cross build uses: the frontend and checker are identical, and
+/// only the symbol spelling, the object dressing and the calling convention
+/// change.
+pub fn codegen_source_for(
+    name: &str,
+    text: &str,
+    level: opt::OptLevel,
+    target: target::Target,
+) -> Result<CodegenOutput, (Diagnostics, SourceMap)> {
+    codegen_source_impl(name, text, level, true, target)
 }
 
 /// Compiles a source text without the prelude.
@@ -388,7 +457,17 @@ pub fn codegen_source_without_prelude(
     text: &str,
     level: opt::OptLevel,
 ) -> Result<CodegenOutput, (Diagnostics, SourceMap)> {
-    codegen_source_impl(name, text, level, false)
+    codegen_source_without_prelude_for(name, text, level, target::Target::host())
+}
+
+/// Compiles a prelude-free source for one target: the runtime's own path.
+pub fn codegen_source_without_prelude_for(
+    name: &str,
+    text: &str,
+    level: opt::OptLevel,
+    target: target::Target,
+) -> Result<CodegenOutput, (Diagnostics, SourceMap)> {
+    codegen_source_impl(name, text, level, false, target)
 }
 
 /// Drops warnings that point into the prelude.
@@ -415,6 +494,7 @@ fn codegen_source_impl(
     text: &str,
     level: opt::OptLevel,
     with_prelude: bool,
+    target: target::Target,
 ) -> Result<CodegenOutput, (Diagnostics, SourceMap)> {
     let mut map = SourceMap::new();
     let id = map.add(name, text);
@@ -435,7 +515,7 @@ fn codegen_source_impl(
             &deps,
         );
         append_all(&mut diagnostics, &module_diagnostics);
-        let (program, prelude_diagnostics) = prelude::with_prelude(program, &mut map);
+        let (program, prelude_diagnostics) = prelude::with_prelude(program, &mut map, target);
         append_all(&mut diagnostics, &prelude_diagnostics);
         program
     } else {
@@ -467,7 +547,7 @@ fn codegen_source_impl(
 
     opt::optimize(&mut lowered.program, &sema.types, level);
 
-    match codegen::generate(&lowered.program, &mut sema.types, &sema.hir) {
+    match codegen::generate(&lowered.program, &mut sema.types, &sema.hir, target, with_prelude) {
         Ok(assembly) => Ok(CodegenOutput {
             assembly,
             program: lowered.program,

@@ -740,6 +740,67 @@ re-run, with the ratio to gcc in `docs/measurements.md` as the score.
 
 ---
 
+## Phase 10 — Multiple systems · **in progress**
+
+One frontend, three backends' worth of difference in three quarters that do not
+touch the frontend at all.
+
+### The target layer
+
+- [x] `compiler/src/target.rs`: `Target` carries the triple, the object format,
+      the ABI, the assembler and linker with their flags, and the runtime's
+      platform layer. `--target` selects one; the host's own is the default.
+- [x] The target is part of every cache key. An ELF assembly and a Mach-O one
+      are different bytes from the same source, and sharing an entry between
+      them would serve a Mach-O object to an ELF link.
+- [x] An architecture with no backend is refused before any work is done,
+      because compiling an ARM triple with an x86_64 backend produces a binary
+      the loader rejects and an error message about the loader.
+
+### What each system changes
+
+- [x] Symbol spelling: Mach-O and COFF prefix external names with `_`.
+- [x] Object dressing: Mach-O's `__TEXT,__const` section, and the ELF-only
+      `.type`/`.size`/`.note.GNU-stack` metadata omitted where it is rejected.
+- [x] The runtime split into a portable body (`runtime/runtime.um`) and a per
+      system layer (`runtime/platform/{linux,macos,windows}.um`) holding the C
+      symbols, the constant tables and the `errno` accessor.
+- [x] macOS: `__error` instead of `__errno_location`, Darwin's own `O_*`
+      numbering (where `O_CREAT` and `O_TRUNC` trade places against Linux), the
+      Mach-O assembler reached through `clang`.
+
+### Windows
+
+- [x] The Microsoft x64 calling convention as a second `Abi`: four argument
+      registers in a different order, 32 bytes of shadow space reserved by every
+      caller, aggregates returned through a hidden pointer at any size, and
+      `%rsi`/`%rdi` preserved across calls.
+- [x] `regalloc` takes the callee-saved and caller-saved sets from the ABI, so a
+      live range that spans a call gives up the right registers on each.
+- [x] The CRT bindings: `_write`/`_read`/`_open`/`_close`/`_unlink`/`_mkdir`/
+      `_errno`/`_exit`/`_lseeki64`, with the `int`/`unsigned` widths adapted to
+      the portable `size_t`/`ssize_t` in one place rather than at every call.
+- [x] No `fork`: the checked fan-out uses `CreateThread`, and `WaitForSingleObject`
+      plus `GetExitCodeThread` where Linux uses a pipe and `waitpid`. The
+      language's `Send` guarantee is unchanged, because the front end settled it
+      before the call arrived.
+- [x] Binary mode forced on every descriptor, so a file written byte by byte is
+      not given a silent `\n` to `\r\n` translation.
+
+### Verified, and not yet verified
+
+- [x] Linux is unchanged: the 663-test suite passes, and the Linux assembly is
+      asserted to carry no symbol prefix and to keep its ELF metadata.
+- [x] macOS and Windows assembly is accepted by a real assembler for its object
+      format, and the produced object is a Mach-O 64 / x86-64 COFF file with
+      `_main` defined. Symmetry with `llvm-nm`.
+- [ ] **Not verified: a linked, running macOS or Windows binary.** A Linux host
+      has no Apple SDK and no MinGW-w64 runtime, so it assembles and links-fails.
+      Running the test corpus on those two systems is the next step, and until
+      it happens their status is "emits the right object", not "works".
+
+---
+
 ## Self-hosting (after Phase 9)
 
 Only once the specification, compiler architecture and standard library are

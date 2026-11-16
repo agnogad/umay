@@ -431,6 +431,18 @@ impl FnChecker<'_, '_> {
             // reason to need it. No `unsafe` here, because the cast itself cannot
             // break any rule the pointer already had.
             || (is_raw_ptr(&self.cx.cx, from_concrete) && is_raw_ptr(&self.cx.cx, to))
+            // A reference may be viewed as the raw pointer it already is. The
+            // two have the same representation and the same address; the cast
+            // sheds the borrow checker's promise, which is what a value handed to
+            // C or to another thread needs. Nothing about the pointer's validity
+            // changes, but the promise does not survive the cast, so `unsafe`.
+            //
+            // This is also the only way to take the address of a value whose type
+            // is a parameter: `&value as *const A` cannot be spelled when `A` is
+            // generic, because the cast must name a type it has not seen.
+            || (is_ref(&self.cx.cx, from_concrete)
+                && is_raw_ptr(&self.cx.cx, to)
+                && self.unsafe_depth > 0)
             // An array may be viewed as a pointer to its first element, which is
             // how a static table of routes or a byte buffer reaches an API that
             // takes a pointer.
@@ -442,6 +454,17 @@ impl FnChecker<'_, '_> {
                 && matches!(self.cx.cx.kind(from_concrete), TyKind::FnPtr { .. })
                 && self.unsafe_depth > 0);
         if !allowed {
+            if std::env::var("UMAY_CAST_DEBUG").is_ok() {
+                eprintln!(
+                    "CAST DEBUG: from={:?} from_concrete={:?} to={:?} is_ref(from)={} is_ref(fc)={} unsafed={}",
+                    self.cx.cx.kind(from),
+                    self.cx.cx.kind(from_concrete),
+                    self.cx.cx.kind(to),
+                    is_ref(&self.cx.cx, from),
+                    is_ref(&self.cx.cx, from_concrete),
+                    self.unsafe_depth
+                );
+            }
             let f = self.cx.ty_name(from_concrete);
             let t = self.cx.ty_name(to);
             let extra = if matches!(self.cx.cx.kind(to), TyKind::Char) {
@@ -520,6 +543,11 @@ fn is_buffer_ref(types: &crate::types::TyCtxt, ty: TyId) -> bool {
         TyKind::Ref(inner) | TyKind::RefMut(inner) => matches!(types.kind(*inner), TyKind::Array { .. }),
         _ => false,
     }
+}
+
+/// Whether `ty` is a shared or mutable reference.
+fn is_ref(types: &crate::types::TyCtxt, ty: TyId) -> bool {
+    matches!(types.kind(ty), TyKind::Ref(_) | TyKind::RefMut(_))
 }
 
 /// True for `*const u8` and `*mut u8`.

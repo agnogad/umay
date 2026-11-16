@@ -48,7 +48,8 @@ output-dir = "dist"          # default: dist, MUST NOT be named "target"
 opt-level = 0                # 0 | 1 | 2 | 3
 debug = true                 # emit debug info for opt-level 0/1
 link = "dynamic"             # dynamic | static
-target = "x86_64-linux"      # target triple
+target = "x86_64-linux"      # target triple: x86_64-linux, x86_64-macos
+                             # or x86_64-windows (see compiler/src/target.rs)
 
 [dependencies]
 # name = "1.0.0" or { path = "../lib", version = "1.0.0" }

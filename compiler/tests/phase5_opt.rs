@@ -282,3 +282,82 @@ fn stats_report_that_work_was_done() {
     assert!(stats.branches_folded > 0, "constant folding should have run: {stats:?}");
     assert!(stats.statements_removed > 0, "DCE should have run: {stats:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Comparison operands keep their own type
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_comparison_operand_keeps_its_own_type() {
+    // A comparison produces `bool`, and its operands are *not* `bool`. Folding
+    // used to stamp the destination's type onto them, which retyped `1000` as a
+    // bool: the backend then emitted `movb $1000, %cl`, truncating the bound to
+    // 232, so `i < 1000` ran 232 iterations and the program printed a wrong
+    // answer at every level above `-O0`. The value stayed `1000` in the MIR text;
+    // the *type* was what went wrong, so that is what this asserts.
+    let out = body_of(
+        &mir(
+            "fn f() -> i64 { let mut i = 0\n while i < 1000 { i = i + 1 }\n i }",
+            OptLevel::O2,
+        ),
+        "f",
+    );
+    assert!(
+        out.contains("1000"),
+        "the comparison bound must survive optimisation as 1000:\n{out}"
+    );
+    // A comparison operand carrying the bool type is the corruption: `ibool`
+    // is what the MIR printer writes for an integer literal typed `bool`.
+    assert!(
+        !out.contains("1000ibool"),
+        "a comparison operand must not be retyped as bool:\n{out}"
+    );
+}
+
+#[test]
+fn a_write_through_a_pointer_keeps_the_pointer_alive() {
+    // `*p = 5` lowers to `_0.(deref) = const 5`. The deref reads the pointer
+    // `_0` to find its target, but the use-collector only looked at `Index`
+    // projections, so the statement appeared to read nothing. Dead-code
+    // elimination then judged `_0` dead and deleted the assignments that
+    // produced it -- the code stored through an uninitialised register, and
+    // `alloc`/`dealloc` programs died with "double free or corruption".
+    let out = mir(
+        "fn f(p: *mut i64) { unsafe { *p = 5 } }",
+        OptLevel::O1,
+    );
+    let body = body_of(&out, "f");
+    assert!(
+        body.contains("deref"),
+        "the store through the pointer must survive:\n{body}"
+    );
+    // The parameter is the pointer, so nothing should have been deleted into a
+    // store through a value that is never defined.
+    assert!(
+        out.contains("_0"),
+        "the pointer local must remain:\n{out}"
+    );
+}
+
+#[test]
+fn a_store_through_an_allocated_pointer_keeps_its_definition() {
+    let out = mir(
+        "fn f() -> i32 { let p = alloc(8) as *mut i64\n unsafe { *p = 5 }\n return 0 }",
+        OptLevel::O1,
+    );
+    let body = body_of(&out, "f");
+    assert!(body.contains("deref"), "the store must survive:\n{body}");
+    // The pointer the store dereferences must still be *defined* in this body.
+    // Optimisation removed `_1 = copy _0 as *mut i64` and `_0 = copy _1`, leaving
+    // `_0.(deref) = 5` to store through a register that was never written: the
+    // program built, ran, and segfaulted. Reading an undefined local is never a
+    // valid optimisation result.
+    let defined_before_deref = body
+        .lines()
+        .take_while(|l| !l.contains("deref"))
+        .any(|l| l.trim_start().starts_with("_0 ="));
+    assert!(
+        defined_before_deref,
+        "the dereferenced pointer must be defined before the store:\n{body}"
+    );
+}

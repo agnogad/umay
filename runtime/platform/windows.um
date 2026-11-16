@@ -1,0 +1,278 @@
+// The runtime's operating-system layer: Windows (x86_64, MSVC-compatible CRT).
+//
+// Windows is the target that does not merely rename things. Three of the
+// primitives the portable runtime uses have no direct equivalent:
+//
+//   * **`write` / `read` / `unlink` / `close`.** These are POSIX names; the
+//     MSVC CRT spells them `_write`, `_read`, `_unlink`, `_close`, and provides
+//     them in `<io.h>`. The declarations below use the underscored names.
+//   * **`open`.** `_open` takes its permission flags in `_S_IREAD`/`_S_IWRITE`
+//     form, and its `_O_*` flags are numbered independently. The table below is
+//     from `<fcntl.h>` for MSVC.
+//   * **`fork`.** There is none, and there cannot be: Windows does not copy an
+//     address space. The portable runtime's fan-out is therefore implemented
+//     with a real thread (`CreateThread`) here rather than a child process. The
+//     semantics the language guarantees are unchanged -- the value is moved in,
+//     one answer comes back, nothing is shared -- because `Send` was already
+//     checked by the front end before the call arrives.
+//
+// `errno` likewise has no accessor function: on the MSVC CRT it is a macro over
+// `_errno()`, which returns a pointer to the thread's errno value.
+//
+// The leading underscore the code generator adds to every symbol is separate
+// from the underscores in these C names: a `_write` C symbol becomes `__write`
+// in the object file, which is correct and is what `cc` expects.
+
+// --- C bindings -------------------------------------------------------------
+
+extern fn "malloc" umay_c_malloc(size: usize) -> *mut u8
+extern fn "free" umay_c_free(ptr: *mut u8) -> ()
+
+// The CRT's I/O. Declared with their MSVC names.
+// The CRT's `_write`/`_read` take an `unsigned int` count and return an `int`,
+// neither of which is the portable `size_t`/`ssize_t`. They are declared at the
+// CRT's own width and the adapters below widen and narrow, so the portable body
+// can keep one signature on every system.
+//
+// The return needs the adapter rather than a cast at the call site: `_write`
+// writes a 32-bit `eax` and leaves the upper half of `rax` undefined, so reading
+// it as a 64-bit value would produce a size with garbage in the top half.
+extern fn "_write" umay_crt_write(fd: i32, buf: *const u8, count: u32) -> i32
+extern fn "_read" umay_crt_read(fd: i32, buf: *mut u8, count: u32) -> i32
+extern fn "_open" umay_c_open(path: *const u8, flags: i32, mode: i32) -> i32
+extern fn "_close" umay_c_close(fd: i32) -> i32
+extern fn "_lseeki64" umay_c_lseek(fd: i32, offset: i64, whence: i32) -> i64
+extern fn "_unlink" umay_c_unlink(path: *const u8) -> i32
+
+// `_exit` ends the process without running atexit handlers, which is what the
+// runtime wants: the process is being ended, not unwound.
+extern fn "_exit" umay_c_exit(code: i32) -> ()
+
+// `getenv` is in the CRT under the same name.
+extern fn "getenv" umay_c_getenv(name: *const u8) -> *const u8
+
+// The CRT's errno accessor.
+extern fn "_errno" umay_c_errno() -> *mut i32
+
+// Windows has no `mkdir(path, mode)`: the CRT's `_mkdir` takes one argument.
+extern fn "_mkdir" umay_c_mkdir(path: *const u8) -> i32
+// `rename` exists, but fails when the target exists, so `MoveFileExA` with
+// `MOVEFILE_REPLACE_EXISTING` is used instead to match POSIX `rename`.
+extern fn "MoveFileExA" umay_win_move_file(from: *const u8, to: *const u8, flags: u32) -> i32
+const MOVEFILE_REPLACE_EXISTING: u32 = 0x00000001
+
+// --- process and thread primitives -----------------------------------------
+
+// `GetCurrentProcessId()` is the closest thing to `fork`'s parent side: it is
+// the identifier a caller can use to tell processes apart.
+extern fn "GetCurrentProcessId" umay_win_get_pid() -> u32
+
+// `CreateThread(lpThreadAttributes, dwStackSize, lpStartAddress, lpParameter,
+// dwCreationFlags, lpThreadId)` starts a thread and returns its handle.
+//
+// `lpStartAddress` is a `DWORD (*)(void*)`, which is the same shape as UMAY's
+// `fn(usize) -> usize` once the pointer width is taken into account, so the
+// function pointer is passed through unchanged.
+extern fn "CreateThread" umay_win_create_thread(
+    attrs: *const u8,
+    stack: usize,
+start: *const fn(usize) -> usize,
+param: usize,
+flags: u32,
+thread_id: *mut u8,
+) -> *mut u8
+
+// `WaitForSingleObject(handle, milliseconds)` returns 0 when the object
+// signalled, which is the whole of what `waitpid` is used for here.
+extern fn "WaitForSingleObject" umay_win_wait(handle: *mut u8, millis: u32) -> u32
+const INFINITE: u32 = 0xFFFFFFFF
+
+// `GetExitCodeThread` reads the value the thread function returned, which is
+// how the answer comes back.
+extern fn "GetExitCodeThread" umay_win_exit_code(handle: *mut u8, code: *mut u8) -> i32
+
+// `CloseHandle` releases a kernel handle. The runtime opens one per fan-out and
+// must not leak it: handles are a finite resource and a server would exhaust
+// them long before it exhausted memory.
+extern fn "CloseHandle" umay_win_close_handle(handle: *mut u8) -> i32
+
+// --- constants --------------------------------------------------------------
+
+// The `_open` flags, as the MSVC CRT numbers them (from `<fcntl.h>`).
+//
+// `_O_NOINHERIT` is included: a descriptor that leaks into a child process is a
+// bug on any system, and on Windows it is the default unless asked otherwise.
+const O_RDONLY: i32 = 0x0000
+const O_WRONLY: i32 = 0x0001
+const O_RDWR: i32 = 0x0002
+const O_CREAT: i32 = 0x0100
+const O_TRUNC: i32 = 0x0200
+const O_APPEND: i32 = 0x0008
+const O_BINARY: i32 = 0x8000
+
+// Writes, with the CRT's width adapted to the portable one.
+fn umay_c_write(fd: i32, buf: *const u8, count: usize) -> isize {
+    // A single call is capped at the CRT's own limit; the portable body already
+    // loops on a short write, so the remainder is written by the next turn.
+    let capped = if count > 0x7fff_ffff { 0x7fff_ffff } else { count }
+    return umay_crt_write(fd, buf, capped as u32) as isize
+}
+
+fn umay_c_read(fd: i32, buf: *mut u8, count: usize) -> isize {
+    let capped = if count > 0x7fff_ffff { 0x7fff_ffff } else { count }
+    return umay_crt_read(fd, buf, capped as u32) as isize
+}
+
+// --- the POSIX-shaped primitives the portable body still mentions -----------
+//
+// The portable runtime keeps one fan-out body that uses `fork`, a pipe and
+// `waitpid`, and selects the thread path when `umay_platform_has_fork()` is
+// false. UMAY resolves every name in a compilation unit, so the three bindings
+// that body mentions must exist even on a system that never calls them.
+//
+// Rather than leave them undefined -- which is a hard compile error, not a link
+// error, so the whole runtime would fail to build -- each is a stub returning
+// failure. The `has_fork` branch means none is ever reached, and if one were,
+// the failure it reports is the honest answer: this system cannot do that.
+
+extern fn "GetCurrentProcessId" umay_c_fork() -> i32
+
+// `CreatePipe(read, write, attributes, size)` makes a one-way pipe and fills in
+// both handles. It is named differently from POSIX's `pipe(fds)` and hands back
+// two handles rather than an array, which is the whole of the difference.
+extern fn "CreatePipe" umay_win_create_pipe(
+    read: *mut u8,
+    write: *mut u8,
+    attrs: *const u8,
+    size: u32,
+) -> i32
+
+// Makes a pipe and writes its two ends into `fds`: reading first, then writing,
+// four bytes each.
+//
+// The portable runtime and `thread_spawn` were both written against POSIX's
+// "a descriptor is a small integer" shape, so a Windows handle -- which is
+// pointer-sized -- cannot be stored in the four bytes and read back. The pipe is
+// therefore kept here, in the platform layer, and the portable code that wants
+// one asks `umay_platform_pipe` for a pair of handles instead of for a pair of
+// descriptors.
+fn umay_c_pipe(fds: *mut u8) -> i32 {
+    let read = umay_alloc(8)
+    let write = umay_alloc(8)
+    let no_attributes = unsafe { 0usize as *const u8 }
+    let ok = umay_win_create_pipe(read, write, no_attributes, 0)
+    if ok == 0 {
+        umay_dealloc(read)
+        umay_dealloc(write)
+        return -1
+    }
+    // The caller's slot is eight bytes per end, which is what `umay_pipe` writes
+    // and what `umay_read_i64` reads back. Writing a 32-bit value here is what
+    // used to truncate a handle and make the pipe useless.
+    umay_write_i64(fds, umay_read_i64(read))
+    umay_write_i64(unsafe { (fds as usize + 8) as *mut u8 }, umay_read_i64(write))
+    umay_dealloc(read)
+    umay_dealloc(write)
+    return 0
+}
+
+fn umay_c_waitpid(pid: i32, status: *mut i32, options: i32) -> i32 {
+    let _ = pid
+    let _ = status
+    let _ = options
+    return -1
+}
+
+// --- accessors to the portable layer ---------------------------------------
+
+pub fn umay_platform_errno() -> i32 {
+    return unsafe { *umay_c_errno() }
+}
+
+// There is no `fork` on Windows. The portable runtime never calls this
+// directly; it calls `umay_platform_fork`, which reports "unavailable" so that
+// the fan-out path can choose the thread implementation instead of silently
+// dividing a process that will never be created.
+pub fn umay_platform_fork() -> i32 {
+    return -1
+}
+
+// True when this platform can create processes by copying this one.
+pub fn umay_platform_has_fork() -> bool {
+    return false
+}
+
+// Runs `work(value)` on a fresh thread and returns what it answered.
+//
+// This is the Windows replacement for the pipe-and-fork hand-off. The thread
+// function is `work` itself: it already has the right signature, and its return
+// value becomes the thread's exit code, which `GetExitCodeThread` reads back.
+//
+// The handle is closed on every path, including the failure paths, because a
+// leaked handle survives the program.
+pub fn umay_platform_thread_spawn(work: *const u8, value: usize) -> usize {
+    // The thread id is written through a pointer, which the language expresses
+    // as an offset from an allocated block rather than as `&mut`; the block is
+    // four bytes and released before returning.
+    let out = umay_alloc(4)
+    // No security attributes: the thread inherits the process's, and a null
+    // pointer is how Win32 says that. An empty string is a real address, and
+    // passing one makes `CreateThread` read an `SECURITY_ATTRIBUTES` out of
+    // whatever bytes happen to follow it.
+    let no_attributes = unsafe { 0usize as *const u8 }
+    let handle = umay_win_create_thread(
+        no_attributes,
+        0,
+    work as *const fn(usize) -> usize,
+    value,
+    0,
+    out,
+    )
+    if unsafe { handle as usize } == 0 {
+        umay_dealloc(out)
+        return 0
+    }
+    let _ = umay_win_wait(handle, INFINITE)
+    let ok = umay_win_exit_code(handle, out)
+    // The exit code is a 32-bit value; reading it at full width through the
+    // byte accessor keeps the upper half defined, which casting a 32-bit local
+    // would not.
+    let answer = umay_read_u32(out) as usize
+    let _ = umay_win_close_handle(handle)
+    umay_dealloc(out)
+    if ok == 0 {
+        return 0
+    }
+    return answer
+}
+
+// Renames a file, replacing an existing target as POSIX `rename` does.
+pub fn umay_platform_rename(from: *const u8, to: *const u8) -> i32 {
+    let ok = umay_win_move_file(from, to, MOVEFILE_REPLACE_EXISTING)
+    if ok == 0 {
+        return -1
+    }
+    return 0
+}
+
+// Creates a directory. The CRT's `_mkdir` takes no mode.
+pub fn umay_platform_mkdir(path: *const u8) -> i32 {
+    return umay_c_mkdir(path)
+}
+
+// The `_open` flag word, with binary mode forced.
+//
+// Windows text mode translates `\n` to `\r\n` on write and back on read, which
+// would silently corrupt any file a program writes byte by byte. Every
+// descriptor the runtime opens is binary because a program that wants text
+// writes the bytes it means.
+pub fn umay_platform_open_flags(flags: i32) -> i32 {
+    return flags | O_BINARY
+}
+
+// The create mode. `_open` on Windows takes one, but honours it only for
+// `_O_CREAT` and in a different encoding from POSIX; zero leaves the CRT's
+// default, which is what a program expects.
+pub fn umay_platform_open_mode() -> i32 {
+    return 0
+}

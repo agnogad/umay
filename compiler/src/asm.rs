@@ -12,16 +12,44 @@ use crate::machine::*;
 use std::fmt::Write as _;
 
 /// Prints a whole function, including its prologue and epilogue.
-pub fn print_function(function: &MachineFunction, spill_bytes: u64, callee_saved: &[u8]) -> String {
+///
+/// `target` decides how the symbol is spelled and which object-file directives
+/// surround it. The instruction text itself is the same for every target that
+/// shares an ABI: macOS is SysV like Linux, so the only difference there is the
+/// leading underscore.
+pub fn print_function(
+    function: &MachineFunction,
+    spill_bytes: u64,
+    callee_saved: &[u8],
+    target: crate::target::Target,
+    foreign: &std::collections::HashSet<String>,
+) -> String {
     let mut out = String::new();
-    let symbol = symbol_name(&function.name);
-    let _ = writeln!(out, "\n.globl {symbol}");
-    let _ = writeln!(out, ".type {symbol}, @function");
+    // The label and the local-label namespace use the target's spelling for the
+    // symbol, so that internal branches and the global definition agree. The
+    // prefix is applied once here rather than at every reference.
+    let symbol = target.mangle(&symbol_name(&function.name));
+    let global = target.globl_directive();
+    if !global.is_empty() {
+        let _ = writeln!(out, "{global} {symbol}");
+    }
+    // `.type` is ELF-only metadata. Mach-O and COFF reject it.
+    if target.format == crate::target::ObjectFormat::Elf {
+        let _ = writeln!(out, ".type {symbol}, @function");
+    }
     let _ = writeln!(out, "{symbol}:");
 
     // Prologue: establish the frame, then preserve the callee-saved registers
     // this function actually uses.
-    let frame = align16(function.stack_size + spill_bytes);
+    //
+    // Win64 additionally reserves 32 bytes of shadow space inside the frame, so
+    // that this function's own outgoing calls always have the area the callee
+    // expects. SysV reserves nothing.
+    let shadow = match target.abi {
+        crate::target::Abi::SysV => 0,
+        crate::target::Abi::Win64 => 32,
+    };
+    let frame = align16(function.stack_size + spill_bytes + shadow);
     let _ = writeln!(out, "    pushq %rbp");
     let _ = writeln!(out, "    movq %rsp, %rbp");
     // Callee-saved registers are pushed before the frame is reserved, so they
@@ -34,6 +62,30 @@ pub fn print_function(function: &MachineFunction, spill_bytes: u64, callee_saved
     if frame > 0 {
         let _ = writeln!(out, "    subq ${frame}, %rsp");
     }
+    // The frame is aligned here rather than relied upon to be aligned already.
+    //
+    // Both ABIs promise a 16-byte stack pointer at a call instruction, and every
+    // frame assumes it on entry. That holds for a function entered by `call` --
+    // but a Windows thread starts its routine without one, so the pointer is
+    // eight bytes off from what the frame expects, and the first call the thread
+    // makes faults. Rounding down fixes that entry and changes nothing for the
+    // ordinary one.
+    //
+    // `%rbp` was saved before this point, so the epilogue's `leave` restores the
+    // caller's frame exactly whatever is trimmed here.
+    let _ = writeln!(out, "    andq $-16, %rsp");
+    // The frame is aligned here rather than relied upon to be aligned already.
+    //
+    // Both ABIs promise a 16-byte stack pointer at a call instruction, and every
+    // frame assumes it on entry. That holds for a function entered by `call` --
+    // but a Windows thread starts its routine without one, so the pointer is 16
+    // bytes' worth of "off by eight" from what the frame expects, and the first
+    // call the thread makes lands on a misaligned stack. Rounding down fixes it
+    // for that entry and changes nothing for the ordinary one.
+    //
+    // `%rbp` was saved before this point, so the epilogue's `leave` restores the
+    // caller's frame exactly whatever is trimmed here.
+
 
     // Move incoming arguments into their stack slots. They are stored after the
     // prologue because the prologue uses the same registers.
@@ -44,12 +96,26 @@ pub fn print_function(function: &MachineFunction, spill_bytes: u64, callee_saved
     if let Some(offset) = function.sret_offset {
         let _ = writeln!(out, "    movq %rdi, {offset}(%rbp)");
     }
-    let all_arg_regs = [7u8, 6, 2, 1, 8, 9]; // rdi, rsi, rdx, rcx, r8, r9
+    // The argument registers this ABI uses, in order. Win64 passes the first
+    // argument in `%rcx` and has only four registers, so a function with five
+    // parameters reads its fifth from the stack where SysV would have used
+    // `%r8`.
+    let all_arg_regs: &[u8] = match target.abi {
+        crate::target::Abi::SysV => &crate::machine::ARG_REGS_SYSV,
+        crate::target::Abi::Win64 => &crate::machine::ARG_REGS_WIN64,
+    };
     let mut next_reg = usize::from(function.sret_offset.is_some());
     // Stack arguments begin just above the return address; an eightbyte of
     // padding sits there only when it keeps the area aligned, which the caller
     // already arranged.
-    let mut stack_offset = 16i64;
+    //
+    // On Win64 the caller's frame puts 32 bytes of shadow space between the
+    // return address and the first stack argument, so the offset starts past it.
+    // Reading from `16(%rbp)` there would read the callee's own spill area.
+    let mut stack_offset = match target.abi {
+        crate::target::Abi::SysV => 16i64,
+        crate::target::Abi::Win64 => 16 + 32,
+    };
     for (index, (_, offset)) in function.local_slots.iter().take(function.arg_count as usize).enumerate() {
         let kind = function
             .arg_kinds
@@ -165,7 +231,7 @@ pub fn print_function(function: &MachineFunction, spill_bytes: u64, callee_saved
             if let Inst::Label(label) = inst {
                 let _ = writeln!(out, ".L{}_{}:", symbol, label.0);
             } else {
-                let line = print_inst(inst, &symbol);
+                let line = print_inst(inst, &symbol, target, foreign);
                 if !line.is_empty() {
                     let _ = writeln!(out, "    {line}");
                 }
@@ -185,7 +251,11 @@ pub fn print_function(function: &MachineFunction, spill_bytes: u64, callee_saved
     }
     let _ = writeln!(out, "    leave");
     let _ = writeln!(out, "    ret");
-    let _ = writeln!(out, ".size {symbol}, .-{symbol}");
+    // `.size` records the function's extent for ELF debug info and is not part
+    // of the other two formats.
+    if target.format == crate::target::ObjectFormat::Elf {
+        let _ = writeln!(out, ".size {symbol}, .-{symbol}");
+    }
     out
 }
 
@@ -201,37 +271,48 @@ fn align16(n: u64) -> u64 {
 ///
 /// `function` namespaces the block labels so that two functions in one assembly
 /// file cannot collide.
-pub fn print_inst(inst: &Inst, function: &str) -> String {
+pub fn print_inst(
+    inst: &Inst,
+    function: &str,
+    target: crate::target::Target,
+    foreign: &std::collections::HashSet<String>,
+) -> String {
     match inst {
         Inst::Label(_) => String::new(),
         Inst::Comment(text) => format!("# {text}"),
-        Inst::Move { kind, src, dst } => print_move(*kind, src, dst),
-        Inst::Alu { op, width, src, dst } => print_alu(*op, *width, src, dst),
-        Inst::Cmp { width, lhs, rhs } => format!("cmp{} {}, {}", width.suffix(), op_str(rhs, *width), op_str(lhs, *width)),
+        Inst::Move { kind, src, dst } => print_move(*kind, src, dst, target, foreign),
+        Inst::Alu { op, width, src, dst } => print_alu(*op, *width, src, dst, target, foreign),
+        Inst::Cmp { width, lhs, rhs } => format!("cmp{} {}, {}", width.suffix(), op_str(rhs, *width, target, foreign), op_str(lhs, *width, target, foreign)),
         Inst::Test { width, lhs, rhs } => {
-            format!("test{} {}, {}", width.suffix(), op_str(rhs, *width), op_str(lhs, *width))
+            format!("test{} {}, {}", width.suffix(), op_str(rhs, *width, target, foreign), op_str(lhs, *width, target, foreign))
         }
-        Inst::SetCc { cond, dst } => format!("set{} {}", cond.suffix(), op_str(dst, RegWidth::W8)),
+        Inst::SetCc { cond, dst } => format!("set{} {}", cond.suffix(), op_str(dst, RegWidth::W8, target, foreign)),
         Inst::Jmp(label) => format!("jmp .L{}_{}", function, label.0),
         Inst::Jcc { cond, target } => format!("j{} .L{}_{}", cond.suffix(), function, target.0),
-        Inst::Call { target, variadic } => {
+        Inst::Call { target: callee, variadic } => {
             // SysV requires `%al` to hold the number of vector registers used when
             // calling a variadic function. UMAY passes none, so it is zero; a call
             // to `open` would otherwise hand the callee whatever `%al` held.
             let prefix = if *variadic { "    movb $0, %al\n" } else { "" };
-            let call = match target {
+            let call = match callee {
                 Operand::Mem(mem) => match &mem.symbol {
-                    Some(sym) => format!("call {}", sym.name),
-                    None => format!("callq *{}", op_str(target, RegWidth::W64)),
+                    // A call to a named function is a direct reference to a
+                    // symbol that lives in another object, so it needs the same
+                    // spelling as its definition. On COFF and Mach-O that means
+                    // the target's leading underscore; without it every call
+                    // into the runtime was an undefined reference and the link
+                    // failed.
+                    Some(sym) => format!("call {}", mangle_symbol(&sym.name, target, foreign)),
+                    None => format!("callq *{}", op_str(callee, RegWidth::W64, target, foreign)),
                 },
-                other => format!("callq *{}", op_str(other, RegWidth::W64)),
+                other => format!("callq *{}", op_str(other, RegWidth::W64, target, foreign)),
             };
             format!("{prefix}{call}")
         }
         Inst::Ret => "ret".to_string(),
-        Inst::Push(op) => format!("pushq {}", op_str(op, RegWidth::W64)),
-        Inst::Pop(op) => format!("popq {}", op_str(op, RegWidth::W64)),
-        Inst::Lea { src, dst } => format!("leaq {}, {}", mem_str(src, RegWidth::W64), op_str(dst, RegWidth::W64)),
+        Inst::Push(op) => format!("pushq {}", op_str(op, RegWidth::W64, target, foreign)),
+        Inst::Pop(op) => format!("popq {}", op_str(op, RegWidth::W64, target, foreign)),
+        Inst::Lea { src, dst } => format!("leaq {}, {}", mem_str(src, RegWidth::W64, target, foreign), op_str(dst, RegWidth::W64, target, foreign)),
         Inst::Load { kind, src, dst } => {
             // An extending load names both widths, as in `movzbq`: source first.
             // The register the value ends up in is the destination width; the
@@ -257,7 +338,7 @@ pub fn print_inst(inst: &Inst, function: &str) -> String {
                     (format!("movz{}{}", from.suffix(), to.suffix()), from, to)
                 }
             };
-            format!("{mnemonic} {}, {}", mem_str(src, read), op_str(dst, write))
+            format!("{mnemonic} {}, {}", mem_str(src, read, target, foreign), op_str(dst, write, target, foreign))
         }
         Inst::Store { kind, src, dst } => {
             let width = match kind {
@@ -271,7 +352,7 @@ pub fn print_inst(inst: &Inst, function: &str) -> String {
                 if width == RegWidth::W64 && i32::try_from(*v).is_err() {
                     return format!(
                         "movabsq ${v}, %rax\n    movq %rax, {}",
-                        mem_str(dst, width)
+                        mem_str(dst, width, target, foreign)
                     );
                 }
             }
@@ -281,61 +362,74 @@ pub fn print_inst(inst: &Inst, function: &str) -> String {
                 MoveKind::SignExtend { from, .. } => format!("movs{}", from.suffix()),
                 MoveKind::ZeroExtend { from, .. } => format!("movz{}", from.suffix()),
             };
-            format!("{mnemonic} {}, {}", op_str(src, width), mem_str(dst, width))
+            format!("{mnemonic} {}, {}", op_str(src, width, target, foreign), mem_str(dst, width, target, foreign))
         }
         Inst::SignExtendAcc { .. } => "cqto".to_string(),
     }
 }
 
-fn print_move(kind: MoveKind, src: &Operand, dst: &Operand) -> String {
+fn print_move(
+    kind: MoveKind,
+    src: &Operand,
+    dst: &Operand,
+    target: crate::target::Target,
+    foreign: &std::collections::HashSet<String>,
+) -> String {
     match kind {
         MoveKind::Move(width) => {
             // `movq` only carries a sign-extended 32-bit immediate, so a wider
             // constant is loaded with `movabsq` first.
             if let (RegWidth::W64, Operand::Imm(v)) = (width, src) {
                 if i32::try_from(*v).is_err() {
-                    return format!("movabsq ${v}, {}", op_str(dst, width));
+                    return format!("movabsq ${v}, {}", op_str(dst, width, target, foreign));
                 }
             }
-            format!("mov{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width))
+            format!("mov{} {}, {}", width.suffix(), op_str(src, width, target, foreign), op_str(dst, width, target, foreign))
         }
         MoveKind::SignExtend { from, to } => {
             // `movsX` naming: source width first, then destination.
-            format!("movs{}{} {}, {}", from.suffix(), to.suffix(), op_str(src, from), op_str(dst, to))
+            format!("movs{}{} {}, {}", from.suffix(), to.suffix(), op_str(src, from, target, foreign), op_str(dst, to, target, foreign))
         }
         // `movz{32}{64}` does not exist: a 32-bit register write clears the upper
         // half on its own, so a 32-bit move is the zero-extending form.
         MoveKind::ZeroExtend { from: RegWidth::W32, to: RegWidth::W64 } => {
-            format!("movl {}, {}", op_str(src, RegWidth::W32), op_str(dst, RegWidth::W32))
+            format!("movl {}, {}", op_str(src, RegWidth::W32, target, foreign), op_str(dst, RegWidth::W32, target, foreign))
         }
         MoveKind::ZeroExtend { from, to } => {
-            format!("movz{}{} {}, {}", from.suffix(), to.suffix(), op_str(src, from), op_str(dst, to))
+            format!("movz{}{} {}, {}", from.suffix(), to.suffix(), op_str(src, from, target, foreign), op_str(dst, to, target, foreign))
         }
     }
 }
 
-fn print_alu(op: AluOp, width: RegWidth, src: &Operand, dst: &Operand) -> String {
+fn print_alu(
+    op: AluOp,
+    width: RegWidth,
+    src: &Operand,
+    dst: &Operand,
+    target: crate::target::Target,
+    foreign: &std::collections::HashSet<String>,
+) -> String {
     match op {
-        AluOp::Add => format!("add{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
-        AluOp::Sub => format!("sub{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
-        AluOp::Imul => format!("imul{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
+        AluOp::Add => format!("add{} {}, {}", width.suffix(), op_str(src, width, target, foreign), op_str(dst, width, target, foreign)),
+        AluOp::Sub => format!("sub{} {}, {}", width.suffix(), op_str(src, width, target, foreign), op_str(dst, width, target, foreign)),
+        AluOp::Imul => format!("imul{} {}, {}", width.suffix(), op_str(src, width, target, foreign), op_str(dst, width, target, foreign)),
         // Divisions read the accumulator implicitly; the selector has already set
         // up the operand, so only the divisor is printed.
-        AluOp::Idiv => format!("idiv{} {}", width.suffix(), op_str(src, width)),
-        AluOp::Div => format!("div{} {}", width.suffix(), op_str(src, width)),
-        AluOp::And => format!("and{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
-        AluOp::Or => format!("or{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
-        AluOp::Xor => format!("xor{} {}, {}", width.suffix(), op_str(src, width), op_str(dst, width)),
+        AluOp::Idiv => format!("idiv{} {}", width.suffix(), op_str(src, width, target, foreign)),
+        AluOp::Div => format!("div{} {}", width.suffix(), op_str(src, width, target, foreign)),
+        AluOp::And => format!("and{} {}, {}", width.suffix(), op_str(src, width, target, foreign), op_str(dst, width, target, foreign)),
+        AluOp::Or => format!("or{} {}, {}", width.suffix(), op_str(src, width, target, foreign), op_str(dst, width, target, foreign)),
+        AluOp::Xor => format!("xor{} {}, {}", width.suffix(), op_str(src, width, target, foreign), op_str(dst, width, target, foreign)),
         // A shift's count is the only operand x86_64 reads from `cl`: even at a
         // wider operation (`sarl`), the low byte `%cl` is the register the CPU
         // consults, and `sarl %ecx, %ecx` is rejected by the assembler. Printing
         // the count as `%cl` regardless of the operation width is what makes the
         // instruction legal.
-        AluOp::Shl => format!("shl{} {}, {}", width.suffix(), shift_count_str(src), op_str(dst, width)),
-        AluOp::Shr => format!("shr{} {}, {}", width.suffix(), shift_count_str(src), op_str(dst, width)),
-        AluOp::Sar => format!("sar{} {}, {}", width.suffix(), shift_count_str(src), op_str(dst, width)),
-        AluOp::Neg => format!("neg{} {}", width.suffix(), op_str(dst, width)),
-        AluOp::Not => format!("not{} {}", width.suffix(), op_str(dst, width)),
+        AluOp::Shl => format!("shl{} {}, {}", width.suffix(), shift_count_str(src, target, foreign), op_str(dst, width, target, foreign)),
+        AluOp::Shr => format!("shr{} {}, {}", width.suffix(), shift_count_str(src, target, foreign), op_str(dst, width, target, foreign)),
+        AluOp::Sar => format!("sar{} {}, {}", width.suffix(), shift_count_str(src, target, foreign), op_str(dst, width, target, foreign)),
+        AluOp::Neg => format!("neg{} {}", width.suffix(), op_str(dst, width, target, foreign)),
+        AluOp::Not => format!("not{} {}", width.suffix(), op_str(dst, width, target, foreign)),
     }
 }
 
@@ -344,20 +438,29 @@ fn print_alu(op: AluOp, width: RegWidth, src: &Operand, dst: &Operand) -> String
 /// A shift count is an immediate or the low byte of `%rcx`: the hardware reads
 /// `%cl` whatever the operation's width, so a register count must never be
 /// printed at the operation's width (`%ecx` is not a legal shift count).
-fn shift_count_str(op: &Operand) -> String {
+fn shift_count_str(
+    op: &Operand,
+    target: crate::target::Target,
+    foreign: &std::collections::HashSet<String>,
+) -> String {
     match op {
         Operand::Reg(reg) => format!("%{}", reg.name(RegWidth::W8)),
-        other => op_str(other, RegWidth::W8),
+        other => op_str(other, RegWidth::W8, target, foreign),
     }
 }
 
 /// Prints an operand with its width.
-pub fn op_str(op: &Operand, width: RegWidth) -> String {
+pub fn op_str(
+    op: &Operand,
+    width: RegWidth,
+    target: crate::target::Target,
+    foreign: &std::collections::HashSet<String>,
+) -> String {
     match op {
         // AT&T syntax prefixes registers with `%`.
         Operand::Reg(reg) => format!("%{}", reg.name(width)),
         Operand::Imm(v) => format!("${v}"),
-        Operand::Mem(mem) => mem_str(mem, width),
+        Operand::Mem(mem) => mem_str(mem, width, target, foreign),
         // A label operand only appears inside a `jmp`/`jcc`, which print their
         // target themselves; printing a bare label here keeps `op_str` total.
         Operand::Label(label) => format!(".L{}", label.0),
@@ -365,10 +468,44 @@ pub fn op_str(op: &Operand, width: RegWidth) -> String {
 }
 
 /// Prints a memory operand: `offset(%base,%index,scale)`.
-pub fn mem_str(mem: &Mem, _width: RegWidth) -> String {
+/// Spells a symbol reference the way its definition is spelled.
+///
+/// A reference to `write_u16` and the definition `_write_u16` are two different
+/// symbols to the linker. Only the definition went through `Target::mangle`, so
+/// on Mach-O and COFF every call into the runtime and every `%rip`-relative
+/// reference to read-only data was an undefined symbol -- the object assembled,
+/// and the link then failed with a page of `undefined reference` errors.
+///
+/// Local labels (`.L...`) belong to the assembler and are never mangled.
+fn mangle_symbol(
+    name: &str,
+    target: crate::target::Target,
+    foreign: &std::collections::HashSet<String>,
+) -> String {
+    // `.L` labels belong to the assembler, not the linker.
+    if name.starts_with(".L") {
+        return name.to_string();
+    }
+    // A symbol that names code outside this program is used verbatim: MinGW's
+    // CRT exports `malloc`, and adding the prefix MSVC uses turned every libc
+    // call into an undefined reference. Everything else is UMAY's own and takes
+    // the target's prefix, so its definition and its references agree.
+    if foreign.contains(name) {
+        name.to_string()
+    } else {
+        target.mangle(name)
+    }
+}
+
+pub fn mem_str(
+    mem: &Mem,
+    _width: RegWidth,
+    target: crate::target::Target,
+    foreign: &std::collections::HashSet<String>,
+) -> String {
     let mut out = String::new();
     if let Some(sym) = &mem.symbol {
-        out.push_str(&sym.name);
+        out.push_str(&mangle_symbol(&sym.name, target, foreign));
         let total = mem.offset + sym.addend;
         if total != 0 {
             if total > 0 {

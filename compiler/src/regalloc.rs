@@ -60,7 +60,24 @@ struct Interval {
 /// is the range from its first definition to its last use. Blocks are treated as
 /// linear, which is correct for the structured control flow UMAY lowers to but
 /// would be pessimistic for arbitrary graphs; that is a deliberate trade.
-pub fn allocate(function: &mut MachineFunction) -> Allocation {
+pub fn allocate(function: &mut MachineFunction, abi: crate::target::Abi) -> Allocation {
+    // Which registers survive a call and which are worth saving are the ABI's
+    // answers, not the allocator's. Under Win64 `rsi` and `rdi` are callee-saved,
+    // so a value that lives in one across a call is *not* destroyed and must not
+    // be treated as if it were; and a value the allocator places in a
+    // callee-saved register obliges the prologue to save it.
+    let caller_saved: &[u8] = match abi {
+        crate::target::Abi::SysV => &crate::machine::CALLER_SAVED,
+        crate::target::Abi::Win64 => &crate::machine::CALLER_SAVED_WIN64,
+    };
+    let allocatable: &[u8] = match abi {
+        crate::target::Abi::SysV => &crate::machine::ALLOCATABLE,
+        crate::target::Abi::Win64 => &crate::machine::ALLOCATABLE_WIN64,
+    };
+    let callee_saved_of_abi = |reg: u8| match abi {
+        crate::target::Abi::SysV => crate::machine::is_callee_saved_sysv(reg),
+        crate::target::Abi::Win64 => crate::machine::is_callee_saved_win64(reg),
+    };
     let mut point = 0usize;
     // Virtual registers numbered contiguously, so the interval table can be an
     // array indexed by vreg number.
@@ -99,7 +116,7 @@ pub fn allocate(function: &mut MachineFunction) -> Allocation {
         let mut excluded = BTreeSet::new();
         // A live range that spans a call loses every caller-saved register.
         if call_points.iter().any(|&c| start < c && c < end) {
-            for &r in CALLER_SAVED.iter() {
+            for &r in caller_saved.iter() {
                 excluded.insert(r);
             }
         }
@@ -110,7 +127,7 @@ pub fn allocate(function: &mut MachineFunction) -> Allocation {
     // The classic scan: `active` holds intervals currently occupying a register,
     // kept sorted by end point so the longest one is easy to evict.
     let mut active: Vec<(usize, u32, u8)> = Vec::new(); // (end, vreg, reg)
-    let mut free: Vec<u8> = ALLOCATABLE
+    let mut free: Vec<u8> = allocatable
         .iter()
         .copied()
         .filter(|r| !function.reserved.contains(r))
@@ -135,7 +152,7 @@ pub fn allocate(function: &mut MachineFunction) -> Allocation {
         if let Some(&reg) = free.iter().find(|r| !interval.excluded.contains(r)) {
             free.retain(|r| *r != reg);
             locations.insert(interval.vreg, Location::Reg(reg));
-            if is_callee_saved(reg) {
+            if callee_saved_of_abi(reg) {
                 used_callee_saved.insert(reg);
             }
             active.push((interval.end, interval.vreg, reg));
@@ -167,7 +184,7 @@ pub fn allocate(function: &mut MachineFunction) -> Allocation {
                 spilled.push(victim_vreg);
                 locations.remove(&victim_vreg);
                 locations.insert(interval.vreg, Location::Reg(reg));
-                if is_callee_saved(reg) {
+                if callee_saved_of_abi(reg) {
                     used_callee_saved.insert(reg);
                 }
                 active.push((interval.end, interval.vreg, reg));
@@ -222,9 +239,238 @@ pub fn allocate(function: &mut MachineFunction) -> Allocation {
 /// following conditional reads, because only adjacent instructions are examined
 /// and a flag-setting instruction ends any chain.
 fn peephole(function: &mut MachineFunction) -> usize {
+    let forwarded_removed = forward_slots(function);
+    let dead_store_removed = remove_dead_stores(function);
+    let copy_removed = coalesce_copies(function);
+    forwarded_removed + dead_store_removed + copy_removed
+}
+
+/// Removes a store to a frame slot when nothing in the block loads that slot
+/// before overwriting it.
+///
+/// This is the other half of slot forwarding: `%.r -> slot` is emitted for every
+/// MIR local, and once the loads are served from registers the store that fed
+/// them has no reader. A slot that *is* read later (because its value crosses a
+/// block boundary, or the register holding it was clobbered) keeps its store.
+///
+/// Only stores to plain `%rbp`-relative slots are considered, and only within
+/// one block: the same block, the same slot, no intervening load and no
+/// intervening write to that slot. A branch ends the block, so a store whose
+/// value is read after a branch is never removed.
+fn remove_dead_stores(function: &mut MachineFunction) -> usize {
+    let mut removed = 0;
+    // Which slots any instruction in the function reads, ever.
+    //
+    // A store is dropped only when its slot is read nowhere in the whole body.
+    // Restricting the search to the store's own block was wrong: a slot written
+    // in one block and read in another kept no store and the reader saw stale
+    // memory, which is a wrong answer, not a missing optimisation. The cost of
+    // this conservative version is that a slot reused across blocks keeps its
+    // store, which is exactly the traffic that must stay for correctness.
+    let mut read_anywhere: std::collections::BTreeSet<(i64, i64)> = std::collections::BTreeSet::new();
+    for block in &function.blocks {
+        for inst in &block.insts {
+            for slot in slots_read(inst) {
+                read_anywhere.insert(slot);
+            }
+        }
+    }
+    for block in &mut function.blocks {
+        let insts = std::mem::take(&mut block.insts);
+        // For each store, whether a later instruction in this block loads it
+        // before writing it.
+        let mut keep = vec![true; insts.len()];
+        for i in 0..insts.len() {
+            let Some((slot, _)) = store_of_register(&insts[i]) else { continue };
+            if !plain_stack(&slot) {
+                continue;
+            }
+            let key = slot_key(&slot);
+            // Keep the store unless another store to the same slot overwrites it
+            // before any read *within this block*. A block boundary is a
+            // conservative stop: the next block may read the slot and this pass
+            // does not track liveness across blocks, so a store whose value might
+            // be read later is never removed.
+            let mut dead = false;
+            for later in &insts[i + 1..] {
+                if matches!(later, Inst::Call { .. }) || loads_from_slot(later, &key) {
+                    dead = false;
+                    break;
+                }
+                if writes_slot(later, &key) {
+                    dead = true;
+                    break;
+                }
+            }
+            let _ = &read_anywhere;
+            if dead {
+                keep[i] = false;
+            }
+        }
+        block.insts = insts
+            .into_iter()
+            .zip(keep)
+            .filter_map(|(i, k)| if k { Some(i) } else { removed += 1; None })
+            .collect();
+    }
+    removed
+}
+
+/// Every frame slot `inst` reads, in any operand position.
+fn slots_read(inst: &Inst) -> Vec<(i64, i64)> {
+    fn one(op: &MOperand, out: &mut Vec<(i64, i64)>) {
+        if let MOperand::Mem(m) = op {
+            if plain_stack(m) {
+                out.push(slot_key(m));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    match inst {
+        Inst::Load { src, .. } => {
+            if plain_stack(src) {
+                out.push(slot_key(src));
+            }
+        }
+        Inst::Move { src, .. } => one(src, &mut out),
+        Inst::Alu { src, dst, .. } => {
+            one(src, &mut out);
+            one(dst, &mut out);
+        }
+        Inst::Cmp { lhs, rhs, .. } | Inst::Test { lhs, rhs, .. } => {
+            one(lhs, &mut out);
+            one(rhs, &mut out);
+        }
+        Inst::Push(op) | Inst::Pop(op) => one(op, &mut out),
+        Inst::Store { src, .. } => one(src, &mut out),
+        Inst::Call { target, .. } => one(target, &mut out),
+        _ => {}
+    }
+    out
+}
+
+/// True when `inst` reads the frame slot `key`, in any position.
+///
+/// This must catch every way a slot can be read, not only an explicit load:
+/// `addq slot, %rcx` reads the slot as an ALU operand and never becomes an
+/// `Inst::Load`. Missing that case deleted the store that fed it and the loop
+/// read a stale slot, which is a wrong answer rather than a crash -- the reason
+/// this check is exhaustive rather than convenient.
+fn loads_from_slot(inst: &Inst, key: &(i64, i64)) -> bool {
+    fn reads(op: &MOperand, key: &(i64, i64)) -> bool {
+        match op {
+            MOperand::Mem(m) => plain_stack(m) && slot_key(m) == *key,
+            _ => false,
+        }
+    }
+    match inst {
+        Inst::Load { src, .. } => plain_stack(src) && slot_key(src) == *key,
+        Inst::Move { src, .. } => reads(src, key),
+        // Any ALU instruction may read its source from memory. `dst` is not
+        // checked on purpose: a read-modify-write of the slot (`addq $1, slot`)
+        // is a write for this analysis, so the store before it is redundant
+        // anyway.
+        Inst::Alu { src, .. } => reads(src, key),
+        // A compare, a test and an extend all take memory operands.
+        Inst::Cmp { lhs, rhs, .. } => reads(lhs, key) || reads(rhs, key),
+        Inst::Test { lhs, rhs, .. } => reads(lhs, key) || reads(rhs, key),
+        Inst::SignExtendAcc { .. } => false,
+        Inst::SetCc { .. } | Inst::Jmp(_) | Inst::Jcc { .. } | Inst::Ret | Inst::Label(_)
+        | Inst::Comment(_) => false,
+        // Anything not enumerated -- a push of a slot, a store whose source is a
+        // slot -- is treated as a read. Being pessimistic here costs one store;
+        // being optimistic costs correctness.
+        Inst::Push(op) | Inst::Pop(op) => reads(op, key),
+        _ => matches!(inst, Inst::Store { src, .. } if reads(src, key)),
+    }
+}
+
+/// True when `inst` overwrites the frame slot `key`.
+fn writes_slot(inst: &Inst, key: &(i64, i64)) -> bool {
+    match inst {
+        Inst::Store { dst, .. } => plain_stack(dst) && slot_key(dst) == *key,
+        Inst::Move { dst: MOperand::Mem(m), .. } => plain_stack(m) && slot_key(m) == *key,
+        _ => false,
+    }
+}
+
+/// Removes `mov %a, %b` when `%b` already holds the same value.
+///
+/// The selector emits a copy per operand and the allocator often places both
+/// sides in the same register, or a value is copied twice through a chain. A
+/// `mov %rax, %rcx` immediately followed by `mov %rcx, %rax` puts back what was
+/// already in `%rax`, and the loop then carries two instructions that compute
+/// nothing.
+///
+/// Only `Move` instructions are tracked, and only registers that no other
+/// instruction writes in between: the map is invalidated the moment the source
+/// or the destination is written by anything else.
+fn coalesce_copies(function: &mut MachineFunction) -> usize {
+    // Remove `mov %r, %r` and the adjacent double copy
+    // `mov %a, %r` / `mov %r, %b` where `%b` already holds `%a`'s value.
+    //
+    // The wider version of this pass -- tracking which register holds which
+    // value across a whole block and rewriting every later use -- was written and
+    // then reverted: it changed `%cl` to `%al` in a call setup, and `%al` is the
+    // one register SysV reads as the number of vector arguments a variadic call
+    // receives, so the program linked and then corrupted its arguments. The
+    // lesson generalised: an optimisation that rewrites a register into a
+    // different one must reason about *every* register with a fixed meaning, and
+    // `%al` alone is enough to make that a wide surface.
+    //
+    // What is kept is local and checkable: adjacent instructions, no reasoning
+    // about memory, no register with a special role. It removes the redundant
+    // copy the selector emits for a return value, which is the case that exists.
     let mut removed = 0;
     for block in &mut function.blocks {
         let mut out: Vec<Inst> = Vec::with_capacity(block.insts.len());
+        for inst in std::mem::take(&mut block.insts) {
+            if is_self_move(&inst) {
+                removed += 1;
+                continue;
+            }
+            if let Inst::Move { kind, src: MOperand::Reg(s), dst: MOperand::Reg(d) } = &inst {
+                if let Some(Inst::Move { src: MOperand::Reg(prev_src), dst: MOperand::Reg(prev_dst), .. }) = out.last() {
+                    // `%prev_dst <- %prev_src`, then `%d <- %prev_dst`, with
+                    // `%d == %prev_src`: the second move puts back the value the
+                    // first one copied from.
+                    if prev_dst == s && prev_src == d {
+                        removed += 1;
+                        continue;
+                    }
+                }
+                let _ = kind;
+                let _ = (s, d);
+            }
+            out.push(inst);
+        }
+        block.insts = out;
+    }
+    removed
+}
+
+/// Slot forwarding: serve loads of a frame slot from the register still holding
+/// its value.
+fn forward_slots(function: &mut MachineFunction) -> usize {
+    let mut removed = 0;
+    for (bi, block) in &mut function.blocks.iter_mut().enumerate() {
+        if std::env::var_os("UMAY_FWD_DEBUG").is_some() {
+            eprintln!("  ---- block {bi}");
+        }
+        let mut out: Vec<Inst> = Vec::with_capacity(block.insts.len());
+        // The register each frame slot's current value is still held in.
+        //
+        // Every MIR local gets its own frame slot (`frame.rs`), so a straight
+        // lowering stores each intermediate result to memory and loads it back
+        // for the next operation. That is what made UMAY 1.8x slower than gcc on
+        // an integer loop: the arithmetic was right, but half the instructions
+        // were memory traffic to slots whose value never left a register.
+        //
+        // The map is what removes it. When `slot` is known to still equal
+        // `reg`, a load of `slot` becomes a register-to-register move (or
+        // vanishes, if the target is already that register), and the store that
+        // put it there is deleted once nothing has read the slot since.
+        let mut forwarded: std::collections::BTreeMap<(i64, i64), Reg> = std::collections::BTreeMap::new();
         for inst in std::mem::take(&mut block.insts) {
             if let Some(prev) = out.last() {
                 // `mov %r, %r` writes what is already there.
@@ -245,11 +491,115 @@ fn peephole(function: &mut MachineFunction) -> usize {
                     }
                 }
             }
+
+            // A load from a slot whose value is still in a register becomes a
+            // register copy. The copy may itself turn out to be a self-move and
+            // be dropped, which is the common case: the selector loads into `%rax`
+            // and the allocator put the value there already.
+            //
+            // An ALU instruction that reads the slot as a memory operand is
+            // rewritten the same way. That case is why this pass exists: the
+            // selector emits `imulq $3, %rcx` / `movq %rcx, slot` and then
+            // `addq slot, %rcx` for `acc + i * 3`, and the memory read there is
+            // the traffic that made the loop slow. Only a source operand is
+            // rewritten -- a destination in memory is a real write and stays one.
+            let inst = match &inst {
+                Inst::Load { kind: MoveKind::Move(w), src, dst: MOperand::Reg(d) } if plain_stack(src) => {
+                    match forwarded.get(&slot_key(src)) {
+                        Some(&src_reg) if src_reg != *d => Inst::Move {
+                            kind: MoveKind::Move(*w),
+                            src: MOperand::Reg(src_reg),
+                            dst: MOperand::Reg(*d),
+                        },
+                        Some(_) => {
+                            removed += 1;
+                            continue;
+                        }
+                        None => inst,
+                    }
+                }
+                Inst::Alu { op, width, src: MOperand::Mem(m), dst } if plain_stack(m) => {
+                    if std::env::var_os("UMAY_FWD_DEBUG").is_some() {
+                        eprintln!("  alu read {:?} known={:?}", slot_key(m), forwarded.get(&slot_key(m)));
+                    }
+                    match forwarded.get(&slot_key(m)) {
+                        Some(&src_reg) => Inst::Alu { op: *op, width: *width, src: MOperand::Reg(src_reg), dst: dst.clone() },
+                        None => inst,
+                    }
+                }
+                Inst::Cmp { width, lhs: MOperand::Mem(m), rhs } if plain_stack(m) => {
+                    match forwarded.get(&slot_key(m)) {
+                        Some(&src_reg) => Inst::Cmp { width: *width, lhs: MOperand::Reg(src_reg), rhs: rhs.clone() },
+                        None => inst,
+                    }
+                }
+                _ => inst,
+            };
+
+            // Anything that writes a register invalidates the forwarding for
+            // that register: the slot still holds the value, but the register no
+            // longer does, so a later load must really read memory.
+            if let Some(written) = registers_written(&inst) {
+                if std::env::var_os("UMAY_FWD_DEBUG").is_some() && !written.is_empty() {
+                    eprintln!("  writes {:?} :: {:?}", written, inst);
+                }
+                for reg in written {
+                    forwarded.retain(|_, held| *held != reg);
+                }
+            }
+
+            // Record a store of a register into a slot. Only a plain
+            // `%rbp`-relative slot with no symbol or index qualifies, which is
+            // what `plain_stack` checks.
+            if let Some((slot, reg)) = store_of_register(&inst) {
+                if plain_stack(&slot) {
+                    if std::env::var_os("UMAY_FWD_DEBUG").is_some() {
+                        eprintln!("  fwd store {:?} -> {:?}", slot_key(&slot), reg);
+                    }
+                    forwarded.insert(slot_key(&slot), reg);
+                }
+            }
+
             out.push(inst);
         }
         block.insts = out;
     }
     removed
+}
+
+/// A frame slot's identity: (base register code, offset).
+///
+/// Two memory operands name the same slot when their base and offset agree and
+/// neither has a symbol or an index. A struct field's address would have one, so
+/// they never collide with a plain slot.
+fn slot_key(m: &Mem) -> (i64, i64) {
+    let base = match m.base {
+        Some(Reg::Phys(code)) => code as i64,
+        _ => -1,
+    };
+    (base, m.offset)
+}
+
+/// Every physical register `inst` writes, or `None` when it writes none.
+///
+/// Returns `None` rather than an empty list for a call, because a call clobbers
+/// the whole caller-saved set and the caller clears forwarding separately; a
+/// plain "writes nothing" would leave a stale entry alive across it.
+fn registers_written(inst: &Inst) -> Option<Vec<Reg>> {
+    let one = |op: &MOperand| match op {
+        MOperand::Reg(r) => Some(vec![*r]),
+        _ => Some(Vec::new()),
+    };
+    match inst {
+        Inst::Call { .. } => None,
+        Inst::Move { dst, .. } => one(dst),
+        Inst::Alu { dst, .. } => one(dst),
+        Inst::Load { dst, kind: MoveKind::Move(_), .. } => one(dst),
+        Inst::Lea { dst, .. } => one(dst),
+        Inst::SetCc { dst, .. } => one(dst),
+        Inst::Pop(op) => one(op),
+        _ => Some(Vec::new()),
+    }
 }
 
 /// True for `Move src -> dst` where both sides are the same physical register.
@@ -260,10 +610,6 @@ fn is_self_move(inst: &Inst) -> bool {
     }
 }
 
-
-fn is_callee_saved(reg: u8) -> bool {
-    matches!(reg, 3 | 12 | 13 | 14 | 15)
-}
 
 /// Rewrites every virtual register in the function to its assigned location.
 ///

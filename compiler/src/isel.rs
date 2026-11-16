@@ -47,6 +47,37 @@ pub struct Isel<'a, 't> {
     /// `%rcx` is added when the function shifts by a variable count, which places
     /// the count in `%cl`.
     pub(crate) reserved: Vec<u8>,
+    /// The calling convention this function is being selected for.
+    ///
+    /// It decides the argument-register order, how many there are, and -- in
+    /// `asm` and `regalloc` -- which registers survive a call and whether the
+    /// prologue reserves shadow space. The frontend, the MIR and the flow of
+    /// selection are identical for both, which is why this is a field and not a
+    /// second selector.
+    pub(crate) abi: crate::target::Abi,
+}
+
+impl<'a, 't> Isel<'a, 't> {
+    /// The argument registers this ABI passes arguments in, in order.
+    pub(crate) fn arg_regs(&self) -> &'static [u8] {
+        match self.abi {
+            crate::target::Abi::SysV => &crate::machine::ARG_REGS_SYSV,
+            crate::target::Abi::Win64 => &crate::machine::ARG_REGS_WIN64,
+        }
+    }
+
+    /// The bytes of caller-reserved space a Win64 callee may spill into.
+    ///
+    /// SysV has none: a callee that wants to spill uses its own frame. Windows
+    /// guarantees the caller reserved 32 bytes above the return address, and a
+    /// callee that does not account for them places its stack arguments over
+    /// that area, which the caller may be using.
+    pub(crate) fn shadow_space(&self) -> u64 {
+        match self.abi {
+            crate::target::Abi::SysV => 0,
+            crate::target::Abi::Win64 => 32,
+        }
+    }
 }
 
 /// Selects instructions for `body`.
@@ -55,6 +86,7 @@ pub fn select<'t>(
     frame: Frame,
     layouts: &mut Layouts<'t>,
     fn_symbols: &std::collections::HashMap<crate::hir::FnId, String>,
+    abi: crate::target::Abi,
 ) -> Result<MachineFunction, String> {
     let block_labels: Vec<Label> = (0..body.blocks.len()).map(|i| Label(i as u32)).collect();
     let mut isel = Isel {
@@ -67,6 +99,7 @@ pub fn select<'t>(
         symbols: Vec::new(),
         fn_symbols,
         reserved: Vec::new(),
+        abi,
     };
     for (index, block) in body.blocks.iter().enumerate() {
         // Unreachable blocks were emptied by optimisation. Emitting them would
@@ -110,10 +143,17 @@ pub fn select<'t>(
         .collect();
 
     // The classification must match the caller's exactly, or an argument would
-    // be read from a place nothing was written. The two rules that matter are
-    // the SysV ones: an aggregate of two eightbytes or less travels in
-    // registers, and once an argument goes on the stack every later one does
-    // too, because the callee reads stack arguments from fixed offsets.
+    // be read from a place nothing was written. The rules are the SysV ones: an
+    // aggregate of two eightbytes or less travels in registers, and once an
+    // argument goes on the stack every later one does too, because the callee
+    // reads stack arguments from fixed offsets.
+    //
+    // Win64 differs in both halves of that. Only four registers carry
+    // arguments, and an aggregate is never split across two of them: it travels
+    // by value in one register when it is eight bytes or smaller and by pointer
+    // otherwise, so the `RegisterPair` case never arises there.
+    let arg_reg_count = isel.arg_regs().len();
+    let win64 = abi == crate::target::Abi::Win64;
     let mut arg_kinds = Vec::with_capacity(body.arg_count as usize);
     let mut registers_used = usize::from(body.ret_is_sret);
     let mut spilled = false;
@@ -122,12 +162,16 @@ pub fn select<'t>(
         let size = isel.layouts.layout(local.ty).map(|l| l.size).unwrap_or(8);
         let needed = if !is_aggregate || size <= 8 {
             1
+        } else if win64 {
+            // No register pair: a wide aggregate is passed by pointer, which is
+            // one register's worth, or spilled.
+            1
         } else if size <= 16 {
             2
         } else {
             0
         };
-        if !spilled && needed > 0 && registers_used + needed <= 6 {
+        if !spilled && needed > 0 && registers_used + needed <= arg_reg_count {
             arg_kinds.push(if needed == 1 {
                 crate::machine::ArgKind::Register
             } else {

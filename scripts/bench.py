@@ -489,7 +489,11 @@ def build_umay(srcdir, src):
         shutil.rmtree(cache, ignore_errors=True)
         shutil.rmtree(os.path.join(srcdir, "dist"), ignore_errors=True)
         os.makedirs(cache, exist_ok=True)
-        last = _run_once([UMAY, "build", src], srcdir, env)
+        # The other toolchains are all given their optimiser (`-O`, `-O2`,
+        # `ReleaseFast`). Building UMAY at its default `-O0` and comparing the
+        # result to `gcc -O2` is not a measurement of the languages, it is a
+        # measurement of one flag. This uses the level a release build would.
+        last = _run_once([UMAY, "build", "-O2", src], srcdir, env)
         times.append(last[0])
         rss = max(rss, last[2])
         if last[1] != 0:

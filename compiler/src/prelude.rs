@@ -25,7 +25,16 @@ use crate::source::{FileId, SourceMap};
 /// declarations are what they are written against. `concat!` keeps this a single
 /// compile-time string: there is no file to find, no import to resolve, and no
 /// way for the parts to be built out of step with each other.
-pub const PRELUDE_SOURCE: &str = concat!(
+/// The portable part of the prelude: everything that is the same on every
+/// system.
+///
+/// The per-system bindings for networking and threads are kept out of this list
+/// on purpose. They are the only part of the standard library whose *names*
+/// differ between systems, and putting them here would force one system's
+/// spelling into every program -- which is exactly what stopped a Windows
+/// program from linking, because a POSIX `accept` was in the object whether or
+/// not it was used.
+const PORTABLE_PRELUDE: &str = concat!(
     include_str!("../../stdlib/prelude.um"),
     "\n",
     include_str!("../../stdlib/option.um"),
@@ -58,14 +67,36 @@ pub const PRELUDE_SOURCE: &str = concat!(
 /// The name the prelude's file is registered under in the source map.
 pub const PRELUDE_FILE: &str = "<prelude>";
 
+/// The prelude for one system: the portable part, then the bindings that system
+/// actually has.
+///
+/// The platform file goes *after* the portable body rather than before it,
+/// because UMAY resolves names across a whole compilation unit, and the portable
+/// half is what calls into the bindings. Both directions have to be visible, and
+/// one file in a single order gives that.
+pub fn prelude_source_for(target: crate::target::Target) -> String {
+    let mut out = String::with_capacity(PORTABLE_PRELUDE.len() + 8192);
+    out.push_str(PORTABLE_PRELUDE);
+    out.push_str("\n\n// ---------------------------------------------------------------------------\n");
+    out.push_str("// Platform bindings: ");
+    out.push_str(target.triple);
+    out.push_str("\n// ---------------------------------------------------------------------------\n\n");
+    out.push_str(target.stdlib_platform_source());
+    out
+}
+
 /// Parses the prelude and returns its items.
 ///
 /// A parse error here is a bug in the compiler, not in the user's program: the
 /// prelude is part of the toolchain and its tests keep it parsing. The errors are
 /// still returned so a caller can surface them rather than silently producing a
 /// program with a missing prelude.
-pub fn parse_prelude(map: &mut SourceMap) -> (Vec<ast::Item>, crate::diagnostics::Diagnostics) {
-    let id = map.add(PRELUDE_FILE, PRELUDE_SOURCE);
+pub fn parse_prelude(
+    map: &mut SourceMap,
+    target: crate::target::Target,
+) -> (Vec<ast::Item>, crate::diagnostics::Diagnostics) {
+    let source = prelude_source_for(target);
+    let id = map.add(PRELUDE_FILE, source);
     let out = crate::parse_file(map, id);
     (out.program.items, out.diagnostics)
 }
@@ -77,8 +108,9 @@ pub fn parse_prelude(map: &mut SourceMap) -> (Vec<ast::Item>, crate::diagnostics
 pub fn with_prelude(
     program: ast::Program,
     map: &mut SourceMap,
+    target: crate::target::Target,
 ) -> (ast::Program, crate::diagnostics::Diagnostics) {
-    let (items, diagnostics) = parse_prelude(map);
+    let (items, diagnostics) = parse_prelude(map, target);
     let mut all = items;
     all.extend(program.items);
     (ast::Program { items: all, span: program.span }, diagnostics)

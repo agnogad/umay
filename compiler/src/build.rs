@@ -64,6 +64,22 @@ impl CacheKey {
     /// inputs cannot produce the same bytes by concatenation -- `("ab", "c")` and
     /// `("a", "bc")` hash differently because the lengths are hashed too.
     pub fn derive(artifact: Artifact, opt_level: &str, source: &[u8], extra: &[(&str, &str)]) -> CacheKey {
+        CacheKey::derive_for(artifact, opt_level, source, extra, crate::target::Target::host())
+    }
+
+    /// Derives the key for one artifact of one target.
+    ///
+    /// The target is part of the key rather than a detail of the build: an
+    /// assembly file for macOS and one for Linux are different bytes produced
+    /// from the same source, and sharing a cache entry between them would serve
+    /// a Mach-O object to an ELF link.
+    pub fn derive_for(
+        artifact: Artifact,
+        opt_level: &str,
+        source: &[u8],
+        extra: &[(&str, &str)],
+        target: crate::target::Target,
+    ) -> CacheKey {
         let mut blob = Vec::new();
         let mut field = |name: &str, value: &[u8]| {
             // The name and the length go in before the value, so the encoding is
@@ -88,7 +104,7 @@ impl CacheKey {
         field("compiler", env!("CARGO_PKG_VERSION").as_bytes());
         field("compiler_binary", compiler_fingerprint().as_bytes());
         field("artifact", artifact.tag().as_bytes());
-        field("target", target_triple().as_bytes());
+        field("target", target.triple.as_bytes());
         field("opt_level", opt_level.as_bytes());
         // The language edition: a source that means one thing in one edition and
         // another in a later one must not share a cache entry.
@@ -154,12 +170,6 @@ fn compiler_fingerprint() -> &'static str {
             Err(_) => format!("version-only:{}", env!("CARGO_PKG_VERSION")),
         }
     })
-}
-
-/// What the backend targets. Only one exists today; the field is in the key so
-/// that adding a second cannot silently share entries with the first.
-fn target_triple() -> &'static str {
-    "x86_64-unknown-linux-gnu"
 }
 
 /// The on-disk cache.

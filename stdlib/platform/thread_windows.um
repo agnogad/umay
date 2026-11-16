@@ -1,0 +1,57 @@
+// Threads on Windows: the same two operations, on a different primitive.
+//
+// A UMAY thread here is a `CreateThread` thread rather than a child process.
+// The shape the portable half expects is kept exactly: `umay_c_pthread_create`
+// starts work and reports 0 on success, `umay_c_pthread_join` waits for it and
+// reports 0 on success. Only what happens underneath differs.
+//
+// `CreateThread` returns a handle, so the caller's `handle` slot holds one. A
+// join closes it, which is what `pthread_join` does implicitly.
+extern fn "CreateThread" umay_win_thread_create(
+    attributes: *const u8,
+    stack_size: usize,
+    start: *const u8,
+    arg: *mut u8,
+    flags: u32,
+    thread_id: *mut u8,
+) -> *mut u8
+extern fn "WaitForSingleObject" umay_win_thread_wait(handle: *mut u8, millis: u32) -> u32
+extern fn "CloseHandle" umay_win_thread_close(handle: *mut u8) -> i32
+
+const UMAY_THREAD_INFINITE: u32 = 4294967295u32
+
+pub fn umay_c_pthread_create(thread: *mut u8, _attr: *const u8, start: *const u8, arg: *mut u8) -> i32 {
+    // The thread id is only an out-parameter; eight bytes is enough and it is
+    // released immediately.
+    let id_out = umay_alloc(8)
+    let handle = umay_win_thread_create(
+        "" as *const u8,
+        0usize,
+        start,
+        arg,
+        0u32,
+        id_out,
+    )
+    umay_dealloc(id_out)
+    if unsafe { handle as usize } == 0usize {
+        return -1
+    }
+    // Store the handle where the caller asked for it. The slot is eight bytes,
+    // which is what the portable half allocates.
+    umay_write_i64(thread, unsafe { handle as usize } as i64)
+    return 0
+}
+
+pub fn umay_c_pthread_join(thread: *mut u8, _result: *mut *mut u8) -> i32 {
+    let stored = umay_read_i64(thread)
+    let handle = unsafe { stored as usize as *mut u8 }
+    if unsafe { handle as usize } == 0usize {
+        return -1
+    }
+    let waited = umay_win_thread_wait(handle, UMAY_THREAD_INFINITE)
+    let _ = umay_win_thread_close(handle)
+    if waited != 0u32 {
+        return -1
+    }
+    return 0
+}

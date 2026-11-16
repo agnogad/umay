@@ -1914,7 +1914,7 @@ fn net_binds_a_port_and_accepts() {
     // binds a different port and still succeeds, which is invisible without a real
     // connection. This checks the address by binding, connecting and reading back.
     let source = r##"
-extern fn "connect" sys_connect(fd: i32, addr: *const u8, len: i32) -> i32
+extern fn "connect" sys_connect(fd: isize, addr: *const u8, len: i32) -> i32
 extern fn "getpid" umay_c_getpid() -> i32
 fn main() -> i32 {
     // The port comes from the process id, so a port left in `TIME_WAIT` by an

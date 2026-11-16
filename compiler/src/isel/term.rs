@@ -157,7 +157,8 @@ impl<'a, 't> Isel<'a, 't> {
         }
 
         // Arguments beyond the register file go on the stack, pushed in reverse.
-        let stack_args = args.len().saturating_sub(ARG_REGS.len());
+        let arg_regs_of_abi = self.arg_regs();
+        let stack_args = args.len().saturating_sub(arg_regs_of_abi.len());
         let stack_bytes = stack_args as u64 * 8;
         if stack_args > 0 {
             // Keep the stack 16-byte aligned at the call. The frame size is a
@@ -171,7 +172,7 @@ impl<'a, 't> Isel<'a, 't> {
                     dst: MOperand::Reg(Reg::Phys(4)),
                 });
             }
-            for (i, reg) in arg_regs.iter().enumerate().skip(ARG_REGS.len()).rev() {
+            for (i, reg) in arg_regs.iter().enumerate().skip(arg_regs_of_abi.len()).rev() {
                 let _ = i;
                 out.push(Inst::Push(MOperand::Reg(*reg)));
             }
@@ -185,7 +186,7 @@ impl<'a, 't> Isel<'a, 't> {
         // every value on the stack first makes the shuffle order irrelevant, and
         // costs one store and load per argument, which the two-address x86 move
         // makes unavoidable anyway.
-        let count = ARG_REGS.len().min(arg_regs.len());
+        let count = arg_regs_of_abi.len().min(arg_regs.len());
         if count > 0 {
             let bytes = ((count as u64) * 8).div_ceil(16) * 16;
             out.push(Inst::Alu {
@@ -202,7 +203,7 @@ impl<'a, 't> Isel<'a, 't> {
                     dst: Mem { base: Some(Reg::Phys(4)), offset: (i as i64) * 8, index: None, symbol: None },
                 });
             }
-            for (i, arg_reg) in ARG_REGS.iter().take(count).enumerate() {
+            for (i, arg_reg) in arg_regs_of_abi.iter().take(count).enumerate() {
                 out.push(Inst::Load {
                     kind: MoveKind::Move(RegWidth::W64),
                     src: Mem { base: Some(Reg::Phys(4)), offset: (i as i64) * 8, index: None, symbol: None },
@@ -265,10 +266,21 @@ impl<'a, 't> Isel<'a, 't> {
         // provides and receives that storage's address in `rdi`. The decision is
         // made from the destination's type, which is the callee's return type, so
         // caller and callee agree without either consulting the other.
+        //
+        // The threshold is the ABI's: SysV returns up to sixteen bytes in two
+        // registers; Win64 returns 1, 2, 4, 8, 16, 32 and 64 bytes in registers
+        // and everything else through the pointer.
+        let abi = self.abi;
         let sret = destination.filter(|dst| {
             let ty = self.place_ty(dst);
-            self.layouts.is_aggregate(ty)
-                && self.layouts.layout(ty).map(|l| l.size > 16).unwrap_or(false)
+            if !self.layouts.is_aggregate(ty) {
+                return false;
+            }
+            let size = self.layouts.layout(ty).map(|l| l.size).unwrap_or(0);
+            // The rule lives in one place: the callee records it on its body,
+            // and the caller must agree with it exactly, or one side reserves
+            // storage the other never fills.
+            crate::codegen::aggregate_goes_through_pointer(abi, size)
         });
         let sret_ptr = match sret {
             Some(dst) => {
@@ -301,8 +313,20 @@ impl<'a, 't> Isel<'a, 't> {
         // arguments the callee will read at `16(%rbp)` onwards. One `subq` keeps
         // the whole area 16-byte aligned at the call.
         let stack_bytes = plan.stack_bytes;
-        let stack_total = stack_bytes.div_ceil(16) * 16;
-        let count = ARG_REGS.len().min(arg_regs.len());
+        // Win64 reserves 32 bytes of shadow space directly above the return
+        // address for the callee to spill into. It is part of the outgoing area
+        // the caller owns, and the fifth argument and beyond sit *above* it, not
+        // in it: overlapping the two made every call with more than four
+        // arguments read its fifth argument out of the shadow space, where no one
+        // had written anything.
+        //
+        // System V has no shadow space, so `shadow` is zero there and the two
+        // rules agree.
+        let shadow = self.shadow_space();
+        let stack_base = shadow + stack_bytes;
+        let stack_total = stack_base.div_ceil(16) * 16;
+        let arg_regs_of_abi = self.arg_regs();
+        let count = arg_regs_of_abi.len().min(arg_regs.len());
         let park_bytes = if count > 0 { ((count as u64) * 8).div_ceil(16) * 16 } else { 0 };
         let area = park_bytes + stack_total;
         // Stack arguments occupy the bottom of the area, because the callee reads
@@ -329,7 +353,7 @@ impl<'a, 't> Isel<'a, 't> {
                 },
             });
         }
-        for (i, arg_reg) in ARG_REGS.iter().take(count).enumerate() {
+        for (i, arg_reg) in arg_regs_of_abi.iter().take(count).enumerate() {
             out.push(Inst::Load {
                 kind: MoveKind::Move(RegWidth::W64),
                 src: Mem {
@@ -352,7 +376,10 @@ impl<'a, 't> Isel<'a, 't> {
                 let width = if piece.size - copied >= 8 { RegWidth::W64 } else { RegWidth::W8 };
                 let dst = Mem {
                     base: Some(Reg::Phys(4)),
-                    offset: piece.offset as i64 + copied as i64,
+                    // `piece.offset` counts from the bottom of the outgoing area.
+                    // On Win64 the shadow space sits below the stack arguments, so
+                    // the first argument goes at its top and not at offset zero.
+                    offset: shadow as i64 + piece.offset as i64 + copied as i64,
                     index: None,
                     symbol: None,
                 };
@@ -482,6 +509,8 @@ impl<'a, 't> Isel<'a, 't> {
             // before this runs, so it is signalled by starting the register list
             // one short.
         }
+        let arg_regs = self.arg_regs();
+        let win64 = self.abi == crate::target::Abi::Win64;
         let mut stack_pieces = Vec::new();
         let mut stack_bytes = 0u64;
         let mut registers_used = usize::from(sret);
@@ -500,7 +529,16 @@ impl<'a, 't> Isel<'a, 't> {
                     }
                 };
                 let needed = size.div_ceil(8) as usize;
-                if !spilled && size <= 16 && registers_used + needed <= ARG_REGS.len() {
+                // Win64 never splits an aggregate across two registers: one
+                // eightbyte fits in one register and anything wider is passed by
+                // pointer, which is not modelled yet and is therefore spilled --
+                // a stack copy of the whole value, which the callee reads.
+                let fits_in_regs = if win64 {
+                    size <= 8
+                } else {
+                    size <= 16 && registers_used + needed <= arg_regs.len()
+                };
+                if !spilled && fits_in_regs && registers_used + needed <= arg_regs.len() {
                     let mem = match &mem {
                         StackSource::Mem(m) => m.clone(),
                         StackSource::Imm(_) => {
@@ -536,7 +574,7 @@ impl<'a, 't> Isel<'a, 't> {
                 }
                 continue;
             }
-            if !spilled && registers_used < ARG_REGS.len() {
+            if !spilled && registers_used < arg_regs.len() {
                 register_values.push(self.operand_to_reg(arg)?);
                 registers_used += 1;
             } else {

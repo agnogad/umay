@@ -5,10 +5,30 @@
 // shipped as a binary blob, so a bug in it is a bug the compiler's own tools can
 // find and a reader can follow.
 //
-// Only three C functions are assumed: `malloc`, `free` and `write`. Everything
-// else — length, printing, integer formatting — is UMAY code. Keeping the C
-// surface this small means every line that could be wrong is a line that can be
-// read.
+// # The split between this file and a platform layer
+//
+// Everything below is portable: allocation, byte strings, integer formatting,
+// output, error reporting. It is compiled identically for every target.
+//
+// What is *not* portable -- which C symbols exist, what their numeric constants
+// mean, and whether a primitive exists at all -- lives in a platform layer that
+// is concatenated *after* this file, in `runtime/platform/`:
+//
+//     linux.um     glibc, POSIX names, `fork`, `__errno_location`
+//     macos.um     libSystem, POSIX names, `fork`, `__error`, its own O_* table
+//     windows.um   MSVC CRT, underscored names, no `fork` (threads instead)
+//
+// The portable code reaches the platform through `umay_platform_*` functions
+// and the `umay_c_*` bindings it declares. It never spells a C symbol name
+// itself, so adding a system means adding a file over there rather than editing
+// this one.
+//
+// # The C surface
+//
+// Only a handful of C functions are assumed: allocation, the descriptor I/O
+// calls, and the platform's process primitives. Everything else -- length,
+// printing, integer formatting -- is UMAY code. Keeping the C surface this small
+// means every line that could be wrong is a line that can be read.
 //
 // There is no global state here on purpose: the language has no mutable
 // statics yet, so the runtime must not need any. That is why output goes
@@ -16,72 +36,12 @@
 // would have to be cached between calls.
 
 // ---------------------------------------------------------------------------
-// C bindings
+// Constants that are the same everywhere
 // ---------------------------------------------------------------------------
 
-// `malloc(size)` returns a pointer to `size` uninitialised bytes, or null when
-// the request cannot be met.
-extern fn "malloc" umay_c_malloc(size: usize) -> *mut u8
-
-// `free(ptr)` releases a block obtained from `malloc`.
-extern fn "free" umay_c_free(ptr: *mut u8) -> ()
-
-// `write(fd, buf, count)` writes `count` bytes and returns how many were
-// written, or -1.
-extern fn "write" umay_c_write(fd: i32, buf: *const u8, count: usize) -> isize
-
-// `exit(code)` terminates the process.
-extern fn "exit" umay_c_exit(code: i32) -> ()
-
-// `lseek(fd, offset, whence)` moves the file position and returns the new one,
-// or -1. `whence` 2 is `SEEK_END`, which combined with an offset of 0 reports the
-// size of a regular file without reading a byte of it.
-extern fn "lseek" umay_c_lseek(fd: i32, offset: i64, whence: i32) -> i64
-
-// `getenv(name)` returns the value of an environment variable, or 0.
-extern fn "getenv" umay_c_getenv(name: *const u8) -> *const u8
-extern fn "pipe" umay_c_pipe(fds: *mut u8) -> i32
-
-// `errno` is a macro over a function on glibc, so it cannot be declared directly.
-// This accessor is the portable spelling: glibc exports `__errno_location`, a
-// function returning the address of the thread's errno.
-extern fn __errno_location() -> *mut i32
-
-// Creates a child process that shares this address space copy-on-write.
-extern fn "fork" umay_c_fork() -> i32
-
-// Waits for a child to change state.
-extern fn "waitpid" umay_c_waitpid(pid: i32, status: *mut i32, options: i32) -> i32
-
-// POSIX file system calls. Each returns -1 on failure, which the wrappers below
-// turn into a result the caller can branch on.
-//
-// `open(path, flags, mode)` returns a file descriptor, or -1.
-extern fn "open" umay_c_open(path: *const u8, flags: i32, mode: i32) -> i32
-// `close(fd)` releases a descriptor.
-extern fn "close" umay_c_close(fd: i32) -> i32
-// `read(fd, buf, count)` returns how many bytes were read, 0 at the end, or -1.
-extern fn "read" umay_c_read(fd: i32, buf: *mut u8, count: usize) -> isize
-// `unlink(path)` removes a file.
-extern fn "unlink" umay_c_unlink(path: *const u8) -> i32
-// `rename(from, to)` renames a file.
-extern fn "rename" umay_c_rename(from: *const u8, to: *const u8) -> i32
-// `mkdir(path, mode)` creates a directory.
-extern fn "mkdir" umay_c_mkdir(path: *const u8, mode: i32) -> i32
-
-// The flags `open` takes, as the kernel numbers them on Linux.
-//
-// They are spelled out rather than derived because they are an operating system's
-// constants, not the language's: a different system would need its own numbers,
-// and the day UMAY runs on one this table is what changes.
-const O_RDONLY: i32 = 0
-const O_WRONLY: i32 = 1
-const O_RDWR: i32 = 2
-const O_CREAT: i32 = 64
-const O_TRUNC: i32 = 512
-const O_APPEND: i32 = 1024
-
-// The standard file descriptors.
+// The standard file descriptors. These are 0, 1 and 2 on every system the
+// compiler targets, unlike the `open` flags, which are each system's own and
+// therefore live in the platform layer.
 const STDOUT: i32 = 1
 const STDERR: i32 = 2
 
@@ -159,18 +119,26 @@ pub fn umay_write_u32(ptr: *mut u8, value: u32) {
 
 // Opens `path` for reading and returns the descriptor, or -1.
 pub fn umay_open_read(path: *const u8) -> i32 {
-    return umay_c_open(path, O_RDONLY, 0)
+    return umay_c_open(path, umay_platform_open_flags(O_RDONLY), umay_platform_open_mode())
 }
 
 // Opens `path` for writing, creating or truncating it, and returns the descriptor,
 // or -1.
 pub fn umay_create(path: *const u8) -> i32 {
-    return umay_c_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    return umay_c_open(
+        path,
+    umay_platform_open_flags(O_WRONLY | O_CREAT | O_TRUNC),
+    umay_platform_open_mode(),
+    )
 }
 
 // Opens `path` for appending, creating it if it does not exist, or -1.
 pub fn umay_append(path: *const u8) -> i32 {
-    return umay_c_open(path, O_WRONLY | O_CREAT | O_APPEND, 420)
+    return umay_c_open(
+        path,
+    umay_platform_open_flags(O_WRONLY | O_CREAT | O_APPEND),
+    umay_platform_open_mode(),
+    )
 }
 
 // Closes `fd` and returns 0, or -1.
@@ -211,13 +179,20 @@ pub fn umay_unlink(path: *const u8) -> i32 {
 }
 
 // Renames a file.
+//
+// On Windows the CRT's `rename` refuses to replace an existing target where
+// POSIX `rename` replaces it, so the platform layer provides the replacing form
+// and this stays a single rule for every target.
 pub fn umay_rename(from: *const u8, to: *const u8) -> i32 {
-    return umay_c_rename(from, to)
+    return umay_platform_rename(from, to)
 }
 
 // Creates a directory.
+//
+// The mode argument is a POSIX concept; Windows' `_mkdir` takes none, so the
+// platform layer supplies the call and the mode lives there.
 pub fn umay_mkdir(path: *const u8) -> i32 {
-    return umay_c_mkdir(path, 493)
+    return umay_platform_mkdir(path)
 }
 
 // The size of a regular file in bytes, or -1 when it cannot be measured.
@@ -259,10 +234,13 @@ pub fn umay_exit(code: i32) {
 }
 
 // The number the last failing call left in `errno`.
+//
+// `errno` is a macro in every C library, so there is no single symbol to call:
+// glibc has `__errno_location`, Darwin has `__error`, and the MSVC CRT has
+// `_errno`. The platform layer knows which one this target has, and this is the
+// only portable spelling of the question.
 pub fn umay_errno() -> i32 {
-    unsafe {
-        return *__errno_location()
-    }
+    return umay_platform_errno()
 }
 
 // --- byte strings -----------------------------------------------------------
@@ -349,7 +327,7 @@ pub fn umay_println_i64(value: i64) {
         while signed != 0 {
             // `%` and `/` keep the sign of the dividend, so `-(signed % 10)` is
             // always a digit in 0..=9.
-            let digit = if negative { -(signed % 10) } else { signed % 10 }
+            let digit = if negative { - (signed % 10) } else { signed % 10 }
             pos = pos - 1
             buf[pos] = 48u8 + narrow_digit(digit)
             signed = signed / 10
@@ -416,8 +394,13 @@ pub fn umay_str_eq(a: *const u8, b: *const u8) -> bool {
 // This is the whole of UMAY's concurrency today: a child has its own copy of
 // every variable, so there is no shared mutable cell to race on, and a server
 // gets its parallelism from one process per connection instead of a thread.
+//
+// Windows has no `fork`, so there this reports -1 and the fan-out below uses a
+// thread instead. A program that calls `fork` itself through `process.um` gets
+// -1 there, which is the honest answer rather than a child that will never
+// exist.
 pub fn umay_fork() -> i32 {
-    return umay_c_fork()
+    return umay_platform_fork()
 }
 
 // Runs `work(value)` in a child process and returns what it answered.
@@ -430,39 +413,49 @@ pub fn umay_fork() -> i32 {
 // Everything is eight bytes wide: `A` and `R` are checked against each other's
 // size by the caller, and a wider type is refused rather than truncated.
 pub fn umay_thread_spawn(work: *const u8, value: usize) -> usize {
-    let pipe = umay_c_malloc(8)
+    // Without `fork` the hand-off is a thread whose return value is the answer.
+    // Both paths honour the same contract, which is what lets the caller be
+    // written once: the value goes in, one answer comes back, nothing else is
+    // shared.
+    if !umay_platform_has_fork() {
+        return umay_platform_thread_spawn(work, value)
+    }
+    // Sixteen bytes: two eight-byte ends. A POSIX descriptor would fit in four,
+    // but a Windows handle would not, and one shape for both is what keeps this
+    // body free of `#if`.
+    let pipe = umay_alloc(16)
     if umay_pipe(pipe) != 0 {
-        umay_c_free(pipe)
+        umay_dealloc(pipe)
         return 0
     }
-    let read_end = umay_read_u32(pipe) as i32
-    let write_end = umay_read_u32(pipe.offset(4)) as i32
+    let read_end = umay_read_i64(pipe) as i32
+    let write_end = umay_read_i64(unsafe { (pipe as usize + 8) as *const u8 }) as i32
     let pid = umay_c_fork()
     if pid == 0 {
         umay_c_close(read_end)
         let entry = work as *const fn(usize) -> usize
         let answer = unsafe { (*entry)(value) }
-        let out = umay_c_malloc(8)
+        let out = umay_alloc(8)
         umay_c_write_i64(out, answer as i64)
-        umay_c_write(write_end, out, 8)
-        umay_c_free(out)
+        let _ = umay_c_write(write_end, out, 8)
+        umay_dealloc(out)
         umay_c_close(write_end)
         umay_c_exit(0)
     }
     umay_c_close(write_end)
-    let gathered = umay_c_malloc(8)
+    let gathered = umay_alloc(8)
     let got = umay_c_read(read_end, gathered, 8)
     umay_c_close(read_end)
-    umay_c_free(pipe)
-    let status = umay_c_malloc(4)
-    umay_c_waitpid(pid, status as *mut i32, 0)
-    umay_c_free(status)
+    umay_dealloc(pipe)
+    let status = umay_alloc(4)
+    let _ = umay_c_waitpid(pid, status as *mut i32, 0)
+    umay_dealloc(status)
     if got != 8 {
-        umay_c_free(gathered)
+        umay_dealloc(gathered)
         return 0
     }
     let answer = umay_read_i64(gathered) as usize
-    umay_c_free(gathered)
+    umay_dealloc(gathered)
     return answer
 }
 
@@ -471,8 +464,12 @@ fn umay_c_write_i64(ptr: *mut u8, value: i64) {
     umay_write_i64(ptr, value)
 }
 
-// Creates a pipe and writes its two descriptors into `fds`: the reading end
-// first, then the writing end. Returns 0, or -1 when the system refuses.
+// Creates a pipe and writes its two ends into `fds`: the reading end first, then
+// the writing end, eight bytes each. Returns 0, or -1 when the system refuses.
+//
+// Eight bytes rather than four because a POSIX descriptor and a Windows handle do
+// not have the same width: the platform layer widens the narrow one so that this
+// signature is the same everywhere.
 pub fn umay_pipe(fds: *mut u8) -> i32 {
     return umay_c_pipe(fds)
 }

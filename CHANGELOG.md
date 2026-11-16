@@ -7,6 +7,222 @@ specification carries its own version (`v1.0`), which moves only when the
 language surface changes; the compiler's package version can move for
 implementation-only changes.
 
+## [Unreleased]
+
+### Added
+
+- **Cross-target compilation.** `--target` selects the system to emit code for;
+  without it the compiler builds for the host.
+  - `x86_64-unknown-linux-gnu` (ELF, System V)
+  - `x86_64-apple-darwin` (Mach-O, System V)
+  - `x86_64-pc-windows-gnu` (COFF, Microsoft x64)
+- **`--emit-object-only`** on `build`: assemble and stop, linking nothing.
+  Producing an object for another system was already possible but always reported
+  as a failed build, because the link that followed could not succeed. A caller
+  who only wants the object -- to link it elsewhere, or to inspect it -- is now
+  a success. Both object paths are printed, and `run --emit-object-only` is a
+  usage error rather than a build with nothing to run.
+  - Regression test `emitting_an_object_alone_succeeds_for_a_target_that_cannot_be_linked`
+    checks the exit status, both printed paths, that both files really are Mach-O,
+    that no executable appeared, and that `run` refuses the combination.
+  - `--target` was also missing from `umay --help`; both flags are documented now.
+- **`asm --emit-object-only`** prints the assembly *and* leaves the object in
+  `dist/`. `asm` printed text and kept nothing, so a caller who wanted an object
+  had to run `build`, which links, which a cross target cannot do. Without the
+  flag `asm` still writes nothing -- a command that quietly starts leaving files
+  behind is a worse surprise than one needing a flag.
+  - The printed assembly is byte-for-byte what `asm` prints alone; the flag only
+    appends the line naming the object.
+  - Regression test `asm_leaves_an_object_only_when_asked` fails if the flag is
+    ignored on `asm` (`dist/main.o` missing), and it also checks that the
+    unflaggged run creates no `dist/` at all.
+- **`--emit-object-only` prints the command that links its output.** Leaving the
+  last step to the reader only helps if the instructions are right, and the flags
+  differ per system (`-no-pie`, `-mconsole`, `-lws2_32`); a wrong one is a link
+  error about something else. The compiler knows them, so it says them:
+  ```
+  built dist/both.o
+  built dist/umay_runtime.o
+    link it with: x86_64-w64-mingw32-gcc -o dist/both.exe dist/both.o dist/umay_runtime.o -mconsole -lws2_32
+  ```
+  Where the command cannot work on this host, it says that instead of suggesting
+  it silently: ``(`cc` here links ELF, not Mach-O; this needs a linker that writes
+  Mach-O)``.
+  - Regression test `the_printed_link_command_works_as_printed` runs the printed
+    line through a shell and runs the result. It fails if the command omits a
+    runtime object, or writes the executable somewhere `build` would not (both of
+    which happened while writing it: `-o main` rather than `-o dist/main`). The
+    "links ELF, not Mach-O" wording is checked too, so the caveat cannot go back to
+    blaming a missing program when the program is present and simply wrong-format.
+- **An emitted Windows object links and runs outside this compiler.** The flag's
+  whole claim is that the objects are usable elsewhere, and only the end of that
+  chain proves it. `an_emitted_windows_object_links_and_runs_elsewhere` links
+  `dist/main.o` and `dist/umay_runtime.o` by hand with `x86_64-w64-mingw32-gcc`
+  -- the command a user would type -- and runs the result under Wine, checking it
+  prints its own output. Verified: `21` and `socket ok`, so sockets link and work
+  through the hand-built path too.
+  - Skips cleanly when MinGW or Wine is absent, rather than failing on a machine
+    that cannot do the check.
+  - Fails if either object is missing, which is the way this can actually break.
+- **A target that cannot be linked here says so, and says where the object is.**
+  `umay build --target x86_64-apple-darwin` on Linux used to hand a Mach-O object
+  to the host's linker and print its complaint about file formats. It now reports
+  the formats involved, names the object it produced and leaves it on disk --
+  which is the half of the job that did succeed.
+  - The rule is the **linker's** format, not the host's: `x86_64-w64-mingw32-gcc`
+    links COFF from Linux, and an earlier version of this check refused it.
+  - Regression test `an_unlinkable_target_reports_where_its_object_went` fails if
+    the rule goes back to comparing against the host's format.
+- **A Windows object is checked for linkability too.** Same idea as the macOS
+  check, read from the real COFF symbol table: `WinMain` must be exported, every
+  UMAY name one object leaves undefined must be defined by the other, and every
+  remaining name must be one MinGW's CRT or Win32 actually exports.
+  - Regression test `a_windows_object_leaves_only_what_mingw_provides_undefined`
+    fails if a binding is misspelt (`CreateThread` written as `CreateTread`).
+  - This replaced a guessed-prefix list in `windows_references_match_their_definitions`
+    that could not tell a C library name from a typo.
+- **A macOS object is checked for linkability without a Mac.** The symbol table is
+  read back from the assembled object: `_main` must be defined and global, every
+  name the program leaves undefined must be one UMAY's runtime defines, and every
+  C library name the runtime leaves undefined must be one macOS actually has.
+  - Regression test `a_macos_object_leaves_only_its_own_runtime_undefined` fails if
+    a binding is misspelt (`write` written as `wrote`), which is the fault class
+    the check exists for.
+- **`umay_pipe` works on Windows.** It binds `CreatePipe` instead of POSIX
+  `pipe`. Both ends are stored eight bytes wide on every system, because a POSIX
+  descriptor is a small integer and a Windows handle is pointer-sized: the
+  platform layer widens the narrow one, so the portable body that forks and reads
+  a pipe has one shape to write against.
+- **Threads work on Windows.** `thread_spawn` hands one value to another thread
+  and gets one answer back; how differs -- POSIX forks and reads a pipe, Windows
+  starts a `CreateThread` and asks it for its exit value. `umay_thread_spawn`
+  picks, so `thread_spawn` itself holds no system-specific code and its `Send`
+  check is unchanged.
+- **A generic value can have its address taken.** `&value as *const A` is the only
+  way to reach a value whose type is a parameter, and it is what the cross-thread
+  hand-off needs. It was refused twice over: the cast had no rule, and the parser
+  read `&v as T` as `&(v as T)`.
+- **A Windows `--target x86_64-pc-windows-gnu` build now runs.** The standard
+  library's system-specific names moved into `stdlib/platform/`, so a Windows
+  object binds WinSock and `CreateThread` instead of POSIX `accept` and
+  `pthread_create`, and links against `ws2_32`.
+  - Verified end to end: `umay build --target x86_64-pc-windows-gnu` produces a
+    real `PE32+ executable for MS Windows (console), x86-64`, and under Wine it
+    prints the right answers, opens a socket and binds a port.
+- **Only the prelude a program reaches is emitted.** A four-line "hello" used to
+  emit 160 function bodies -- the JSON parser, the HTTP helpers, the hash map --
+  because the whole prelude is compiled with every program. Walking the call graph
+  from `main` (and from every function whose address is taken, since an indirect
+  call cannot be resolved statically) leaves a handful. `compute` builds in
+  0.063 s instead of 0.092 s and its binary is 23 KB instead of 79 KB.
+- `compiler/src/target.rs`: one description of what differs between systems —
+  symbol spelling, object format, calling convention, assembler and linker
+  invocations, and which runtime platform layer to compile.
+- **The Windows x64 calling convention** in the backend: four argument registers
+  in their own order, 32 bytes of shadow space, aggregates returned through a
+  hidden pointer at any size, and `%rsi`/`%rdi` preserved across calls.
+- The runtime split into a portable body and per-system layers under
+  `runtime/platform/`. On Windows, where `fork` does not exist, the checked
+  fan-out runs on `CreateThread`; the `Send` guarantee is unchanged because the
+  front end settles it before either call.
+- `compiler/tests/cross_target.rs`: asserts each target's assembly is accepted by
+  a real assembler for its object format and yields the right object kind with
+  `_main` defined, and that the Linux output did not change.
+
+### Fixed
+
+- **A pipe silently became two half-handles on Windows.** `umay_pipe` was a stub
+  that always failed, and the storage callers read back was four bytes per end --
+  too narrow for a `HANDLE`, so even a real `CreatePipe` would have handed back a
+  value that named nothing. Both ends are eight bytes now, widened in the platform
+  layer on POSIX and written at full width on Windows.
+  - Regression test `a_pipe_reports_two_usable_ends` builds and runs a program that
+    opens a pipe and rejects any end that is zero, negative or the same as the
+    other. It fails if the widening is removed.
+- **`&v as T` parsed as `&(v as T)`.** `as` binds looser than every prefix
+  operator, so the cast applied to the thing being pointed at rather than to the
+  pointer. The same fault made `*p as usize` mean `*(p as usize)`. The parser now
+  takes one operand for a prefix operator and applies casts above it.
+- **A frame assumed the stack alignment it was entered with.** Both ABIs promise a
+  16-byte stack pointer at a `call`, and every frame relies on it -- but a Windows
+  thread starts its routine without one, so the pointer was eight bytes off and
+  the first call the thread made faulted. The prologue now rounds the pointer down
+  instead of trusting it.
+- **A structure argument was dropped when a call mixed register and stack
+  arguments.** On Win64 the stack arguments begin *above* the 32-byte shadow
+  space, not inside it: taking the larger of the two sizes put the first one at
+  offset zero, where the callee never looked.
+- **A one-field structure crashed on Windows.** Win64 returns a structure of 1,
+  2, 4 or 8 bytes in `rax`, and 16, 32 or 64 bytes in `rax` and further registers;
+  only the other sizes use a hidden pointer. The compiler treated *every*
+  aggregate as needing the pointer, so the caller read the field from `rax` where
+  the callee had left the address it was told to write through. The rule was
+  written twice -- once in `codegen` for the callee, once in `isel` for the
+  caller -- and fixing one did not fix the other; it now lives in
+  `codegen::aggregate_goes_through_pointer` and both ask it.
+  - Regression test `windows_returns_a_small_aggregate_in_a_register` checks the
+    callee and the caller in the same assembly. It fails if the Win64 arm goes
+    back to `size > 0`.
+- **Windows sockets crashed on the first call after opening one.** `Socket.fd` was
+  an `i32`, but a Windows `SOCKET` is a 64-bit handle: narrowing it lost the top
+  half, and the resulting value named nothing. The field, and the platform
+  bindings, are `isize` now.
+- **Windows and macOS objects could not be linked at all.** Four separate faults,
+  each invisible on Linux and each reported as the same page of
+  `undefined reference` errors:
+  - A cross-target assembler is a *driver*: `clang -o out.o in.s` links rather
+    than assembles, so the object was never produced. `-c` was missing.
+  - Definitions took the target's `_` prefix but references did not, so every
+    call into the runtime and every read of a string literal named a symbol that
+    did not exist. Only definitions went through the mangling.
+  - Symbols from the C library were given the same prefix, which asked for
+    `_malloc` when MinGW exports `malloc`.
+  - MinGW's startup code calls `WinMain`, not `main`, whatever subsystem the
+    driver is told to use. The program object now defines a `WinMain` that jumps
+    to `main`; the runtime object must not, or the two collide.
+- **The Windows link driver is `x86_64-w64-mingw32-gcc`, not `clang`.** Clang's
+  PE linker cannot resolve the `__ImageBase` relocations in MinGW's import
+  libraries and fails on every CRT archive.
+- **A store through a pointer no longer has its pointer deleted.** Optimisation
+  killed the liveness of a local whenever a statement assigned to it, but
+  `*p = 5` lowers to `_0.(deref) = 5`: it writes *through* `_0` and does not
+  define it. The statement that produced the pointer was therefore judged dead
+  and removed, so the program stored through a register that was never written.
+  `umay build -O1` and above produced binaries that segfaulted, and `alloc` /
+  `dealloc` benchmarks died with `double free or corruption`. Optimisation is
+  only allowed to remove work, never to change what a program computes.
+- **A comparison's operands keep their own type.** Folding stamped a comparison's
+  destination type (`bool`) onto its operands, which retyped an integer literal
+  to a byte: `i < 1000` was emitted as `movb $1000, %cl`, so the bound became
+  232 and a loop ran 232 times instead of 1000. The wrong answer appeared at
+  every level above `-O0`.
+
+- `errno`, `rename` and `mkdir` no longer reach a C symbol directly from the
+  portable runtime: the accessor and the replacing-rename differ per system
+  (`__errno_location` / `__error` / `_errno`, and Windows' CRT `rename` refuses
+  to replace an existing target where POSIX replaces it).
+
+### Changed
+
+- **The benchmark now builds UMAY as an optimised release.** `scripts/bench.py`
+  compiled UMAY at its default `-O0` while every other language in the table was
+  given its optimiser (`gcc -O2`, `rustc -O`, Zig `ReleaseFast`). The comparison
+  measured one flag, not five languages.
+
+### Known limitations
+
+- A non-host target's executable cannot be linked on a machine without that
+  system's SDK and CRT.
+- macOS is emitter-only here: there is no Apple SDK on a Linux host, so the
+  object is produced and never linked. What the linker would check *is* checked
+  statically: `a_macos_object_leaves_only_its_own_runtime_undefined` assembles
+  the object, confirms `_main` is defined and exported, and rejects any name it
+  leaves undefined that is neither UMAY's own runtime nor a C library function
+  macOS provides. A misspelt C binding is invisible until a Mac fails to link, and
+  that is exactly how four faults survived on Windows.
+- `x86_64` is the only architecture. An ARM triple is refused with an
+  explanation rather than emitting a binary nothing can load.
+
 ## [0.1.0] — 2026-11-08
 
 The first release: a language, a compiler, a standard library and a toolchain,

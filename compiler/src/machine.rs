@@ -58,13 +58,69 @@ pub const ALLOCATABLE: [u8; 12] = [
 /// Registers a call may clobber, in SysV order.
 pub const CALLER_SAVED: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
 
+/// Registers a call may clobber under the Microsoft x64 convention.
+///
+/// Win64 preserves `rsi`, `rdi`, `rbx` and `r12`-`r15`; SysV preserves only
+/// `rbx` and `r12`-`r15`. A live range that spans a call must lose `rsi` and
+/// `rdi` on Windows too, and an allocator that uses the SysV list there leaves a
+/// caller's value in `rsi` and hands back corrupted data — the kind of bug that
+/// shows up as a wrong answer in one program and nothing anywhere else.
+pub const CALLER_SAVED_WIN64: [u8; 7] = [0, 1, 2, 8, 9, 10, 11];
+
+/// The registers the allocator may hand out, under Win64.
+///
+/// The same twelve as SysV here, because the callee-saved set that grows on
+/// Windows is exactly the set SysV already treats as callee-saved-minus-two, and
+/// the allocator saves whatever it uses. The list is kept separate rather than
+/// aliased so that a future change to one cannot silently change the other.
+pub const ALLOCATABLE_WIN64: [u8; 12] = [
+    0, // rax
+    1, // rcx
+    2, // rdx
+    8, // r8
+    9, // r9
+    10, // r10
+    11, // r11
+    // Callee-saved under Win64: these include rsi and rdi, which SysV treats as
+    // caller-saved.
+    3, // rbx
+    6, // rsi
+    7, // rdi
+    12, // r12
+    13, // r13
+];
+
+/// True when `reg` must be preserved across a call under Win64.
+///
+/// `r14` and `r15` are in `ALLOCATABLE_WIN64`'s sibling list rather than here
+/// only because the array above is capped at twelve; see `callee_saved_win64`.
+pub fn is_callee_saved_win64(reg: u8) -> bool {
+    matches!(reg, 3 | 6 | 7 | 12 | 13 | 14 | 15)
+}
+
+/// True when `reg` must be preserved across a call under SysV.
+pub fn is_callee_saved_sysv(reg: u8) -> bool {
+    matches!(reg, 3 | 12 | 13 | 14 | 15)
+}
+
+/// The integer argument registers, in order, for each ABI.
+///
+/// SysV: `rdi, rsi, rdx, rcx, r8, r9`.
+/// Win64: `rcx, rdx, r8, r9` — only four, and in a completely different order.
+/// A call site that uses the SysV list on Windows passes the first argument in
+/// `%rdi`, which the callee never reads, so it sees its first parameter as
+/// whatever happened to be in `%rcx`.
+pub const ARG_REGS_SYSV: [u8; 6] = [7, 6, 2, 1, 8, 9];
+pub const ARG_REGS_WIN64: [u8; 4] = [1, 2, 8, 9];
+
 /// A register the allocator never hands out, for scratch use inside a single
 /// rewritten instruction.
 ///
 /// It must not be allocatable: the rewrite that needs it runs *after*
 /// allocation, so if a value were already living there the scratch use would
-/// silently destroy it. `r11` is caller-saved and is not otherwise used, so
-/// clobbering it cannot surprise anything.
+/// silently destroy it. `r11` is caller-saved on both ABIs and is not otherwise
+/// used by a preference order, so clobbering it cannot surprise anything. It is
+/// absent from `ALLOCATABLE_WIN64` for the same reason.
 pub const SCRATCH: u8 = 11;
 
 pub fn reg_name(code: u8) -> &'static str {

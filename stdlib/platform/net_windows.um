@@ -1,0 +1,96 @@
+// TCP sockets on Windows: bindings only.
+//
+// Windows' socket library is Winsock, not the C library's POSIX calls. Two
+// things differ beyond the names:
+//
+//   * `WSAStartup` must succeed before any other socket call. A program that
+//     skips it gets `WSANOTINITIALISED` from everything.
+//   * A `SOCKET` is a 64-bit handle, not a small file descriptor. `INVALID_SOCKET`
+//     is `(SOCKET)-1`, so a handle does not sign-extend the way `fd < 0` expects.
+//     These wrappers narrow to `i32` and report failure as -1, which is what the
+//     portable half of the library is written against -- and close the full
+//     handle before narrowing, because a truncated handle cannot be closed.
+//
+// The receive and send calls are `recv`/`send`, not `read`/`write`: a socket is
+// not a file here, and the file calls reject a socket handle.
+extern fn "WSAStartup" umay_win_wsa_startup(version: u16, data: *mut u8) -> i32
+extern fn "WSAGetLastError" umay_win_wsa_error() -> i32
+extern fn "socket" umay_win_socket(domain: i32, kind: i32, protocol: i32) -> usize
+extern fn "bind" umay_win_bind(fd: usize, addr: *const u8, len: i32) -> i32
+extern fn "listen" umay_win_listen(fd: usize, backlog: i32) -> i32
+extern fn "accept" umay_win_accept(fd: usize, addr: *mut u8, len: *mut i32) -> usize
+extern fn "recv" umay_win_recv(fd: usize, buf: *mut u8, count: i32, flags: i32) -> i32
+extern fn "send" umay_win_send(fd: usize, buf: *const u8, count: i32, flags: i32) -> i32
+extern fn "closesocket" umay_win_closesocket(fd: usize) -> i32
+
+// The version Winsock wants in the low and high halves of a `u16` word: 2.2.
+const UMAY_WSA_VERSION: u16 = 514u16
+// One `SOCKET` is 64 bits; the startup block only has to be large enough for the
+// library to write into, and is never read back.
+const UMAY_WSA_DATA_BYTES: usize = 400usize
+
+// Initialises Winsock once per process.
+//
+// `WSAStartup` is reference counted by the library, so calling it more than once
+// is not an error; the second call is simply paired with the first. That is why
+// there is no "already started" flag to get wrong.
+fn umay_platform_net_start() -> bool {
+    let data = umay_alloc(UMAY_WSA_DATA_BYTES)
+    let rc = umay_win_wsa_startup(UMAY_WSA_VERSION, data)
+    umay_dealloc(data)
+    return rc == 0
+}
+
+// Builds a socket, or -1 when the library refuses one.
+//
+// The handle is returned at full width: a `SOCKET` is 64 bits and narrowing it
+// to 32 loses the top half, after which the value names nothing and the first
+// call through it faults.
+pub fn umay_net_socket(domain: i32, kind: i32, protocol: i32) -> isize {
+    let handle = umay_win_socket(domain, kind, protocol)
+    if unsafe { handle as usize } == 0usize || handle == umay_invalid_socket() {
+        return -1isize
+    }
+    return unsafe { handle as isize }
+}
+
+// `INVALID_SOCKET`, as Windows defines it.
+fn umay_invalid_socket() -> usize {
+    return unsafe { 0usize - 1usize }
+}
+
+pub fn umay_net_bind(fd: isize, addr: *const u8, len: i32) -> i32 {
+    return umay_win_bind(unsafe { fd as usize }, addr, len)
+}
+
+pub fn umay_net_listen(fd: isize, backlog: i32) -> i32 {
+    return umay_win_listen(unsafe { fd as usize }, backlog)
+}
+
+pub fn umay_net_accept(fd: isize, addr: *mut u8, len: *mut i32) -> isize {
+    let handle = umay_win_accept(unsafe { fd as usize }, addr, len)
+    if unsafe { handle as usize } == 0usize || handle == umay_invalid_socket() {
+        return -1isize
+    }
+    return unsafe { handle as isize }
+}
+
+pub fn umay_net_read(fd: isize, buf: *mut u8, count: usize) -> i64 {
+    let n = umay_win_recv(unsafe { fd as usize }, buf, count as i32, 0)
+    if n < 0 {
+        return -1i64
+    }
+    return n as i64
+}
+
+pub fn umay_net_write(fd: isize, buf: *const u8, count: usize) -> i64 {
+    let n = umay_win_send(unsafe { fd as usize }, buf, count as i32, 0)
+    if n < 0 {
+        return -1i64
+    }
+    return n as i64
+}
+
+pub fn umay_net_close(fd: isize) -> i32 {
+    return umay_win_closesocket(unsafe { fd as usize })
+}

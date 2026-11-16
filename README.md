@@ -30,9 +30,58 @@ complete lexer, parser and semantic analyser with the AI-first diagnostics
 infrastructure, a full HIR → MIR lowering with explicit control flow and drop
 elaboration, an ownership and borrow checker running on that MIR, and a custom
 x86_64 backend.
-`umay build` produces a working Linux executable, `umay run` builds and runs it,
+`umay build` produces a working executable, `umay run` builds and runs it,
 and `umay asm` prints the generated assembly. The MIR can be inspected with
 `umay mir <file>`.
+
+## Targets
+
+One frontend, three systems. `--target` selects one; without it, the compiler
+builds for the machine it is running on.
+
+| Triple | Object format | ABI | Runtime layer |
+| --- | --- | --- | --- |
+| `x86_64-unknown-linux-gnu` | ELF | System V | `runtime/platform/linux.um` |
+| `x86_64-apple-darwin` | Mach-O | System V | `runtime/platform/macos.um` |
+| `x86_64-pc-windows-gnu` | COFF | Win64 | `runtime/platform/windows.um` |
+
+```sh
+umay build main.um                                   # the host's own system
+umay build --target x86_64-apple-darwin main.um
+umay build --target x86_64-pc-windows-gnu main.um
+umay asm --target x86_64-apple-darwin main.um        # print, don't link
+```
+
+What differs between them is confined to a few places, so a fourth system means
+adding one file rather than finding every assumption:
+
+- **Symbol spelling.** Mach-O and COFF prefix external names with `_`, which
+  `compiler/src/target.rs` (`ObjectFormat::symbol_prefix`) applies once.
+- **Object-file directives.** Mach-O wants `.section __TEXT,__const` and rejects
+  the ELF `.type`/`.size`/`.note.GNU-stack` metadata; COFF rejects the stack
+  note. `Target::rodata_directive` and `Target::object_trailer` decide.
+- **Calling convention.** Win64 passes arguments in `%rcx, %rdx, %r8, %r9`
+  (four, not six), reserves 32 bytes of shadow space, returns *every* aggregate
+  through a hidden pointer, and preserves `%rsi`/`%rdi`. `Abi` carries this, and
+  `isel`, `regalloc` and `asm` ask it.
+- **The runtime's system layer.** The C symbols, their numeric constants
+  (`O_CREAT` is `0x40` on Linux, `0x200` on macOS, `0x0100` on Windows), the
+  `errno` accessor (`__errno_location`, `__error`, `_errno`), and whether `fork`
+  exists at all.
+
+`runtime/runtime.um` is the portable body: allocation, byte strings, integer
+formatting, output. `runtime/platform/*.um` is what a new system has to supply.
+On Windows there is no `fork`, so the checked fan-out uses `CreateThread`
+instead; the language's `Send` guarantee is unchanged, because it was settled by
+the front end before either call.
+
+Cross builds need an assembler that can emit the target's object format. Both
+non-Linux targets use `clang`'s integrated assembler, which is why a `--target`
+build assembles on a Linux host. **Linking** a non-host target additionally
+needs that system's SDK and CRT: a Linux machine produces a correct Mach-O or
+COFF object but cannot link it without an Apple SDK or a MinGW-w64 runtime.
+Only x86_64 has a backend, so an ARM triple is refused with an explanation
+rather than emitting a binary nothing can load.
 
 Every program is linked against a runtime written in UMAY itself, and the prelude
 and the first library types are UMAY source too, so a program can print, allocate

@@ -1,0 +1,134 @@
+// The runtime's operating-system layer: Linux (glibc).
+//
+// Everything above this layer in `runtime/runtime.um` is portable UMAY. This
+// file is what actually differs: which C symbols exist, what the numeric
+// constants they take mean, and which of the process primitives the system
+// provides at all.
+//
+// It is concatenated *after* the portable body, so the portable body can call
+// `umay_platform_*` functions defined here and this file can call the portable
+// `umay_alloc`/`umay_read_*` helpers above it. Nothing here is visible to a
+// program: the prelude binds `umay_*` names, and `umay_platform_*` is not among
+// them.
+
+// --- C bindings -------------------------------------------------------------
+
+// `malloc(size)` returns a pointer to `size` uninitialised bytes, or null.
+extern fn "malloc" umay_c_malloc(size: usize) -> *mut u8
+// `free(ptr)` releases a block obtained from `malloc`.
+extern fn "free" umay_c_free(ptr: *mut u8) -> ()
+// `write(fd, buf, count)` writes bytes and returns how many, or -1.
+extern fn "write" umay_c_write(fd: i32, buf: *const u8, count: usize) -> isize
+// `exit(code)` terminates the process.
+extern fn "exit" umay_c_exit(code: i32) -> ()
+// `lseek(fd, offset, whence)` moves the file position and returns the new one.
+extern fn "lseek" umay_c_lseek(fd: i32, offset: i64, whence: i32) -> i64
+// `getenv(name)` returns the value of an environment variable, or 0.
+extern fn "getenv" umay_c_getenv(name: *const u8) -> *const u8
+// `pipe(fds)` creates a pipe and writes two *descriptors* into `fds`, four bytes
+// each. `umay_c_pipe` below widens them.
+extern fn "pipe" umay_posix_pipe(fds: *mut u8) -> i32
+
+// Makes a pipe and writes its two ends into `fds`, eight bytes each.
+//
+// A POSIX descriptor is a small integer and a Windows handle is pointer-sized.
+// Storage in the portable runtime is eight bytes per end, so the narrowing on
+// this side happens once, here, rather than in every caller: the C call gets the
+// four-byte array it wants and the caller gets the shape it expects.
+fn umay_c_pipe(fds: *mut u8) -> i32 {
+    let raw = umay_alloc(8)
+    let rc = umay_posix_pipe(raw)
+    if rc == 0 {
+        let read_end = umay_read_u32(raw)
+        let write_end = umay_read_u32(unsafe { (raw as usize + 4) as *const u8 })
+        umay_write_i64(fds, read_end as i64)
+        umay_write_i64(unsafe { (fds as usize + 8) as *mut u8 }, write_end as i64)
+    }
+    umay_dealloc(raw)
+    return rc
+}
+// `fork()` creates a child process sharing this address space copy-on-write.
+extern fn "fork" umay_c_fork() -> i32
+// `waitpid(pid, status, options)` waits for a child to change state.
+extern fn "waitpid" umay_c_waitpid(pid: i32, status: *mut i32, options: i32) -> i32
+
+// POSIX file system calls, each returning -1 on failure.
+extern fn "open" umay_c_open(path: *const u8, flags: i32, mode: i32) -> i32
+extern fn "close" umay_c_close(fd: i32) -> i32
+extern fn "read" umay_c_read(fd: i32, buf: *mut u8, count: usize) -> isize
+extern fn "unlink" umay_c_unlink(path: *const u8) -> i32
+extern fn "rename" umay_c_rename(from: *const u8, to: *const u8) -> i32
+extern fn "mkdir" umay_c_mkdir(path: *const u8, mode: i32) -> i32
+
+// `errno` is a macro over a function on glibc, so it cannot be declared
+// directly. This is the portable spelling: glibc exports `__errno_location`,
+// a function returning the address of the thread's errno.
+extern fn __errno_location() -> *mut i32
+
+// --- constants --------------------------------------------------------------
+
+// The `open` flags, as the Linux kernel numbers them.
+//
+// They are spelled out rather than derived because they are an operating
+// system's constants, not the language's. This is the table the comment in
+// `runtime.um` promised would change on a new system, and each platform file
+// carries its own.
+const O_RDONLY: i32 = 0
+const O_WRONLY: i32 = 1
+const O_RDWR: i32 = 2
+const O_CREAT: i32 = 64
+const O_TRUNC: i32 = 512
+const O_APPEND: i32 = 1024
+
+// --- accessors to the portable layer ---------------------------------------
+
+pub fn umay_platform_errno() -> i32 {
+    unsafe {
+        return *__errno_location()
+    }
+}
+
+// Linux has `fork`, so the process primitive is the library call itself.
+pub fn umay_platform_fork() -> i32 {
+    return umay_c_fork()
+}
+
+// The `open` flags and the create mode, as one target's own answer.
+//
+// POSIX takes a three-argument `open(path, flags, mode)` and the mode is a
+// permission mask in octal -- 420 is 0644, world-readable and owner-writable.
+// Windows' `_open` takes the same shape but ignores the mode for anything but
+// `_O_CREAT`, so it is passed as zero there.
+pub fn umay_platform_open_flags(flags: i32) -> i32 {
+    return flags
+}
+
+pub fn umay_platform_open_mode() -> i32 {
+    return 420
+}
+
+// True when this platform can create processes by copying this one.
+pub fn umay_platform_has_fork() -> bool {
+    return true
+}
+
+// Runs `work(value)` in a child process and returns what it answered.
+//
+// Only reached when `has_fork` is true: the portable runtime chooses between
+// this and a thread. The implementation lives in the portable body, which is
+// where the pipe hand-off is described.
+pub fn umay_platform_thread_spawn(work: *const u8, value: usize) -> usize {
+    return umay_thread_spawn(work, value)
+}
+
+// Renaming and directory creation.
+//
+// POSIX `rename` already replaces an existing target, which is why Linux and
+// macOS need no special case here; Windows does, and says so in its own layer.
+pub fn umay_platform_rename(from: *const u8, to: *const u8) -> i32 {
+    return umay_c_rename(from, to)
+}
+
+pub fn umay_platform_mkdir(path: *const u8) -> i32 {
+    return umay_c_mkdir(path, 493)
+}
