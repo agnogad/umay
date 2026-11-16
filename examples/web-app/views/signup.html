@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign up - UMAY Notes</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="card">
+    <h1>Sign up</h1>
+    <p class="error">{{error}}</p>
+    <form class="auth-form" method="POST" action="/signup">
+      <label>
+        <span>Email</span>
+        <input type="email" name="email" value="{{email}}" required>
+      </label>
+      <label>
+        <span>Password (8+ characters)</span>
+        <input type="password" name="password" minlength="8" required>
+      </label>
+      <button type="submit" class="btn primary">Create account</button>
+    </form>
+    <p class="switch">Already have an account? <a href="/login">Log in</a></p>
+  </main>
+</body>
+</html>

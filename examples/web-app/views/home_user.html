@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UMAY Notes</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <main class="card">
+    <header class="topbar">
+      <div>
+        <h1>Welcome, {{email}}</h1>
+        <p class="subtitle">Your personal notes</p>
+      </div>
+      <form method="POST" action="/logout">
+        <button type="submit" class="btn">Log out</button>
+      </form>
+    </header>
+
+    <form id="note-form" class="note-form" method="POST" action="/api/notes">
+      <input id="note-text" type="text" name="text" placeholder="Write a note..." maxlength="1000" required>
+      <button type="submit" class="btn primary">Add</button>
+    </form>
+    <p id="note-error" class="error"></p>
+
+    <ul id="notes-list" class="notes">
+      {{notes}}
+    </ul>
+  </main>
+</body>
+</html>

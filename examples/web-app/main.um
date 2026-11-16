@@ -1,0 +1,481 @@
+// Capstone web application: accounts, signed cookie sessions, SQLite notes API,
+// HTML templates, and static files.
+//
+// Build and run:
+//     cd examples/web-app && umay build main.um && ./dist/main
+
+extern fn "setenv" umay_setenv(name: *const u8, value: *const u8, overwrite: i32) -> i32
+
+fn app_secret() -> Bytes {
+    return env_or("APP_SECRET", "")
+}
+
+fn app_ensure_secret() {
+    let existing = env_or("APP_SECRET", "")
+    if existing.is_empty() {
+        let generated = random_hex(32)
+        eprintln("warning: APP_SECRET is unset; generated an ephemeral secret (sessions will not survive a restart)")
+        let _ = umay_setenv("APP_SECRET" as *const u8, generated.data, 1)
+        dealloc(generated.data as *mut u8)
+    }
+}
+
+fn app_pbkdf2_iterations() -> u32 {
+    let raw = env_or("APP_PBKDF2_ITERATIONS", "100000")
+    let n = parse_decimal(raw)
+    if n < 1i64 || n > 10000000i64 {
+        return 100000u32
+    }
+    return n as u32
+}
+
+fn app_try_open_db() -> Option<Db> {
+    let path = env_or("APP_DB", "app.db")
+    return db_open(unsafe { path.data as &str })
+}
+
+fn app_open_db() -> Db {
+    return match app_try_open_db() {
+        Option::Some(d) => d,
+        Option::None => {
+            panic("app_open_db: failed to open database")
+            Db { handle: unsafe { 0 as *mut u8 } }
+        }
+    }
+}
+
+fn app_init_db() -> bool {
+    let db = match app_try_open_db() {
+        Option::Some(d) => d,
+        Option::None => {
+            eprintln("error: failed to open database")
+            return false
+        }
+    }
+    let ok = db.exec(
+        "PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL);"
+    )
+    if !ok {
+        eprintln("error: failed to initialize database schema")
+    }
+    db.close()
+    return ok
+}
+
+fn app_i64_bytes(value: i64) -> Bytes {
+    let buf = alloc(24)
+    let n = put_decimal(buf, 0, value as usize)
+    return Bytes::view(buf as *const u8, n)
+}
+
+fn app_session_cookie(user_id: i64) -> Bytes {
+    let uid = app_i64_bytes(user_id)
+    let secret = app_secret()
+    let token = session_token(&uid, 86400i64 * 7i64, &secret)
+    return cookie_header("sid", &token, 86400i64 * 7i64)
+}
+
+fn app_clear_session_cookie() -> Bytes {
+    let empty = Bytes::from_str("")
+    return cookie_header("sid", &empty, 0i64)
+}
+
+fn app_current_user_id(req: &Request) -> Option<i64> {
+    let secret = app_secret()
+    let raw = match session_user(req, "sid", &secret) {
+        Option::Some(v) => v,
+        Option::None => return Option::None,
+    }
+    let id = parse_decimal(raw)
+    if id <= 0i64 {
+        return Option::None
+    }
+    return Option::Some(id)
+}
+
+fn app_redirect(location: &str, set_cookie: Bytes) -> Response {
+    let r = Response::new(303).with_header("Location", Bytes::from_str(location))
+    if set_cookie.len > 0 {
+        return r.with_header("Set-Cookie", set_cookie)
+    }
+    return r
+}
+
+fn app_render_page(status: i32, path: &str, vars: &TemplateVars) -> Response {
+    return match render_file(path, vars) {
+        Option::Some(html) => Response::new(status).with_type("text/html; charset=utf-8").with_body(html),
+        Option::None => Response::new(500).with_type("text/plain; charset=utf-8").with_body(Bytes::from_str("template not found\n")),
+    }
+}
+
+fn app_json_error(status: i32, msg: &str) -> Response {
+    let j = JsonOut::new().begin_object().key("error").string(Bytes::from_str(msg)).end_object()
+    return Response::new(status).with_type("application/json").with_body(j.bytes())
+}
+
+fn app_render_notes_html(db: &Db, user_id: i64) -> Bytes {
+    let row_path = "views/note_item.html" as *const u8
+    if is_dir(row_path) || !file_exists(row_path) {
+        return Bytes::from_str("")
+    }
+    let row_data = read_file_bytes(row_path)
+    let row_tmpl = Bytes::view(row_data.ptr as *const u8, row_data.len)
+    let q = match db.prepare("SELECT id, text FROM notes WHERE user_id = ?1 ORDER BY id ASC") {
+        Option::Some(s) => s,
+        Option::None => {
+            row_data.free()
+            return Bytes::from_str("")
+        }
+    }
+    q.bind_int(1, user_id)
+    let mut acc = String::new()
+    let mut count: usize = 0
+    while q.row() {
+        let rv = TemplateVars::new()
+            .int("id", q.int(0))
+            .text("text", q.text(1))
+        acc = template_append(acc, render(&row_tmpl, &rv))
+        rv.free()
+        count = count + 1
+    }
+    q.finish()
+    row_data.free()
+    if count == 0 {
+        return Bytes::from_str("<li class=\"empty\">No notes yet.</li>")
+    }
+    return Bytes::view(acc.as_ptr(), acc.len())
+}
+
+fn app_home(req: &Request, res: &mut Response) {
+    let uid = match app_current_user_id(req) {
+        Option::Some(id) => id,
+        Option::None => {
+            let vars = TemplateVars::new()
+            let answer = app_render_page(200, "views/home_guest.html", &vars)
+            vars.free()
+            unsafe { *res = answer }
+            return
+        }
+    }
+    let db = app_open_db()
+    let q = match db.prepare("SELECT email FROM users WHERE id = ?1") {
+        Option::Some(s) => s,
+        Option::None => {
+            db.close()
+            let answer = Response::new(500).with_type("text/plain; charset=utf-8").with_body(Bytes::from_str("database error\n"))
+            unsafe { *res = answer }
+            return
+        }
+    }
+    q.bind_int(1, uid)
+    if !q.row() {
+        q.finish()
+        db.close()
+        let vars = TemplateVars::new()
+        let answer = app_render_page(200, "views/home_guest.html", &vars)
+        vars.free()
+        unsafe { *res = answer }
+        return
+    }
+    let email = q.text(0)
+    q.finish()
+    let notes_html = app_render_notes_html(&db, uid)
+    db.close()
+    let vars = TemplateVars::new()
+        .text("email", email)
+        .html("notes", notes_html)
+    let answer = app_render_page(200, "views/home_user.html", &vars)
+    vars.free()
+    unsafe { *res = answer }
+}
+
+fn app_signup_form(status: i32, email: Bytes, error_msg: &str) -> Response {
+    let vars = TemplateVars::new()
+        .text("email", email)
+        .text("error", Bytes::from_str(error_msg))
+    let answer = app_render_page(status, "views/signup.html", &vars)
+    vars.free()
+    return answer
+}
+
+fn app_signup_get(_req: &Request, res: &mut Response) {
+    let answer = app_signup_form(200, Bytes::from_str(""), "")
+    unsafe { *res = answer }
+}
+
+fn app_signup_post(req: &Request, res: &mut Response) {
+    let email = req.form("email").unwrap_or(Bytes::from_str(""))
+    let password = req.form("password").unwrap_or(Bytes::from_str(""))
+    if email.len == 0 || email.find_byte('@' as u8, 0).is_none() {
+        let answer = app_signup_form(422, email, "Please enter a valid email address containing @.")
+        unsafe { *res = answer }
+        return
+    }
+    if password.len < 8 {
+        let answer = app_signup_form(422, email, "Password must be at least 8 characters.")
+        unsafe { *res = answer }
+        return
+    }
+    let hash = password_hash(&password, app_pbkdf2_iterations())
+    let now = unix_now()
+    let db = app_open_db()
+    let ins = match db.prepare("INSERT INTO users (email, password_hash, created_at) VALUES (?1, ?2, ?3)") {
+        Option::Some(s) => s,
+        Option::None => {
+            db.close()
+            let answer = app_signup_form(500, email, "Database error.")
+            unsafe { *res = answer }
+            return
+        }
+    }
+    ins.bind_text(1, &email)
+    ins.bind_text(2, &hash)
+    ins.bind_int(3, now)
+    let ok = ins.run()
+    ins.finish()
+    if !ok {
+        let mut duplicate = false
+        match db.prepare("SELECT id FROM users WHERE email = ?1") {
+            Option::Some(chk) => {
+                chk.bind_text(1, &email)
+                duplicate = chk.row()
+                chk.finish()
+            }
+            Option::None => {
+                let _ = 0
+            }
+        }
+        db.close()
+        if duplicate {
+            let answer = app_signup_form(409, email, "An account with that email already exists.")
+            unsafe { *res = answer }
+            return
+        }
+        let answer = app_signup_form(500, email, "Could not create account.")
+        unsafe { *res = answer }
+        return
+    }
+    let uid = db.last_insert_id()
+    db.close()
+    let answer = app_redirect("/", app_session_cookie(uid))
+    unsafe { *res = answer }
+}
+
+fn app_login_form(status: i32, email: Bytes, error_msg: &str) -> Response {
+    let vars = TemplateVars::new()
+        .text("email", email)
+        .text("error", Bytes::from_str(error_msg))
+    let answer = app_render_page(status, "views/login.html", &vars)
+    vars.free()
+    return answer
+}
+
+fn app_login_get(_req: &Request, res: &mut Response) {
+    let answer = app_login_form(200, Bytes::from_str(""), "")
+    unsafe { *res = answer }
+}
+
+fn app_login_post(req: &Request, res: &mut Response) {
+    let email = req.form("email").unwrap_or(Bytes::from_str(""))
+    let password = req.form("password").unwrap_or(Bytes::from_str(""))
+    if email.len == 0 || password.len == 0 {
+        let answer = app_login_form(401, email, "Invalid email or password.")
+        unsafe { *res = answer }
+        return
+    }
+    let db = app_open_db()
+    let q = match db.prepare("SELECT id, password_hash FROM users WHERE email = ?1") {
+        Option::Some(s) => s,
+        Option::None => {
+            db.close()
+            let answer = app_login_form(500, email, "Database error.")
+            unsafe { *res = answer }
+            return
+        }
+    }
+    q.bind_text(1, &email)
+    if !q.row() {
+        q.finish()
+        db.close()
+        let answer = app_login_form(401, email, "Invalid email or password.")
+        unsafe { *res = answer }
+        return
+    }
+    let uid = q.int(0)
+    let stored = q.text(1)
+    q.finish()
+    db.close()
+    if !password_verify(&password, &stored) {
+        let answer = app_login_form(401, email, "Invalid email or password.")
+        unsafe { *res = answer }
+        return
+    }
+    let answer = app_redirect("/", app_session_cookie(uid))
+    unsafe { *res = answer }
+}
+
+fn app_logout_post(_req: &Request, res: &mut Response) {
+    let answer = app_redirect("/", app_clear_session_cookie())
+    unsafe { *res = answer }
+}
+
+fn app_api_notes_list(req: &Request, res: &mut Response) {
+    let uid = match app_current_user_id(req) {
+        Option::Some(id) => id,
+        Option::None => {
+            let answer = app_json_error(401, "login required")
+            unsafe { *res = answer }
+            return
+        }
+    }
+    let db = app_open_db()
+    let q = match db.prepare("SELECT id, text, created_at FROM notes WHERE user_id = ?1 ORDER BY id ASC") {
+        Option::Some(s) => s,
+        Option::None => {
+            db.close()
+            let answer = app_json_error(500, "database error")
+            unsafe { *res = answer }
+            return
+        }
+    }
+    q.bind_int(1, uid)
+    let mut j = JsonOut::new().begin_array()
+    while q.row() {
+        j = j.begin_object()
+            .key("id").int(q.int(0))
+            .key("text").string(q.text(1))
+            .key("created_at").int(q.int(2))
+            .end_object()
+    }
+    j = j.end_array()
+    q.finish()
+    db.close()
+    let answer = Response::new(200).with_type("application/json").with_body(j.bytes())
+    unsafe { *res = answer }
+}
+
+fn app_api_notes_create(req: &Request, res: &mut Response) {
+    let uid = match app_current_user_id(req) {
+        Option::Some(id) => id,
+        Option::None => {
+            let answer = app_json_error(401, "login required")
+            unsafe { *res = answer }
+            return
+        }
+    }
+    let text = match req.form("text") {
+        Option::Some(t) => t,
+        Option::None => {
+            let answer = app_json_error(422, "text is required")
+            unsafe { *res = answer }
+            return
+        }
+    }
+    if text.len == 0 || text.len > 1000 {
+        let answer = app_json_error(422, "text must be between 1 and 1000 bytes")
+        unsafe { *res = answer }
+        return
+    }
+    let now = unix_now()
+    let db = app_open_db()
+    let ins = match db.prepare("INSERT INTO notes (user_id, text, created_at) VALUES (?1, ?2, ?3)") {
+        Option::Some(s) => s,
+        Option::None => {
+            db.close()
+            let answer = app_json_error(500, "database error")
+            unsafe { *res = answer }
+            return
+        }
+    }
+    ins.bind_int(1, uid)
+    ins.bind_text(2, &text)
+    ins.bind_int(3, now)
+    let ok = ins.run()
+    ins.finish()
+    if !ok {
+        db.close()
+        let answer = app_json_error(500, "could not save note")
+        unsafe { *res = answer }
+        return
+    }
+    let id = db.last_insert_id()
+    db.close()
+    let j = JsonOut::new().begin_object().key("id").int(id).end_object()
+    let answer = Response::new(201).with_type("application/json").with_body(j.bytes())
+    unsafe { *res = answer }
+}
+
+fn app_api_notes_delete(req: &Request, res: &mut Response) {
+    let uid = match app_current_user_id(req) {
+        Option::Some(id) => id,
+        Option::None => {
+            let answer = app_json_error(401, "login required")
+            unsafe { *res = answer }
+            return
+        }
+    }
+    let id = parse_decimal(req.param("id"))
+    if id <= 0i64 {
+        let answer = app_json_error(404, "note not found")
+        unsafe { *res = answer }
+        return
+    }
+    let db = app_open_db()
+    let del = match db.prepare("DELETE FROM notes WHERE id = ?1 AND user_id = ?2") {
+        Option::Some(s) => s,
+        Option::None => {
+            db.close()
+            let answer = app_json_error(500, "database error")
+            unsafe { *res = answer }
+            return
+        }
+    }
+    del.bind_int(1, id)
+    del.bind_int(2, uid)
+    let ok = del.run()
+    del.finish()
+    let deleted = ok && db.changes() > 0i64
+    db.close()
+    if !deleted {
+        let answer = app_json_error(404, "note not found")
+        unsafe { *res = answer }
+        return
+    }
+    let answer = Response::new(204)
+    unsafe { *res = answer }
+}
+
+fn app_static(req: &Request, res: &mut Response) {
+    serve_dir(req, res, "public")
+}
+
+fn app_log_listening(port: u16) {
+    let msg = alloc(64)
+    let mut n = put_text(msg, 0, Bytes::from_str("listening on http://127.0.0.1:"))
+    n = put_decimal(msg, n, port as usize)
+    unsafe { write_byte((msg as usize + n) as *mut u8, 0u8) }
+    eprintln(msg as *const u8)
+    dealloc(msg)
+}
+
+fn main() -> i32 {
+    app_ensure_secret()
+    if !app_init_db() {
+        return 1
+    }
+    let port = env_port("PORT", 8080u16)
+    let routes = [
+        route("GET", "/", app_home),
+        route("GET", "/signup", app_signup_get),
+        route("POST", "/signup", app_signup_post),
+        route("GET", "/login", app_login_get),
+        route("POST", "/login", app_login_post),
+        route("POST", "/logout", app_logout_post),
+        route("GET", "/api/notes", app_api_notes_list),
+        route("POST", "/api/notes", app_api_notes_create),
+        route("DELETE", "/api/notes/:id", app_api_notes_delete),
+        route("GET", "/static/*", app_static),
+    ]
+    app_log_listening(port)
+    return serve(port, routes as *const Route, 10usize)
+}
