@@ -42,8 +42,12 @@ struct Borrow {
     origin: Span,
     /// Linear position of the statement that created it.
     created: Pos,
-    /// Last position at which the reference is used.
+    /// Last position at which the reference is used, for diagnostics.
     last_use: Pos,
+    /// Every position at which the reference is used. The latest one alone is
+    /// not enough for liveness: an earlier use can sit on a path the latest
+    /// one does not, so conflict checks must consider all of them.
+    uses: Vec<Pos>,
 }
 
 /// A point in the program, ordered by execution position.
@@ -179,6 +183,32 @@ fn places_overlap(a: &MovePath, b: &MovePath) -> bool {
     path_starts_with(a, b) || path_starts_with(b, a)
 }
 
+/// True if `to` is reachable from `from` in the control-flow graph.
+///
+/// The block-index range used to select borrows for a conflict check is a
+/// linear over-approximation: a borrow created in one branch and last used in
+/// another can straddle blocks that lie on unrelated paths. Only a CFG path
+/// from the later creation to a use of the earlier borrow means both can be
+/// live at the same point.
+fn reachable_from(body: &Body, from: BlockId, to: BlockId) -> bool {
+    if from == to {
+        return true;
+    }
+    let mut seen = vec![false; body.blocks.len()];
+    let mut stack = vec![from];
+    while let Some(b) = stack.pop() {
+        if seen[b.0 as usize] {
+            continue;
+        }
+        seen[b.0 as usize] = true;
+        if b == to {
+            return true;
+        }
+        stack.extend(body.block(b).successors());
+    }
+    false
+}
+
 fn report_borrow_conflicts(live: &[&Borrow], body: &Body, diagnostics: &mut Vec<Diagnostic>) {
     for i in 0..live.len() {
         for j in (i + 1)..live.len() {
@@ -192,6 +222,20 @@ fn report_borrow_conflicts(live: &[&Borrow], body: &Body, diagnostics: &mut Vec<
             }
             // Order them so the message reads chronologically.
             let (first, second) = if a.created <= b.created { (a, b) } else { (b, a) };
+            // The first borrow is only live at the second's creation if some
+            // use of it is reachable on the CFG. A block-index range alone
+            // treats sibling branches as overlapping and reports false
+            // conflicts for borrows that are dead on this path. Checking only
+            // the latest use would miss a live use on a different branch.
+            if !first.uses.iter().any(|use_pos| {
+                reachable_from(
+                    body,
+                    BlockId(second.created.block),
+                    BlockId(use_pos.block),
+                )
+            }) {
+                continue;
+            }
             let name = place_name(body, &first.place);
             let (code, message) = if first.mutable && !second.mutable {
                 (
@@ -286,6 +330,7 @@ fn collect_borrows(body: &Body) -> Vec<Borrow> {
                     origin: *span,
                     created: pos,
                     last_use: pos,
+                    uses: Vec::new(),
                 });
             }
         }
@@ -376,11 +421,12 @@ fn compute_lifetimes(body: &Body, borrows: &mut [Borrow]) {
     }
 
     for borrow in borrows.iter_mut() {
-        let last = mentions
+        let uses: Vec<Pos> = mentions
             .get(&borrow.holder)
-            .and_then(|v| v.iter().filter(|p| **p > borrow.created).max().copied())
-            .unwrap_or(borrow.created);
-        borrow.last_use = last;
+            .map(|v| v.iter().copied().filter(|p| *p > borrow.created).collect())
+            .unwrap_or_default();
+        borrow.last_use = uses.iter().max().copied().unwrap_or(borrow.created);
+        borrow.uses = uses;
     }
 }
 
