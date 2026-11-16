@@ -92,8 +92,10 @@ fn sha256_compress(h: &mut [u32; 8], k: &[u32; 64], block: *const u8) {
     let mut i: usize = 0
     while i < 16 {
         let p = block.offset((i * 4) as isize)
-        let hi = (read_byte(p) as u32) << 24u32 | (read_byte(p.offset(1)) as u32) << 16u32
-        w[i] = hi | (read_byte(p.offset(2)) as u32) << 8u32 | read_byte(p.offset(3)) as u32
+        w[i] = (read_byte(p) as u32) << 24u32
+            | (read_byte(p.offset(1)) as u32) << 16u32
+            | (read_byte(p.offset(2)) as u32) << 8u32
+            | read_byte(p.offset(3)) as u32
         i = i + 1
     }
     while i < 64 {
@@ -164,8 +166,7 @@ fn sha256_finish(h: &mut [u32; 8], done: usize, data: &Bytes, out: *mut u8) {
     let bits = ((done + data.len) as u64) << 3u64
     i = 0
     while i < 8 {
-        let shift = (56 - i * 8) as u64
-        let byte = (bits >> shift & 0xffu64) as u8
+        let byte = (bits >> (56 - i * 8) as u64 & 0xffu64) as u8
         write_byte(tail.offset((blocks * 64 - 8 + i) as isize), byte)
         i = i + 1
     }
@@ -374,8 +375,7 @@ fn base64url_encode(src: &Bytes, out: *mut u8) -> usize {
         let chars: usize = if left > 2 { 4 } else { left + 1 }
         let mut j: usize = 0
         while j < chars {
-            let shift = (18 - j * 6) as u32
-            write_byte(out.offset(n as isize), base64url_char(v >> shift & 63u32))
+            write_byte(out.offset(n as isize), base64url_char(v >> (18 - j * 6) as u32 & 63u32))
             n = n + 1
             j = j + 1
         }
@@ -411,14 +411,12 @@ fn base64url_decode(src: &Bytes, out: *mut u8) -> i64 {
         }
         // 2 characters carry 1 byte and 3 carry 2; the leftover bits must be zero.
         let bytes = chars - 1
-        let unused = (bytes * 8) as u32
-        if bytes < 3 && v & (0xffffffu32 >> unused) != 0u32 {
+        if bytes < 3 && v & (0xffffffu32 >> (bytes * 8) as u32) != 0u32 {
             return -1i64
         }
         j = 0
         while j < bytes {
-            let shift = (16 - j * 8) as u32
-            write_byte(out.offset(n as isize), (v >> shift & 0xffu32) as u8)
+            write_byte(out.offset(n as isize), (v >> (16 - j * 8) as u32 & 0xffu32) as u8)
             n = n + 1
             j = j + 1
         }

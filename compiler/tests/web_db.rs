@@ -159,7 +159,7 @@ fn create_note(req: &Request, res: &mut Response) {
     let j = JsonOut::new().begin_object().key("id").int(db.last_insert_id()).end_object()
     db.close()
     let answer = Response::new(if ok { 201 } else { 500 }).with_type("application/json").with_body(j.bytes())
-    unsafe { *res = answer }
+    *res = answer
 }
 fn get_note(req: &Request, res: &mut Response) {
     let id = parse_decimal(req.param("id"))
@@ -173,7 +173,7 @@ fn get_note(req: &Request, res: &mut Response) {
     }
     q.finish()
     db.close()
-    unsafe { *res = answer }
+    *res = answer
 }
 fn ask(table: *const Route, raw: &str) {
     let r = dispatch(table, 2, parse_request(Bytes::from_str(raw)))

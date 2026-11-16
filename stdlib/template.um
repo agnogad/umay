@@ -142,9 +142,7 @@ fn render(template: &Bytes, vars: &TemplateVars) -> Bytes {
                     out = template_append_escaped(out, &v.value)
                 }
             }
-            Option::None => {
-                let _ = 0
-            }
+            Option::None => {}
         }
         cursor = close + 2
     }

@@ -12,9 +12,7 @@
 // `route("GET", "/static/*", h)`. A directory is answered with its `index.html`.
 fn serve_dir(req: &Request, res: &mut Response, root: &str) {
     let answer = static_file_response(req, root)
-    // `unsafe` only keeps `umay fmt` from reading a leading `*` as a continued
-    // multiplication.
-    unsafe { *res = answer }
+    *res = answer
 }
 
 // The response `serve_dir` gives, for a caller that wants to adjust it first.

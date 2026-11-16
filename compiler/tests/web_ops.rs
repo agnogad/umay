@@ -362,7 +362,7 @@ fn slow(_req: &Request, res: &mut Response) {
         let _ = monotonic_ms()
     }
     let out = Response::new(200).with_type("text/plain").with_body(Bytes::from_str("slow-ok"))
-    unsafe { *res = out }
+    *res = out
 }
 
 fn main() -> i32 {

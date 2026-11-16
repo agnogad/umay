@@ -153,7 +153,7 @@ fn app_home(req: &Request, res: &mut Response) {
             let vars = TemplateVars::new()
             let answer = app_render_page(200, "views/home_guest.html", &vars)
             vars.free()
-            unsafe { *res = answer }
+            *res = answer
             return
         }
     }
@@ -163,7 +163,7 @@ fn app_home(req: &Request, res: &mut Response) {
         Option::None => {
             db.close()
             let answer = Response::new(500).with_type("text/plain; charset=utf-8").with_body(Bytes::from_str("database error\n"))
-            unsafe { *res = answer }
+            *res = answer
             return
         }
     }
@@ -174,7 +174,7 @@ fn app_home(req: &Request, res: &mut Response) {
         let vars = TemplateVars::new()
         let answer = app_render_page(200, "views/home_guest.html", &vars)
         vars.free()
-        unsafe { *res = answer }
+        *res = answer
         return
     }
     let email = q.text(0)
@@ -186,7 +186,7 @@ fn app_home(req: &Request, res: &mut Response) {
         .html("notes", notes_html)
     let answer = app_render_page(200, "views/home_user.html", &vars)
     vars.free()
-    unsafe { *res = answer }
+    *res = answer
 }
 
 fn app_signup_form(status: i32, email: Bytes, error_msg: &str) -> Response {
@@ -200,7 +200,7 @@ fn app_signup_form(status: i32, email: Bytes, error_msg: &str) -> Response {
 
 fn app_signup_get(_req: &Request, res: &mut Response) {
     let answer = app_signup_form(200, Bytes::from_str(""), "")
-    unsafe { *res = answer }
+    *res = answer
 }
 
 fn app_signup_post(req: &Request, res: &mut Response) {
@@ -208,12 +208,12 @@ fn app_signup_post(req: &Request, res: &mut Response) {
     let password = req.form("password").unwrap_or(Bytes::from_str(""))
     if email.len == 0 || email.find_byte('@' as u8, 0).is_none() {
         let answer = app_signup_form(422, email, "Please enter a valid email address containing @.")
-        unsafe { *res = answer }
+        *res = answer
         return
     }
     if password.len < 8 {
         let answer = app_signup_form(422, email, "Password must be at least 8 characters.")
-        unsafe { *res = answer }
+        *res = answer
         return
     }
     let hash = password_hash(&password, app_pbkdf2_iterations())
@@ -224,7 +224,7 @@ fn app_signup_post(req: &Request, res: &mut Response) {
         Option::None => {
             db.close()
             let answer = app_signup_form(500, email, "Database error.")
-            unsafe { *res = answer }
+            *res = answer
             return
         }
     }
@@ -241,24 +241,22 @@ fn app_signup_post(req: &Request, res: &mut Response) {
                 duplicate = chk.row()
                 chk.finish()
             }
-            Option::None => {
-                let _ = 0
-            }
+            Option::None => {}
         }
         db.close()
         if duplicate {
             let answer = app_signup_form(409, email, "An account with that email already exists.")
-            unsafe { *res = answer }
+            *res = answer
             return
         }
         let answer = app_signup_form(500, email, "Could not create account.")
-        unsafe { *res = answer }
+        *res = answer
         return
     }
     let uid = db.last_insert_id()
     db.close()
     let answer = app_redirect("/", app_session_cookie(uid))
-    unsafe { *res = answer }
+    *res = answer
 }
 
 fn app_login_form(status: i32, email: Bytes, error_msg: &str) -> Response {
@@ -272,7 +270,7 @@ fn app_login_form(status: i32, email: Bytes, error_msg: &str) -> Response {
 
 fn app_login_get(_req: &Request, res: &mut Response) {
     let answer = app_login_form(200, Bytes::from_str(""), "")
-    unsafe { *res = answer }
+    *res = answer
 }
 
 fn app_login_post(req: &Request, res: &mut Response) {
@@ -280,7 +278,7 @@ fn app_login_post(req: &Request, res: &mut Response) {
     let password = req.form("password").unwrap_or(Bytes::from_str(""))
     if email.len == 0 || password.len == 0 {
         let answer = app_login_form(401, email, "Invalid email or password.")
-        unsafe { *res = answer }
+        *res = answer
         return
     }
     let db = app_open_db()
@@ -289,7 +287,7 @@ fn app_login_post(req: &Request, res: &mut Response) {
         Option::None => {
             db.close()
             let answer = app_login_form(500, email, "Database error.")
-            unsafe { *res = answer }
+            *res = answer
             return
         }
     }
@@ -298,7 +296,7 @@ fn app_login_post(req: &Request, res: &mut Response) {
         q.finish()
         db.close()
         let answer = app_login_form(401, email, "Invalid email or password.")
-        unsafe { *res = answer }
+        *res = answer
         return
     }
     let uid = q.int(0)
@@ -307,16 +305,16 @@ fn app_login_post(req: &Request, res: &mut Response) {
     db.close()
     if !password_verify(&password, &stored) {
         let answer = app_login_form(401, email, "Invalid email or password.")
-        unsafe { *res = answer }
+        *res = answer
         return
     }
     let answer = app_redirect("/", app_session_cookie(uid))
-    unsafe { *res = answer }
+    *res = answer
 }
 
 fn app_logout_post(_req: &Request, res: &mut Response) {
     let answer = app_redirect("/", app_clear_session_cookie())
-    unsafe { *res = answer }
+    *res = answer
 }
 
 fn app_api_notes_list(req: &Request, res: &mut Response) {
@@ -324,7 +322,7 @@ fn app_api_notes_list(req: &Request, res: &mut Response) {
         Option::Some(id) => id,
         Option::None => {
             let answer = app_json_error(401, "login required")
-            unsafe { *res = answer }
+            *res = answer
             return
         }
     }
@@ -334,7 +332,7 @@ fn app_api_notes_list(req: &Request, res: &mut Response) {
         Option::None => {
             db.close()
             let answer = app_json_error(500, "database error")
-            unsafe { *res = answer }
+            *res = answer
             return
         }
     }
@@ -351,7 +349,7 @@ fn app_api_notes_list(req: &Request, res: &mut Response) {
     q.finish()
     db.close()
     let answer = Response::new(200).with_type("application/json").with_body(j.bytes())
-    unsafe { *res = answer }
+    *res = answer
 }
 
 fn app_api_notes_create(req: &Request, res: &mut Response) {
@@ -359,7 +357,7 @@ fn app_api_notes_create(req: &Request, res: &mut Response) {
         Option::Some(id) => id,
         Option::None => {
             let answer = app_json_error(401, "login required")
-            unsafe { *res = answer }
+            *res = answer
             return
         }
     }
@@ -367,13 +365,13 @@ fn app_api_notes_create(req: &Request, res: &mut Response) {
         Option::Some(t) => t,
         Option::None => {
             let answer = app_json_error(422, "text is required")
-            unsafe { *res = answer }
+            *res = answer
             return
         }
     }
     if text.len == 0 || text.len > 1000 {
         let answer = app_json_error(422, "text must be between 1 and 1000 bytes")
-        unsafe { *res = answer }
+        *res = answer
         return
     }
     let now = unix_now()
@@ -383,7 +381,7 @@ fn app_api_notes_create(req: &Request, res: &mut Response) {
         Option::None => {
             db.close()
             let answer = app_json_error(500, "database error")
-            unsafe { *res = answer }
+            *res = answer
             return
         }
     }
@@ -395,14 +393,14 @@ fn app_api_notes_create(req: &Request, res: &mut Response) {
     if !ok {
         db.close()
         let answer = app_json_error(500, "could not save note")
-        unsafe { *res = answer }
+        *res = answer
         return
     }
     let id = db.last_insert_id()
     db.close()
     let j = JsonOut::new().begin_object().key("id").int(id).end_object()
     let answer = Response::new(201).with_type("application/json").with_body(j.bytes())
-    unsafe { *res = answer }
+    *res = answer
 }
 
 fn app_api_notes_delete(req: &Request, res: &mut Response) {
@@ -410,14 +408,14 @@ fn app_api_notes_delete(req: &Request, res: &mut Response) {
         Option::Some(id) => id,
         Option::None => {
             let answer = app_json_error(401, "login required")
-            unsafe { *res = answer }
+            *res = answer
             return
         }
     }
     let id = parse_decimal(req.param("id"))
     if id <= 0i64 {
         let answer = app_json_error(404, "note not found")
-        unsafe { *res = answer }
+        *res = answer
         return
     }
     let db = app_open_db()
@@ -426,7 +424,7 @@ fn app_api_notes_delete(req: &Request, res: &mut Response) {
         Option::None => {
             db.close()
             let answer = app_json_error(500, "database error")
-            unsafe { *res = answer }
+            *res = answer
             return
         }
     }
@@ -438,11 +436,11 @@ fn app_api_notes_delete(req: &Request, res: &mut Response) {
     db.close()
     if !deleted {
         let answer = app_json_error(404, "note not found")
-        unsafe { *res = answer }
+        *res = answer
         return
     }
     let answer = Response::new(204)
-    unsafe { *res = answer }
+    *res = answer
 }
 
 fn app_static(req: &Request, res: &mut Response) {
