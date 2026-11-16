@@ -91,11 +91,16 @@ pub fn print_function(
     // Move incoming arguments into their stack slots. They are stored after the
     // prologue because the prologue uses the same registers.
     //
-    // When the return value travels through a hidden pointer, `rdi` holds that
-    // pointer instead of the first argument, so every argument moves along one
-    // register.
+    // When the return value travels through a hidden pointer, the ABI's first
+    // integer argument register holds that pointer instead of the first real
+    // argument, so every argument moves along one register: `%rdi` on SysV,
+    // `%rcx` on Win64.
     if let Some(offset) = function.sret_offset {
-        let _ = writeln!(out, "    movq %rdi, {offset}(%rbp)");
+        let sret_reg = match target.abi {
+            crate::target::Abi::SysV => "%rdi",
+            crate::target::Abi::Win64 => "%rcx",
+        };
+        let _ = writeln!(out, "    movq {sret_reg}, {offset}(%rbp)");
     }
     // The argument registers this ABI uses, in order. Win64 passes the first
     // argument in `%rcx` and has only four registers, so a function with five

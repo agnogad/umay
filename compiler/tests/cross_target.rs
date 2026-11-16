@@ -700,6 +700,71 @@ fn an_emitted_windows_object_links_and_runs_elsewhere() {
     );
 }
 
+/// A struct returned through a hidden pointer must arrive in one piece on
+/// Win64. The callee reads that pointer from the ABI's first argument register
+/// (`%rcx` on Win64, `%rdi` on SysV); reading it from `%rdi` unconditionally
+/// wrote the result through a garbage address and crashed before `main` could
+/// print anything. A 40-byte struct is not a Win64 register-sized aggregate, so
+/// it takes the hidden-pointer path.
+#[test]
+fn win64_struct_return_through_hidden_pointer_runs() {
+    if !have_tool("wine") {
+        eprintln!("skip win64_struct_return_through_hidden_pointer_runs: no wine");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("umay_win64_sret_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch");
+    std::fs::write(
+        dir.join("main.um"),
+        r#"
+struct Pair { a: i64, b: i64, c: i64, d: i64, e: i64 }
+fn make(x: i64) -> Pair {
+    return Pair { a: x, b: x + 1i64, c: x + 2i64, d: x + 3i64, e: x + 4i64 }
+}
+fn main() -> i32 {
+    let p = make(10i64)
+    println_i64(p.a + p.b + p.c + p.d + p.e)
+    return 0
+}
+"#,
+    )
+    .expect("write program");
+
+    let built = Command::new(compiler())
+        .arg("build")
+        .arg("--target")
+        .arg("x86_64-pc-windows-gnu")
+        .arg("main.um")
+        .current_dir(&dir)
+        .output()
+        .expect("run umay build");
+    assert!(
+        built.status.success(),
+        "building a struct-returning program must succeed:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let ran = Command::new("wine")
+        .current_dir(&dir)
+        .arg("dist/main.exe")
+        .output()
+        .expect("run wine");
+    let stdout = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "the Windows binary must run without faulting:\n{stdout}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    // 10 + 11 + 12 + 13 + 14 == 60. Reading the sum rather than any single
+    // field means a struct half-written through the wrong pointer fails.
+    assert_eq!(
+        stdout.trim(),
+        "60",
+        "the returned struct must arrive intact:\n{stdout}"
+    );
+}
+
 /// Whether a program is on `PATH` and runnable.
 fn have_tool(name: &str) -> bool {
     Command::new(name)
