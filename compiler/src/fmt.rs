@@ -585,6 +585,10 @@ fn rewrite(src: &str, tokens: &[Token]) -> String {
         // line, and splitting it says less with more.
         if matches!(tok.kind, TokenKind::RBrace) && w.pending_open_brace {
             w.push(token_text(src, tok));
+            // The block is closed now. Left set, the flag would make the next `}`
+            // (the one ending the enclosing block) look like this one's and skip
+            // its dedent.
+            w.pending_open_brace = false;
             update_context(&mut cx, tok, prev.map(|p| p.kind.clone()));
             last_end = tok.span.end;
             prev = Some(tok);

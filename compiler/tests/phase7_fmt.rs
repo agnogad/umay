@@ -104,3 +104,28 @@ fn tokens_of(src: &str) -> Vec<String> {
         .map(|t| src[t.span.start as usize..t.span.end as usize].to_string())
         .collect()
 }
+
+#[test]
+fn an_empty_block_does_not_shift_the_lines_after_it() {
+    // A `{}` once left the formatter waiting for its `}` after it had already
+    // been written, so the next `}` was taken as an empty block's and never
+    // dedented: every line after it came out one level too deep.
+    let source = "fn f(x: i64) {
+    match x {
+        1 => {}
+        _ => {}
+    }
+}
+
+fn g(c: bool) {
+    while c {}
+}
+
+fn h() {
+}
+";
+    let once = umayc::fmt::format(source);
+    assert_eq!(once.errors, 0);
+    assert_eq!(once.text, source);
+    assert_eq!(umayc::fmt::format(&once.text).text, once.text);
+}
