@@ -800,10 +800,15 @@ touch the frontend at all.
 - [x] macOS and Windows assembly is accepted by a real assembler for its object
       format, and the produced object is a Mach-O 64 / x86-64 COFF file with
       `_main` defined. Symmetry with `llvm-nm`.
-- [ ] **Not verified: a linked, running macOS or Windows binary.** A Linux host
-      has no Apple SDK and no MinGW-w64 runtime, so it assembles and links-fails.
-      Running the test corpus on those two systems is the next step, and until
-      it happens their status is "emits the right object", not "works".
+- [x] **Windows: a linked, running binary is verified.** MinGW-w64 links the
+      emitted COFF objects and Wine runs the result; the existing
+      `an_emitted_windows_object_links_and_runs_elsewhere` test passes, and a
+      program built with `build --target x86_64-pc-windows-gnu` was linked and
+      run here as well. Note that the larger HTTP example crashed under Wine;
+      that is a separate runtime question, not a linking failure.
+- [ ] **macOS: a linked, running binary is not yet verified on this host.**
+      Linux has no Apple SDK. CI has a `macos-latest` job that links and runs a
+      small program on a real Mac; its result is the remaining check.
 
 ---
 
@@ -842,6 +847,15 @@ The compiler now builds with zero warnings and the full suite passes.
   release tarball, `Cargo.toml` names the real repository, and GitHub Actions
   runs the locked test suite plus a tagged release build. `scripts/release.sh`
   was run end to end and its checksum verified.
+- [x] **Cache eviction.** New key directories trigger eviction down to 512 MiB,
+  configurable with `UMAY_CACHE_MAX_BYTES` and reported by `umay doctor`.
+- [x] **8-bit `imul` fixed.** The differential harness found that byte-width
+  multiplication emitted an instruction the assembler rejects. The harness
+  (`compiler/tests/backend_diff.rs`) is kept as a manual tool: it is opt-in via
+  `UMAY_DIFF_COUNT`, because its generator still emits some ill-typed programs.
+- [ ] **Compiler hangs on one fuzz input.** Seed 3 from the differential run
+  does not terminate in `umay check` (reproduction saved in
+  `compiler/tests/fixtures/fuzz_hang_check.um`). Needs isolation and a fix.
 
 ---
 

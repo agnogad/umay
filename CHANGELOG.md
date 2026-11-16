@@ -139,6 +139,18 @@ implementation-only changes.
 
 ### Fixed
 
+- **8-bit multiplication emitted an instruction the assembler rejects.** `imul`
+  has no two-operand byte form, so `a * b` on `i8`/`u8` produced `imulb %cl, %dl`
+  and the build failed with `invalid instruction suffix`. The selector now
+  multiplies at 16 bits and keeps the low byte, which is the same result modulo
+  2^8 for signed and unsigned operands. A differential fuzzing harness found it;
+  that harness is kept as a manual tool (`UMAY_DIFF_COUNT=N cargo test --test
+  backend_diff`), not a CI gate, because its generator still emits some invalid
+  programs and one input on which `umay check` does not terminate.
+- **The cache grew without bound.** Every source edit creates new content keys,
+  so the cache had reached 1.3 GiB / 19,000 entries on an active machine. New
+  key directories now trigger eviction of the oldest entries down to 512 MiB;
+  `UMAY_CACHE_MAX_BYTES` overrides it and `umay doctor` reports the limit.
 - **`pub` could be bypassed two ways.** A private module item was also entered
   in the global bare-name table, so `util::helper()` resolved as a bare
   `helper()` from any module; a bare reference now resolves only inside the

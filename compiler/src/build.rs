@@ -17,8 +17,28 @@
 //! a broken link step.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::sha256;
+
+/// Default ceiling for the whole on-disk cache, in bytes.
+///
+/// The cache is content-addressed and every edit to a source file creates new
+/// keys, so without a ceiling it grows for as long as the machine is used. The
+/// observed cost was ~1.3 GiB / 19,000 entries on one active workstation.
+/// `UMAY_CACHE_MAX_BYTES` overrides this; `0` disables pruning.
+const DEFAULT_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+pub fn cache_max_bytes() -> u64 {
+    match std::env::var("UMAY_CACHE_MAX_BYTES") {
+        Ok(value) => match value.parse::<u64>() {
+            Ok(0) => u64::MAX,
+            Ok(n) => n,
+            Err(_) => DEFAULT_CACHE_MAX_BYTES,
+        },
+        Err(_) => DEFAULT_CACHE_MAX_BYTES,
+    }
+}
 
 /// What a cache entry holds.
 ///
@@ -225,13 +245,90 @@ impl Cache {
     /// next build would happily link.
     pub fn write(&self, key: &CacheKey, artifact: Artifact, bytes: &[u8]) -> std::io::Result<PathBuf> {
         let path = self.entry_path(key, artifact);
-        if let Some(parent) = path.parent() {
+        let parent = path.parent();
+        let new_entry = parent.is_some_and(|p| !p.exists());
+        if let Some(parent) = parent {
             std::fs::create_dir_all(parent)?;
         }
         let temp = path.with_extension(format!("tmp{}", std::process::id()));
         std::fs::write(&temp, bytes)?;
         std::fs::rename(&temp, &path)?;
+        // Prune only when a new key appears: recompiling an unchanged program
+        // rewrites nothing and should not pay for a walk of the whole cache.
+        // This is best-effort, like every other cache operation; a prune that
+        // fails leaves the cache too large, never the build incorrect.
+        if new_entry {
+            let _ = self.prune(cache_max_bytes());
+        }
         Ok(path)
+    }
+
+    /// Removes the least recently written entries until the cache fits in
+    /// `max_bytes`. Returns the number of entries removed.
+    ///
+    /// An entry is a whole `<hash>/` directory, so a program's assembly and
+    /// executable are evicted together. The newest modification time among its
+    /// files stands in for recency; there is no separate index to keep in sync.
+    /// ponytail: no locking between concurrent builds sharing a cache; a
+    /// concurrent reader already has the bytes in memory, and a miss is a
+    /// rebuild, not wrong output.
+    pub fn prune(&self, max_bytes: u64) -> std::io::Result<usize> {
+        let v1 = self.root.join("v1");
+        let Ok(prefixes) = std::fs::read_dir(&v1) else {
+            return Ok(0);
+        };
+        let mut entries: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+        let mut total = 0u64;
+        for prefix in prefixes.flatten() {
+            let Ok(keys) = std::fs::read_dir(prefix.path()) else { continue };
+            for key in keys.flatten() {
+                if !key.path().is_dir() {
+                    continue;
+                }
+                let mut size = 0u64;
+                let mut newest = SystemTime::UNIX_EPOCH;
+                if let Ok(files) = std::fs::read_dir(key.path()) {
+                    for file in files.flatten() {
+                        if let Ok(meta) = file.metadata() {
+                            size += meta.len();
+                            if let Ok(t) = meta.modified() {
+                                if t > newest {
+                                    newest = t;
+                                }
+                            }
+                        }
+                    }
+                }
+                total += size;
+                entries.push((newest, size, key.path()));
+            }
+        }
+        if total <= max_bytes {
+            return Ok(0);
+        }
+        entries.sort_by_key(|(time, _, _)| *time);
+        let mut removed = 0;
+        for (_, size, path) in entries {
+            if total <= max_bytes {
+                break;
+            }
+            if std::fs::remove_dir_all(&path).is_ok() {
+                total = total.saturating_sub(size);
+                removed += 1;
+            }
+        }
+        // Drop the two-character buckets left empty by the removals.
+        if let Ok(prefixes) = std::fs::read_dir(&v1) {
+            for prefix in prefixes.flatten() {
+                let empty = std::fs::read_dir(prefix.path())
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(false);
+                if empty {
+                    let _ = std::fs::remove_dir(prefix.path());
+                }
+            }
+        }
+        Ok(removed)
     }
 
     /// The number of entries and their total size, for `umay doctor`.
@@ -394,6 +491,29 @@ mod tests {
         let key2 = CacheKey::derive(Artifact::RuntimeAsm, "O2", b"b", &[]);
         cache.write(&key2, Artifact::RuntimeAsm, b"678").expect("write");
         assert_eq!(cache.stats(), (2, 8));
+    }
+
+    #[test]
+    fn prune_evicts_until_the_cache_fits_the_cap() {
+        let root = scratch("prune");
+        let cache = Cache::at(&root);
+        for n in 0..5 {
+            let source = format!("source-{n}");
+            let key = CacheKey::derive(Artifact::ProgramAsm, "O2", source.as_bytes(), &[]);
+            cache.write(&key, Artifact::ProgramAsm, &vec![7u8; 100]).expect("write");
+        }
+        let (before, bytes) = cache.stats();
+        assert_eq!((before, bytes), (5, 500));
+
+        let removed = cache.prune(250).expect("prune");
+        assert!(removed >= 3, "at least three entries must go, got {removed}");
+        let (after, left) = cache.stats();
+        assert!(left <= 250, "cache still holds {left} bytes");
+        assert_eq!(after + removed, before, "prune must account for every entry");
+
+        // A second prune with room to spare changes nothing.
+        assert_eq!(cache.prune(1000).expect("prune"), 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

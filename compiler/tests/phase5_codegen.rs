@@ -97,6 +97,17 @@ fn arithmetic_is_evaluated_at_the_type_width() {
 }
 
 #[test]
+fn eight_bit_multiply_assembles_and_wraps() {
+    // x86 has no two-operand `imulb`; emitting one made `as` reject the whole
+    // program. -3 * 7 = -21 must also wrap at 8 bits, not at 64.
+    expect_exit(
+        "mul_i8",
+        "fn main() -> i32 {\n    let a: i8 = -3\n    let b: i8 = 7\n    let c: i8 = a * b\n    return (c as i32) + 30\n}",
+        9,
+    );
+}
+
+#[test]
 fn division_keeps_its_sign() {
     expect_exit("div_signed", "fn main() -> i32 { return -7 / 2 + 10 }", 7);
 }

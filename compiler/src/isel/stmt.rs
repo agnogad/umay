@@ -328,6 +328,51 @@ impl<'a, 't> Isel<'a, 't> {
             return self.shift(dst, alu, left, rhs, width);
         }
 
+        // x86 has no two-operand 8-bit `imul`: `imulb %cl, %dl` is rejected by
+        // the assembler. Multiplying at 16 bits and keeping the low byte gives
+        // the same result for signed and unsigned operands, because the low
+        // byte of a product modulo 2^16 is its value modulo 2^8.
+        if op == BinOp::Mul && width == RegWidth::W8 {
+            let extend = |from_width, to_width| {
+                if signed {
+                    MoveKind::SignExtend { from: from_width, to: to_width }
+                } else {
+                    MoveKind::ZeroExtend { from: from_width, to: to_width }
+                }
+            };
+            let wide_left = self.vreg();
+            self.emit(Inst::Move {
+                kind: extend(RegWidth::W8, RegWidth::W16),
+                src: MOperand::Reg(left),
+                dst: MOperand::Reg(wide_left),
+            });
+            let wide_right = match &right {
+                MOperand::Imm(_) => right.clone(),
+                _ => {
+                    let reg = self.vreg();
+                    self.emit(Inst::Move {
+                        kind: extend(RegWidth::W8, RegWidth::W16),
+                        src: right.clone(),
+                        dst: MOperand::Reg(reg),
+                    });
+                    MOperand::Reg(reg)
+                }
+            };
+            let wide_result = self.vreg();
+            self.emit(Inst::Move {
+                kind: MoveKind::Move(RegWidth::W16),
+                src: MOperand::Reg(wide_left),
+                dst: MOperand::Reg(wide_result),
+            });
+            self.emit(Inst::Alu {
+                op: AluOp::Imul,
+                width: RegWidth::W16,
+                src: wide_right,
+                dst: MOperand::Reg(wide_result),
+            });
+            return self.store_place(dst, MOperand::Reg(wide_result));
+        }
+
         let result = self.vreg();
         self.emit(Inst::Move {
             kind: MoveKind::Move(width),

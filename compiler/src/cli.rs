@@ -563,6 +563,8 @@ fn cmd_doctor(_args: &[String]) -> u8 {
     println!("  cache writable   : {}", if cache_ok { "yes" } else { "NO (check permissions)" });
     let (entries, bytes) = umayc::build::Cache::open().stats();
     println!("  cache entries    : {entries} ({})", human_bytes(bytes));
+    let cap = umayc::build::cache_max_bytes();
+    println!("  cache limit      : {}", if cap == u64::MAX { "unlimited".to_string() } else { human_bytes(cap) });
     let roots = umayc::upm::registry_roots();
     if roots.is_empty() {
         println!("  registry         : none (set UMAY_REGISTRY to fetch dependencies)");

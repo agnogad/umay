@@ -1,0 +1,158 @@
+struct G_S0 {
+    f0: i8,
+    f1: i64,
+    f2: u16,
+}
+impl G_S0 {
+    fn m0(&self, p0: usize) -> bool {
+        let mut v_0: u8 = (-(2878493135u32 as u8))
+        let mut v_1: i64 = ((self.f1 >> (self.f1 & 63i64)) >> ((self.f1 | self.f1) & 63i64))
+        v_1 = self.f1
+        let v_2: i8 = self.f0
+        let mut lc_3: i32 = 0i32
+        while (lc_3 < 6i32) && ((2141537509u32 >= 1u32)) {
+            lc_3 = lc_3 + 1i32
+            let mut v_4: u64 = 4060564174057426247u64
+            return false
+        }
+        return ((!255u8) > (132u8 / ((142u8 & 63u8) + 1u8)))
+    }
+    fn m1(&mut self, p0: bool) -> usize {
+        let mut v_5: i8 = (self.f0 ^ (self.f0 * self.f0))
+        return (9223372036854775808usize * (!18446744073709551615usize))
+        if ((144i16 & 0i16) == (32767i16 | 32767i16)) {
+            self.f1 = ((self.f1 * self.f1) >> ((2147483647i32 as i64) & 63i64))
+            let v_6: u32 = (-(3422016737u32 % ((2596044193u32 & 63u32) + 1u32)))
+        } else {
+            let mut v_7: i32 = ((113u8 as i32) << ((1396139030i32 << ((-2107079945i32) & 31i32)) & 31i32))
+        }
+        if ((1761146493i32 < (-730563437i32)) && (!p0)) {
+            let v_8: G_S1 = G_S1 { f0: ((-1i32) >= (-1226218049i32)), f1: (!p0), f2: (88u8 + 0u8), f3: (2147483647u32 ^ 2147483647u32) }
+        } else {
+            return (14977223225203429334usize | (0usize | 9223372036854775807usize))
+            return (1311768467463758107usize % (((!11824094591693331926usize) & 63usize) + 1usize))
+            let v_9: i32 = ((258752778i32 % ((1i32 & 63i32) + 1i32)) ^ (122u8 as i32))
+        }
+        return ((9223372036854775808usize << (9223372036854775808usize & 63usize)) / (((1usize as usize) & 63usize) + 1usize))
+    }
+}
+struct G_S1 {
+    f0: bool,
+    f1: bool,
+    f2: u8,
+    f3: u32,
+}
+impl G_S1 {
+    fn m0(&self, p0: u64, p1: usize) -> i64 {
+        if ((self.f3 <= self.f3) || self.f0) {
+            let v_10: u8 = ((self.f2 + self.f2) / (((self.f2 - self.f2) & 63u8) + 1u8))
+        } else {
+            let mut v_11: i64 = ((p0 * p0) as i64)
+        }
+        let mut lc_12: i32 = 0i32
+        while (lc_12 < 5i32) && ((32768u16 != 12334u16)) {
+            lc_12 = lc_12 + 1i32
+            return 8569414469387673464i64
+        }
+        let mut lc_13: i32 = 0i32
+        while (lc_13 < 2i32) && ((1835917395u32 != self.f3)) {
+            lc_13 = lc_13 + 1i32
+            return ((32768u16 & 31776u16) as i64)
+        }
+        return (((-27668i16) as u16) as i64)
+        return ((1i64 - 140029198900468183i64) % (-(((1311768467463765087i64 | 9223372036854775807i64) & 63i64) + 2i64)))
+    }
+    fn m1(&self, p0: u64, p1: i32, p2: i64, p3: u8) -> i32 {
+        let mut lc_14: i32 = 0i32
+        while (lc_14 < 5i32) && (((-1i16) != 25308i16)) {
+            lc_14 = lc_14 + 1i32
+        }
+        let mut v_15: u16 = (60308u16 + 60543u16)
+        let v_16: i64 = (p2 * (1i16 as i64))
+        if (((-1i8) % ((127i8 & 63i8) + 1i8)) != (32i8 - 20i8)) {
+        } else {
+            let mut v_17: [u32; 8] = [(self.f3 % ((self.f3 & 63u32) + 1u32)); 8]
+        }
+        return 0i32
+    }
+    fn m2(&mut self, p0: i32) -> u16 {
+        let v_18: u8 = ((4542076470565035927u64 * 3012731917661440603u64) as u8)
+        return ((22344u16 * 29411u16) % (((-43662u16) & 63u16) + 1u16))
+        let v_19: i64 = (5110987828298112281i64 + (p0 as i64))
+        return (46247u16 | (11256u16 | 32768u16))
+    }
+}
+fn g_f0(p0: i16, p1: i32, p2: bool, p3: i8, p4: i8, p5: u32, p6: i64) -> u32 {
+    let v_20: u16 = (54035u16 >> ((59724u16 ^ 32767u16) & 15u16))
+    let v_21: usize = ((15939835396590239254usize ^ 12403268837994823100usize) ^ (9223372036854775807usize * 18269081768146920124usize))
+    let v_22: usize = (v_21 ^ (v_21 << (v_21 & 63usize)))
+    return (!p5)
+}
+fn g_f1(p0: u32, p1: i32, p2: i16) -> i8 {
+    let v_23: i16 = (((-17247i16) % ((p2 & 63i16) + 1i16)) * (!7095i16))
+    let v_24: G_S0 = G_S0 { f0: (-1i8), f1: (-7626765565180863716i64), f2: (0u16 >> (32768u16 & 15u16)) }
+    return 0i8
+}
+fn g_f2(p0: &mut G_S0, p1: u8, p2: i16, p3: usize, p4: u64, p5: u16, p6: u64) -> u8 {
+    p0.f2 = p0.f2
+    p0.f2 = (!(47576u16 ^ p0.f2))
+    p0.f1 = ((p0.f1 % (((-9223372036854775807i64 - 1i64) & 63i64) + 1i64)) * (!p0.f1))
+    return (p2 as u8)
+    let mut v_25: G_S1 = G_S1 { f0: (true != false), f1: (!true), f2: (p1 | p1), f3: 174447432u32 }
+    return ((p1 * p1) >> (p1 & 7u8))
+}
+fn g_f3(p0: &mut G_S0, p1: usize, p2: i16, p3: usize, p4: u32) -> i64 {
+    let mut v_26: u64 = ((5193493759118264768u64 / ((0u64 & 63u64) + 1u64)) + (1u64 ^ 9223372036854775807u64))
+    p0.f1 = ((1i64 >> (p0.f1 & 63i64)) - (p0.f1 >> (p0.f1 & 63i64)))
+    p0.f2 = ((p3 as u16) & (61808u16 % ((p0.f2 & 63u16) + 1u16)))
+    let mut v_27: u16 = ((p0.f2 / ((p0.f2 & 63u16) + 1u16)) >> ((1u16 & p0.f2) & 15u16))
+    return p0.f1
+}
+fn main() -> i32 {
+    let mut g_s: G_S0 = G_S0 { f0: (!(-91i8)), f1: (1311768467463740334i64 % ((0i64 & 63i64) + 1i64)), f2: (1311768467463736783usize as u16) }
+    let mut g_a: [u16; 8] = [(48177u16 % ((g_s.f2 & 63u16) + 1u16)); 8]
+    let mut v_28: [i8; 4] = [(g_s.f0 - 1i8); 4]
+    let mut v_29: i32 = (-((-1i32) >> ((-2147483647i32 - 1i32) & 31i32)))
+    g_a[(16634473374596477198usize & 7usize)] = ((g_s.f2 << (10370u16 & 15u16)) % (((9223372036854775808u64 as u16) & 63u16) + 1u16))
+    println_i64((((v_29 << (v_29 & 31i32)) << ((v_29 & v_29) & 31i32))) as i64)
+    if ((true || true) && (11306175119126142491usize == 9223372036854775807usize)) {
+        let mut lc_30: i32 = 0i32
+        while (lc_30 < 2i32) && ((true >= false)) {
+            lc_30 = lc_30 + 1i32
+            g_a[(9833001256859953680usize & 7usize)] = ((g_s.f2 & 32767u16) * (g_a[(8566204722629438288usize & 7usize)] % ((g_a[(18446744073709551615usize & 7usize)] & 63u16) + 1u16)))
+            let v_31: i64 = (g_s.f1 ^ (-8877338444567161333i64))
+            g_s.f2 = (g_a[(1usize & 7usize)] - (g_a[(8956825683283061886usize & 7usize)] * g_s.f2))
+        }
+    } else {
+        v_29 = ((v_29 & v_29) & (v_29 >> (v_29 & 31i32)))
+    }
+    println_i64((((964653673u32 as u16) >> ((g_s.f2 / ((g_s.f2 & 63u16) + 1u16)) & 15u16))) as i64)
+    println_i64((((9223372036854775807i64 * g_s.f1) % (-(((g_s.f1 & g_s.f1) & 63i64) + 2i64)))) as i64)
+    let mut v_32: usize = 6519597262438599662usize
+    let mut lc_33: i32 = 0i32
+    while (lc_33 < 7i32) && ((1u64 >= 1u64)) {
+        lc_33 = lc_33 + 1i32
+        let mut v_34: usize = (!(5960647015370826922usize | v_32))
+    }
+    g_a[(v_32 & 7usize)] = (341117865085568487u64 as u16)
+    if ((1i16 / (-((3019i16 & 63i16) + 2i16))) != (28832i16 | (-21260i16))) {
+        v_28[(9448267545169789295usize & 3usize)] = (0i8 ^ ((-127i8 - 1i8) | 0i8))
+        g_s.f0 = 1i8
+    } else {
+        g_s.f0 = ((v_28[(v_32 & 3usize)] << (g_s.f0 & 7i8)) + g_s.f0)
+    }
+    g_s.f0 = (!52i8)
+    g_a[(v_32 & 7usize)] = (g_s.f2 + (g_a[(v_32 & 7usize)] * g_a[(v_32 & 7usize)]))
+    println_i64((g_s.f0) as i64)
+    println_i64((g_s.f1) as i64)
+    println_i64((g_s.f2) as i64)
+    println_i64((g_a[0usize]) as i64)
+    println_i64((g_a[1usize]) as i64)
+    println_i64((g_a[2usize]) as i64)
+    println_i64((g_a[3usize]) as i64)
+    println_i64((g_a[4usize]) as i64)
+    println_i64((g_a[5usize]) as i64)
+    println_i64((g_a[6usize]) as i64)
+    println_i64((g_a[7usize]) as i64)
+    return 0
+}
