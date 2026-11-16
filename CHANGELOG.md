@@ -129,7 +129,30 @@ implementation-only changes.
   a real assembler for its object format and yields the right object kind with
   `_main` defined, and that the Linux output did not change.
 
+### Added
+
+- **GitHub Actions CI.** Every push and pull request runs `cargo test --locked`
+  and a release build. Tagged `v*` releases additionally build the checksummed
+  artifact with `scripts/release.sh` and keep it as a workflow artifact.
+- **A `LICENSE` file.** `Cargo.toml` declared `MIT OR Apache-2.0`, but the texts
+  were not in the repository or the release tarball. Both are now included.
+
 ### Fixed
+
+- **`pub` could be bypassed two ways.** A private module item was also entered
+  in the global bare-name table, so `util::helper()` resolved as a bare
+  `helper()` from any module; a bare reference now resolves only inside the
+  declaring module and reports `E0101` with the owner named elsewhere. Methods
+  declared in an `impl` were not checked at all, so `value.hidden()` reached a
+  private method from outside; that now reports `E1018`. A module's own private
+  items and methods still work.
+- **Four emitted diagnostics had no `umay explain` entry**: `E0192`, `E0193`,
+  `E0194` (module loading) and `E1017` (trait bounds). A test now scans the
+  compiler source and fails if any emitted code lacks an explanation.
+- **Stale documentation**: the README phase table showed phases 6–9 as partial
+  or unstarted, `lib.rs` said phases 2+ were unimplemented, `Cargo.toml` pointed
+  at a repository URL that is not this one, and the ROADMAP's test count was
+  out of date.
 
 - **A pipe silently became two half-handles on Windows.** `umay_pipe` was a stub
   that always failed, and the storage callers read back was four bytes per end --

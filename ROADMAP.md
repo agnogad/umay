@@ -830,6 +830,18 @@ The compiler now builds with zero warnings and the full suite passes.
   0.058 s; see `docs/measurements.md`.
 - [x] **Docs.** This file, `docs/language-specification.md` and
   `docs/measurements.md` record what changed and what the numbers are.
+- [x] **Visibility holes closed.** Private module items no longer enter the
+  global bare-name scope, and `impl` methods carry their `pub` flag and owning
+  module through method resolution. Bare access to a private item is an
+  unknown-name error naming the owner; a private method reached from outside
+  is `E1018`.
+- [x] **Explain coverage.** The four codes that had escaped the database
+  (`E0192`, `E0193`, `E0194`, `E1017`) are documented, and a source-scanning
+  test stops another code being emitted without an entry.
+- [x] **Distribution.** A dual MIT/Apache-2.0 `LICENSE` is included in the
+  release tarball, `Cargo.toml` names the real repository, and GitHub Actions
+  runs the locked test suite plus a tagged release build. `scripts/release.sh`
+  was run end to end and its checksum verified.
 
 ---
 
