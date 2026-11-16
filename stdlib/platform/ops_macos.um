@@ -1,0 +1,6 @@
+// macOS (Darwin) socket option and signal constants for server operations.
+const UMAY_SOL_SOCKET: i32 = 65535
+const UMAY_SO_REUSEADDR: i32 = 4
+const UMAY_SIGSET_BYTES: usize = 4usize
+const UMAY_SIG_BLOCK: i32 = 1
+const UMAY_SIG_SETMASK: i32 = 3

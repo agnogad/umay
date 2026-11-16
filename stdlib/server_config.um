@@ -1,0 +1,68 @@
+// Server configuration from environment variables and operational helpers.
+//
+// `env_or` and `env_port` read process environment variables with safe
+// fallbacks; `log_enabled` and `write_request_log` implement per-request stderr
+// logging controlled by `UMAY_LOG=off`.
+
+// Returns the value of environment variable `name`, or `fallback` when unset or
+// empty.
+fn env_or(name: &str, fallback: &str) -> Bytes {
+    let raw = umay_getenv(name as *const u8)
+    if is_null(raw) || read_byte(raw) == 0u8 {
+        return Bytes::from_str(fallback)
+    }
+    return Bytes::view(raw, byte_len(raw))
+}
+
+// Parses environment variable `name` as a TCP port (`1..=65535`), returning
+// `fallback` when unset, empty, non-numeric, or out of range.
+fn env_port(name: &str, fallback: u16) -> u16 {
+    let raw = umay_getenv(name as *const u8)
+    if is_null(raw) || read_byte(raw) == 0u8 {
+        return fallback
+    }
+    let len = byte_len(raw)
+    let mut val: i64 = 0i64
+    let mut i: usize = 0usize
+    while i < len {
+        let c = unsafe { read_byte((raw as usize + i) as *const u8) }
+        if c < 48u8 || c > 57u8 {
+            return fallback
+        }
+        val = val * 10i64 + (c - 48u8) as i64
+        if val > 65535i64 {
+            return fallback
+        }
+        i = i + 1usize
+    }
+    if val <= 0i64 {
+        return fallback
+    }
+    return val as u16
+}
+
+// True unless `UMAY_LOG` is set to `"off"`.
+fn log_enabled() -> bool {
+    let raw = umay_getenv("UMAY_LOG" as *const u8)
+    if is_null(raw) {
+        return true
+    }
+    return !umay_str_eq(raw, "off" as *const u8)
+}
+
+// Writes one request log line (`METHOD PATH STATUS DURATIONms\n`) to stderr.
+fn write_request_log(method: &Bytes, path: &Bytes, status: i32, elapsed_ms: i64) {
+    let line = alloc(method.len + path.len + 64)
+    let mut n = put_text(line, 0, Bytes::view(method.data, method.len))
+    n = put_text(line, n, Bytes::from_str(" "))
+    n = put_text(line, n, Bytes::view(path.data, path.len))
+    n = put_text(line, n, Bytes::from_str(" "))
+    let st = if status < 0 { 0usize } else { status as usize }
+    n = put_decimal(line, n, st)
+    n = put_text(line, n, Bytes::from_str(" "))
+    let ms = if elapsed_ms < 0i64 { 0usize } else { elapsed_ms as usize }
+    n = put_decimal(line, n, ms)
+    n = put_text(line, n, Bytes::from_str("ms\n"))
+    let _ = umay_write(2, line as *const u8, n)
+    dealloc(line)
+}

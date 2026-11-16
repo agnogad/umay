@@ -19,6 +19,17 @@ extern fn "accept" umay_net_accept(fd: isize, addr: *mut u8, len: *mut i32) -> i
 extern fn "read" umay_net_read(fd: isize, buf: *mut u8, count: usize) -> i64
 extern fn "write" umay_net_write(fd: isize, buf: *const u8, count: usize) -> i64
 extern fn "close" umay_net_close(fd: isize) -> i32
+extern fn "setsockopt" umay_c_setsockopt(fd: isize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32
+
+// Enables SO_REUSEADDR so a restarted server can rebind while old connections
+// sit in TIME_WAIT.
+fn umay_net_set_reuseaddr(fd: isize) -> bool {
+    let val = alloc(4)
+    write_u32(val, 1u32)
+    let rc = umay_c_setsockopt(fd, UMAY_SOL_SOCKET, UMAY_SO_REUSEADDR, val as *const u8, 4)
+    dealloc(val)
+    return rc == 0
+}
 
 // Nothing to initialise: a POSIX socket library is ready when the process is.
 fn umay_platform_net_start() -> bool {

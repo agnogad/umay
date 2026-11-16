@@ -1,0 +1,119 @@
+// Clocks, HTTP dates and random bytes.
+//
+// The three system calls this file needs (`umay_time_realtime_s`,
+// `umay_time_monotonic_ms`, `umay_time_random`) differ between systems, so they
+// live in `stdlib/platform/time_<system>.um` and the compiler puts the right
+// file after this one.
+
+// Seconds since 1970-01-01 00:00:00 UTC, from the wall clock.
+fn unix_now() -> i64 {
+    return umay_time_realtime_s()
+}
+
+// Milliseconds from an unspecified start that never goes backwards. Use it for
+// timeouts and durations; the wall clock can jump.
+fn monotonic_ms() -> i64 {
+    return umay_time_monotonic_ms()
+}
+
+// The length of an IMF-fixdate: `Sun, 06 Nov 1994 08:49:37 GMT`.
+const HTTP_DATE_LEN: usize = 29usize
+
+// Writes `unix` as an IMF-fixdate (RFC 9110) to `out`, which must hold 29
+// bytes, and returns 29.
+//
+// The calendar is Howard Hinnant's `civil_from_days`: shift the epoch to
+// 0000-03-01 so the leap day is the last day of a year, then split days into
+// 400-year eras, years and a March-based day of year.
+fn http_date(unix: i64, out: *mut u8) -> usize {
+    let mut days = unix / 86400
+    let mut secs = unix % 86400
+    if secs < 0 {
+        secs = secs + 86400
+        days = days - 1
+    }
+    let z = days + 719468
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let day = doy - (153 * mp + 2) / 5 + 1
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }
+    let year = yoe + era * 400 + (if month <= 2 { 1 } else { 0 })
+    // 1970-01-01 was a Thursday; `% 7` keeps the sign of `days`, so fold it.
+    let mut weekday = (days + 4) % 7
+    if weekday < 0 {
+        weekday = weekday + 7
+    }
+    let names = "SunMonTueWedThuFriSat" as *const u8
+    let months = "JanFebMarAprMayJunJulAugSepOctNovDec" as *const u8
+    copy_bytes(unsafe { (names as usize + weekday as usize * 3) as *const u8 }, out, 3)
+    date_put(out, 3, ", " as *const u8, 2)
+    date_digits(out, 5, day, 2)
+    date_put(out, 7, " " as *const u8, 1)
+    date_put(out, 8, unsafe { (months as usize + (month - 1) as usize * 3) as *const u8 }, 3)
+    date_put(out, 11, " " as *const u8, 1)
+    date_digits(out, 12, year, 4)
+    date_put(out, 16, " " as *const u8, 1)
+    date_digits(out, 17, secs / 3600, 2)
+    date_put(out, 19, ":" as *const u8, 1)
+    date_digits(out, 20, (secs / 60) % 60, 2)
+    date_put(out, 22, ":" as *const u8, 1)
+    date_digits(out, 23, secs % 60, 2)
+    date_put(out, 25, " GMT" as *const u8, 4)
+    return HTTP_DATE_LEN
+}
+
+// Copies `count` bytes from `text` to `out` at `at`.
+fn date_put(out: *mut u8, at: usize, text: *const u8, count: usize) {
+    copy_bytes(text, unsafe { (out as usize + at) as *mut u8 }, count)
+}
+
+// Writes the low `width` decimal digits of `value`, zero-padded, at `at`.
+fn date_digits(out: *mut u8, at: usize, value: i64, width: usize) {
+    let mut v = value
+    let mut i = width
+    while i > 0 {
+        i = i - 1
+        unsafe {
+            write_byte((out as usize + at + i) as *mut u8, 48u8 + (v % 10) as u8)
+        }
+        v = v / 10
+    }
+}
+
+// Fills `count` bytes at `out` from the system's cryptographic random source.
+//
+// Returns false when the source fails. There is no fallback to a weaker
+// generator: a caller minting session ids must not get guessable ones silently.
+fn random_fill(out: *mut u8, count: usize) -> bool {
+    return umay_time_random(out, count)
+}
+
+// `count` random bytes as `2 * count` lowercase hex digits, in a buffer from
+// `alloc` that the caller frees with `dealloc(b.data as *mut u8)`.
+//
+// Panics when the random source fails, because a token that is not random is
+// worse than no token.
+fn random_hex(count: usize) -> Bytes {
+    let out = alloc(2 * count + 1)
+    // The raw bytes go in the second half, so each one is read before the
+    // digits written for earlier bytes can reach it.
+    let raw = unsafe { (out as usize + count) as *mut u8 }
+    if !random_fill(raw, count) {
+        panic("random_hex: the system random source failed")
+    }
+    let digits = "0123456789abcdef" as *const u8
+    let mut i: usize = 0
+    while i < count {
+        let b = unsafe { read_byte((raw as usize + i) as *const u8) }
+        unsafe {
+            write_byte((out as usize + 2 * i) as *mut u8, read_byte((digits as usize + (b / 16u8) as usize) as *const u8))
+            write_byte((out as usize + 2 * i + 1) as *mut u8, read_byte((digits as usize + (b % 16u8) as usize) as *const u8))
+        }
+        i = i + 1
+    }
+    unsafe { write_byte((out as usize + 2 * count) as *mut u8, 0u8) }
+    return Bytes::view(out as *const u8, 2 * count)
+}

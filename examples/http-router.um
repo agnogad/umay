@@ -1,153 +1,36 @@
-extern fn strlen(s: *const u8) -> usize
-
-struct Route { path: *const u8, body: *const u8 }
-
-// Walk the route table as a slice: the cast gives a pointer to its first
-// element, and sizeof(Route) steps to the next.
-// The body registered for `want`, or a null pointer when no route matches.
+// A routed HTTP server on port 8080, built on the stdlib router.
 //
-// The target is a `Bytes` view, so the match compares counted bytes: a request
-// line is not a `&str` and does not have to be NUL-terminated.
-fn route_body(table: *const Route, count: usize, want: Bytes) -> *const u8 {
-    let mut i: usize = 0
-    while i < count {
-        let r = unsafe { (table as usize + i * sizeof(Route)) as *const Route }
-        let have = Bytes::from_str(unsafe { (*r).path as &str })
-        if have.equals(&want) { return unsafe { (*r).body } }
-        i = i + 1
-    }
-    return unsafe { 0 as *const u8 }
-}
-
-// Writes a response: a status line, a length, the headers, then the body.
+//     umay build examples/http-router.um && ./dist/http-router
+//     curl localhost:8080/users/42
 //
-// The status line is assembled from the stdlib's `status_text` and `reason`, so
-// every route answers with a code the library knows rather than a hand-written
-// string that can drift from the number.
-fn send(sock: &Socket, response: Response) {
-    let status = response.status()
-    let body = response.body()
-    // Each piece goes out with a counted write, so a body with a NUL in it is not
-    // cut short the way a string length would cut it.
-    let parts_ok = socket_write_all(sock, "HTTP/1.1 " as *const u8, byte_len("HTTP/1.1 " as *const u8))
-    let text = status_text(status)
-    socket_write_all(sock, text as *const u8, byte_len(text as *const u8))
-    socket_write_all(sock, " " as *const u8, byte_len(" " as *const u8))
-    let why = reason(status)
-    socket_write_all(sock, why as *const u8, byte_len(why as *const u8))
-    socket_write_all(sock, "\r\nContent-Length: " as *const u8, byte_len("\r\nContent-Length: " as *const u8))
-    write_decimal(sock, body.len)
-    socket_write_all(sock, "\r\nConnection: close\r\n\r\n" as *const u8, byte_len("\r\nConnection: close\r\n\r\n" as *const u8))
-    if body.len > 0 {
-        socket_write_all(sock, body.data, body.len)
-    }
-    let _ = parts_ok
+// Each handler fills in the response it is given. `serve` runs forever, one
+// child process per connection; stop it with Ctrl-C.
+
+fn home(_req: &Request, res: &mut Response) {
+        *res = Response::new(200).with_type("text/plain").with_body(Bytes::from_str("home page\n"))
 }
 
-// Writes `value` in decimal, least significant digit last.
-fn write_decimal(sock: &Socket, value: usize) {
-    let digits = alloc(24)
-    let mut n = value
-    let mut d: usize = 0
-    unsafe {
-        if n == 0 {
-            write_byte(digits, 48u8)
-            d = 1
-        }
-        while n > 0 {
-            write_byte((digits as usize + d) as *mut u8, 48u8 + (n % 10) as u8)
-            n = n / 10
-            d = d + 1
-        }
-        while d > 0 {
-            d = d - 1
-            socket_write_all(sock, (digits as usize + d) as *const u8, 1)
-        }
-    }
-    dealloc(digits)
+fn health(_req: &Request, res: &mut Response) {
+        *res = Response::new(200).with_type("application/json").with_body(Bytes::from_str("{{\"ok\":true}}"))
 }
 
-// Appends one byte at `at`, returning the new end.
-fn put_byte(dst: *mut u8, at: usize, byte: u8) -> usize {
-    unsafe {
-        write_byte((dst as usize + at) as *mut u8, byte)
-    }
-    return at + 1
+// `:id` is whatever the second segment held.
+fn user(req: &Request, res: &mut Response) {
+        *res = Response::new(200).with_type("text/plain").with_body(req.param("id"))
 }
 
-// Answers one connection. Run in a child, so it owns what it allocates.
-fn serve_one(conn: &Socket, table: *const Route, count: usize) {
-    let buf = alloc(2048)
-    let got = socket_read(conn, buf, 2048)
-    let request = parse_request(Bytes::view(buf as *const u8, got as usize))
-    if request.target().is_empty() {
-        send(conn, Response::new(400))
-    } else if {
-        let json_path = Bytes::from_str("/api/json")
-        request.target().equals(&json_path)
-    } {
-        // The reply is written with the JSON writer rather than assembled by hand,
-        // so the quoting and the number formatting are the library's business.
-        let text = alloc(256)
-        let key = Bytes::from_str("umay")
-        let mut used: usize = 0
-        used = json_quote(text, 256usize, key) as usize
-        used = put_byte(text, used, 58u8)
-        unsafe {
-            used = used + json_write_i64((text as usize + used) as *mut u8, 128usize, 1i64) as usize
-        }
-        unsafe {
-            write_byte((text as usize + used) as *mut u8, 0u8)
-        }
-        send(conn, Response::new(200).with_body(Bytes::view(text as *const u8, used)))
-        dealloc(text)
-    } else {
-        let body = route_body(table, count, request.target())
-        if unsafe { body as usize } == 0 {
-            send(conn, Response::new(404))
-        } else {
-            send(conn, Response::new(200).with_body(Bytes::from_str(unsafe { body as &str })))
-        }
-    }
-    socket_close(conn)
-    dealloc(buf)
+// Echoes the posted body back.
+fn echo(req: &Request, res: &mut Response) {
+        *res = Response::new(201).with_type("text/plain").with_body(req.body())
 }
 
 fn main() -> i32 {
     let routes = [
-        Route { path: "/" as *const u8, body: "home page" as *const u8 },
-        Route { path: "/about" as *const u8, body: "about us" as *const u8 },
-        Route { path: "/api/health" as *const u8, body: "ok-true" as *const u8 },
+        route("GET", "/", home),
+        route("GET", "/api/health", health),
+        route("GET", "/users/:id", user),
+        route("POST", "/echo", echo),
     ]
-    let table = routes as *const Route
-    // `net` owns the socket address layout: a port written whole would bind a
-    // different port and still succeed.
-    let server = tcp_socket()
-    let addr = address(8080u16)
-    if !socket_bind(&server, &addr) {
-        println("bind failed: the port is held")
-        return 1
-    }
-    release_address(addr)
-    socket_listen(&server, 4)
-    println("listening")
-    let mut served = 0
-    while served < 4 {
-        let conn = socket_accept(&server)
-        // Each connection goes to a child. The child has its own copy of every
-        // variable, so the route table is read without a lock and the parent's
-        // `served` counter cannot be raced on; the price is that a child's
-        // writes are not visible here, which is why the counter advances only in
-        // the parent.
-        let pid = spawn()
-        if is_child(pid) {
-            serve_one(&conn, table, 3usize)
-            exit(0)
-        }
-        socket_close(&conn)
-        served = served + 1
-    }
-    wait()
-    socket_close(&server)
-    return 0
+    println("listening on 8080")
+    return serve(8080u16, routes as *const Route, 4)
 }

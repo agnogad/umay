@@ -1,0 +1,2 @@
+// Linux's `CLOCK_MONOTONIC`.
+const UMAY_CLOCK_MONOTONIC: i32 = 1

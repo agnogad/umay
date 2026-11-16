@@ -92,6 +92,11 @@ fn socket_bind(s: &Socket, a: &Address) -> bool {
     return umay_net_bind(s.fd, a.bytes as *const u8, address_size() as i32) == 0
 }
 
+// Enables SO_REUSEADDR on `s` before `socket_bind` (a no-op on Windows).
+fn socket_set_reuseaddr(s: &Socket) -> bool {
+    return umay_net_set_reuseaddr(s.fd)
+}
+
 // Starts listening on a bound socket. Returns false on failure.
 fn socket_listen(s: &Socket, backlog: i32) -> bool {
     return umay_net_listen(s.fd, backlog) == 0

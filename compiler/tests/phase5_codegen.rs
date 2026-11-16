@@ -109,6 +109,44 @@ fn remainder_uses_the_dividend_sign() {
 }
 
 #[test]
+fn runtime_division_is_right_at_every_width() {
+    // Through parameters, so nothing is folded: the two tests above are
+    // constant and never reached `idiv`. A 32-bit `idiv` after `cqto` read a
+    // zero `edx` (-7 / 2 was 2147483644); an 8-bit `div` left the remainder in
+    // `ah` (17u8 % 16u8 was 0); a divisor allocated to `rax` was overwritten.
+    let src = "fn d32(a: i32, b: i32) -> i32 { return a / b }\n\
+               fn r32(a: i32, b: i32) -> i32 { return a % b }\n\
+               fn d16(a: i16, b: i16) -> i16 { return a / b }\n\
+               fn r8(a: i8, b: i8) -> i8 { return a % b }\n\
+               fn ru8(a: u8, b: u8) -> u8 { return a % b }\n\
+               fn du8(a: u8, b: u8) -> u8 { return a / b }\n\
+               fn main() -> i32 {\n\
+                   if d32(-7, 2) != -3 { return 1 }\n\
+                   if r32(-7, 3) != -1 { return 2 }\n\
+                   if d16(-9i16, 2i16) != -4i16 { return 3 }\n\
+                   if r8(-7i8, 3i8) != -1i8 { return 4 }\n\
+                   if ru8(17u8, 16u8) != 1u8 { return 5 }\n\
+                   if du8(200u8, 16u8) != 12u8 { return 6 }\n\
+                   return 0\n\
+               }";
+    expect_exit("div_runtime_widths", src, 0);
+}
+
+#[test]
+fn a_widening_load_ends_slot_forwarding_for_its_register() {
+    // `movzbq slot, %rcx` overwrote a register the forwarding pass still
+    // believed held `d1 + 1`, so `b` arrived as 36 instead of 3.
+    let src = "struct S { x: usize }\n\
+               impl S { fn g(&self, a: u8, b: usize) -> i64 { return b as i64 } }\n\
+               fn main() -> i32 {\n\
+                   let d1: usize = 2\n\
+                   let s = S { x: 7 }\n\
+                   return s.g('$' as u8, d1 + 1) as i32\n\
+               }";
+    expect_exit("widening_load_forwarding", src, 3);
+}
+
+#[test]
 fn multiplication_and_subtraction() {
     expect_exit("mul_sub", "fn main() -> i32 { return 6 * 7 - 2 }", 40);
 }

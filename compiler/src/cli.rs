@@ -1213,6 +1213,10 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         for flag in target.linker_flags() {
             link.arg(flag);
         }
+        // After the objects, so the linker has seen the references first.
+        for lib in umayc::target::Target::system_libraries(&assembly) {
+            link.arg(lib);
+        }
         let status = link.status();
         match status {
             Ok(s) if s.success() => {}

@@ -1,0 +1,222 @@
+// Cookies, signed values, login sessions and password hashes.
+//
+// Sessions are stateless: the cookie carries the user and an expiry, signed
+// with a server secret, so any per-connection child can check it without
+// shared memory.
+//
+// ponytail: a stateless session cannot be revoked before it expires; a
+// server-side session table comes with the database part.
+
+impl Request {
+    // The value of cookie `name` from the `Cookie` header, or `None`.
+    fn cookie(&self, name: &str) -> Option<Bytes> {
+        let header = match self.header("cookie") {
+            Option::Some(h) => h,
+            Option::None => return Option::None,
+        }
+        return cookie_value(&header, name)
+    }
+}
+
+impl Response {
+    // The same response with one more `name: value` header line. Call it once
+    // per `Set-Cookie`; the earlier lines are kept.
+    fn with_header(self, name: &str, value: Bytes) -> Response {
+        let key = Bytes::from_str(name)
+        let old = Bytes::view(self.headers.data, self.headers.len)
+        let buf = alloc(old.len + key.len + value.len + 4)
+        let mut at = put_text(buf, 0, old)
+        at = put_text(buf, at, key)
+        at = put_text(buf, at, Bytes::from_str(": "))
+        at = put_text(buf, at, value)
+        at = put_text(buf, at, Bytes::from_str("\r\n"))
+        return Response { status: self.status, content_type: self.content_type, headers: Bytes::view(buf as *const u8, at), body: self.body }
+    }
+}
+
+// The value of `name` in a `Cookie` header such as `a=1; b=2`.
+fn cookie_value(header: &Bytes, name: &str) -> Option<Bytes> {
+    let want = Bytes::from_str(name)
+    let mut rest = header.from(0)
+    while rest.len > 0 {
+        let end = match rest.find_byte(';' as u8, 0) {
+            Option::Some(i) => i,
+            Option::None => rest.len,
+        }
+        let pair = trim(rest.prefix(end))
+        let eq = match pair.find_byte('=' as u8, 0) {
+            Option::Some(i) => i,
+            Option::None => pair.len,
+        }
+        if pair.prefix(eq).equals(&want) {
+            return Option::Some(pair.from(eq + 1))
+        }
+        rest = rest.from(end + 1)
+    }
+    return Option::None
+}
+
+// A `Set-Cookie` value: `name=value; Path=/; Max-Age=N; HttpOnly; Secure;
+// SameSite=Lax`. `max_age` 0 deletes the cookie; a negative one leaves
+// `Max-Age` out, so the cookie lasts until the browser closes. `value` must be
+// cookie-safe (no `;`, `,`, space or quote): `sign_value` output is.
+fn cookie_header(name: &str, value: &Bytes, max_age: i64) -> Bytes {
+    let key = Bytes::from_str(name)
+    let buf = alloc(key.len + value.len + 96)
+    let mut at = put_text(buf, 0, key)
+    at = put_text(buf, at, Bytes::from_str("="))
+    at = put_text(buf, at, Bytes::view(value.data, value.len))
+    at = put_text(buf, at, Bytes::from_str("; Path=/"))
+    if max_age >= 0i64 {
+        at = put_text(buf, at, Bytes::from_str("; Max-Age="))
+        at = put_decimal(buf, at, max_age as usize)
+    }
+    at = put_text(buf, at, Bytes::from_str("; HttpOnly; Secure; SameSite=Lax"))
+    return Bytes::view(buf as *const u8, at)
+}
+
+// `value` followed by `.` and its HMAC-SHA256 under `secret` in base64url.
+// The value itself is not hidden, only made tamper-evident.
+fn sign_value(value: &Bytes, secret: &Bytes) -> Bytes {
+    let mac = alloc(32)
+    hmac_sha256(secret, value, mac)
+    let tag = Bytes::view(mac as *const u8, 32)
+    let out = alloc(value.len + 48)
+    let mut at = put_text(out, 0, Bytes::view(value.data, value.len))
+    at = put_text(out, at, Bytes::from_str("."))
+    at = at + base64url_encode(&tag, unsafe { (out as usize + at) as *mut u8 })
+    dealloc(mac)
+    return Bytes::view(out as *const u8, at)
+}
+
+// The value inside a `sign_value` result, or `None` when the signature does
+// not match. The comparison takes the same time wherever the bytes differ.
+fn verify_signed(signed: &Bytes, secret: &Bytes) -> Option<Bytes> {
+    let mut dot = signed.len
+    while dot > 0 && signed.get(dot - 1) != '.' as u8 {
+        dot = dot - 1
+    }
+    if dot == 0 {
+        return Option::None
+    }
+    let value = signed.prefix(dot - 1)
+    let expected = sign_value(&value, secret)
+    let ok = constant_time_equals(&expected, signed)
+    dealloc(expected.data as *mut u8)
+    if ok {
+        return Option::Some(value)
+    }
+    return Option::None
+}
+
+// A session token for `user` that expires `ttl_seconds` from now: the expiry
+// and the user, base64url-encoded, then signed. Put it in a cookie with
+// `cookie_header`.
+fn session_token(user: &Bytes, ttl_seconds: i64, secret: &Bytes) -> Bytes {
+    let plain = alloc(user.len + 24)
+    let mut at = put_decimal(plain, 0, (unix_now() + ttl_seconds) as usize)
+    at = put_text(plain, at, Bytes::from_str(":"))
+    at = put_text(plain, at, Bytes::view(user.data, user.len))
+    let payload = Bytes::view(plain as *const u8, at)
+    let encoded = alloc(at * 2 + 4)
+    let n = base64url_encode(&payload, encoded)
+    let token = Bytes::view(encoded as *const u8, n)
+    let signed = sign_value(&token, secret)
+    dealloc(plain)
+    dealloc(encoded)
+    return signed
+}
+
+// The user a request's session cookie `name` was issued to, or `None` when the
+// cookie is missing, forged or expired.
+fn session_user(req: &Request, name: &str, secret: &Bytes) -> Option<Bytes> {
+    let token = match req.cookie(name) {
+        Option::Some(t) => t,
+        Option::None => return Option::None,
+    }
+    let encoded = match verify_signed(&token, secret) {
+        Option::Some(v) => v,
+        Option::None => return Option::None,
+    }
+    let plain = alloc(encoded.len + 1)
+    let n = base64url_decode(&encoded, plain)
+    if n < 0i64 {
+        dealloc(plain)
+        return Option::None
+    }
+    let payload = Bytes::view(plain as *const u8, n as usize)
+    let colon = match payload.find_byte(':' as u8, 0) {
+        Option::Some(i) => i,
+        Option::None => return Option::None,
+    }
+    let expiry = parse_decimal(payload.prefix(colon))
+    if expiry < 0i64 || expiry <= unix_now() {
+        return Option::None
+    }
+    return Option::Some(payload.from(colon + 1))
+}
+
+// A password hash to store: `pbkdf2-sha256$<iterations>$<salt>$<hash>`, with a
+// fresh 16-byte salt and a 32-byte PBKDF2-HMAC-SHA256 output, both base64url.
+// 100000 iterations take about a second with this compiler today.
+fn password_hash(password: &Bytes, iterations: u32) -> Bytes {
+    let salt = alloc(16)
+    if !random_fill(salt, 16) {
+        panic("password_hash: the system random source failed")
+    }
+    let salt_b = Bytes::view(salt as *const u8, 16)
+    let key = alloc(32)
+    pbkdf2_sha256(password, &salt_b, iterations, key, 32)
+    let key_b = Bytes::view(key as *const u8, 32)
+    let out = alloc(128)
+    let mut at = put_text(out, 0, Bytes::from_str("pbkdf2-sha256$"))
+    at = put_decimal(out, at, iterations as usize)
+    at = put_text(out, at, Bytes::from_str("$"))
+    at = at + base64url_encode(&salt_b, unsafe { (out as usize + at) as *mut u8 })
+    at = put_text(out, at, Bytes::from_str("$"))
+    at = at + base64url_encode(&key_b, unsafe { (out as usize + at) as *mut u8 })
+    dealloc(salt)
+    dealloc(key)
+    return Bytes::view(out as *const u8, at)
+}
+
+// True when `password` matches a `password_hash` result. A malformed stored
+// hash never matches.
+fn password_verify(password: &Bytes, stored: &Bytes) -> bool {
+    let prefix = Bytes::from_str("pbkdf2-sha256$")
+    if !stored.starts_with(Bytes::from_str("pbkdf2-sha256$")) {
+        return false
+    }
+    let rest = stored.from(prefix.len)
+    let d1 = match rest.find_byte('$' as u8, 0) {
+        Option::Some(i) => i,
+        Option::None => return false,
+    }
+    let d2 = match rest.find_byte('$' as u8, d1 + 1) {
+        Option::Some(i) => i,
+        Option::None => return false,
+    }
+    let iterations = parse_decimal(rest.prefix(d1))
+    if iterations < 1i64 || iterations > 10000000i64 {
+        return false
+    }
+    let salt_text = rest.range(d1 + 1, d2)
+    let hash_text = rest.from(d2 + 1)
+    let salt = alloc(salt_text.len + 1)
+    let want = alloc(hash_text.len + 1)
+    let salt_n = base64url_decode(&salt_text, salt)
+    let want_n = base64url_decode(&hash_text, want)
+    let mut ok = false
+    if salt_n >= 0i64 && want_n == 32i64 {
+        let salt_b = Bytes::view(salt as *const u8, salt_n as usize)
+        let got = alloc(32)
+        pbkdf2_sha256(password, &salt_b, iterations as u32, got, 32)
+        let got_b = Bytes::view(got as *const u8, 32)
+        let want_b = Bytes::view(want as *const u8, 32)
+        ok = constant_time_equals(&got_b, &want_b)
+        dealloc(got)
+    }
+    dealloc(salt)
+    dealloc(want)
+    return ok
+}

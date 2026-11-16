@@ -1,0 +1,292 @@
+// Minimal HTML templates: `{{name}}` substitution with HTML escaping.
+//
+// Outputs (`html_escape`, `render`, `render_file`, `template_join`, and the
+// scratch buffer formatted by `TemplateVars::int`) are freshly allocated and
+// left for the per-connection child process to free on exit, matching
+// `url_decoded` in `http.um`.
+
+// One template variable: a name, its bytes, and whether those bytes are already
+// safe HTML that should not be escaped again.
+struct TemplateVar {
+    name: Bytes,
+    value: Bytes,
+    raw: bool,
+}
+
+// A set of named values to substitute into a template.
+//
+// Stored in a raw buffer grown with `alloc`/`copy_bytes`, because `Vec<T>` in
+// this standard library only holds `i64`-sized elements and `TemplateVar` is
+// larger.
+struct TemplateVars {
+    entries: *mut u8,
+    len: usize,
+    cap: usize,
+}
+
+impl TemplateVars {
+    // An empty set of variables. No memory is allocated until the first value
+    // is added.
+    fn new() -> TemplateVars {
+        return TemplateVars { entries: unsafe { 0 as *mut u8 }, len: 0usize, cap: 0usize }
+    }
+
+    // Sets `name` to `value`, which will be HTML-escaped when rendered.
+    fn text(self, name: &str, value: Bytes) -> TemplateVars {
+        return self.set(name, value, false)
+    }
+
+    // Sets `name` to `value`, which is inserted raw without escaping (for
+    // already-rendered HTML fragments such as joined list rows).
+    fn html(self, name: &str, value: Bytes) -> TemplateVars {
+        return self.set(name, value, true)
+    }
+
+    // Sets `name` to the decimal text of `value`.
+    fn int(self, name: &str, value: i64) -> TemplateVars {
+        return self.set(name, template_format_i64(value), true)
+    }
+
+    // Releases the variable table's allocation. A handler in a per-connection
+    // child can skip this: the memory goes when the child exits.
+    fn free(self) {
+        if self.cap > 0 {
+            dealloc(self.entries)
+        }
+    }
+
+    // Inserts or updates `name` in the table.
+    fn set(self, name: &str, value: Bytes, raw: bool) -> TemplateVars {
+        let key = Bytes::from_str(name)
+        let mut out = self
+        let mut i: usize = 0
+        while i < out.len {
+            let slot = unsafe { (out.entries as usize + i * sizeof(TemplateVar)) as *mut TemplateVar }
+            if unsafe { (*slot).name.equals(&key) } {
+                unsafe { *slot = TemplateVar { name: key, value: value, raw: raw } }
+                return out
+            }
+            i = i + 1
+        }
+        if out.len == out.cap {
+            let new_cap = if out.cap == 0 { 4usize } else { out.cap * 2usize }
+            let fresh = alloc(new_cap * sizeof(TemplateVar))
+            if out.len > 0 {
+                copy_bytes(out.entries as *const u8, fresh, out.len * sizeof(TemplateVar))
+            }
+            if out.cap > 0 {
+                dealloc(out.entries)
+            }
+            out.entries = fresh
+            out.cap = new_cap
+        }
+        let slot = unsafe { (out.entries as usize + out.len * sizeof(TemplateVar)) as *mut TemplateVar }
+        unsafe { *slot = TemplateVar { name: key, value: value, raw: raw } }
+        out.len = out.len + 1
+        return out
+    }
+}
+
+// Escapes `&`, `<`, `>`, `"`, and `'` for safe inclusion in HTML text or
+// double/single-quoted attribute values.
+//
+// The output is freshly allocated and left for the per-connection child
+// process to free on exit.
+fn html_escape(text: &Bytes) -> Bytes {
+    let mut out = template_append_escaped(String::new(), text)
+    if out.capacity == 0 {
+        out = out.reserve(0)
+        out = out.write_terminator()
+    }
+    return Bytes::view(out.as_ptr(), out.len())
+}
+
+// Renders `template` by replacing each `{{name}}` (spaces inside the braces
+// allowed) with the matching entry in `vars`. Unset names render as empty, and
+// an unterminated `{{` is copied through literally.
+//
+// The output is freshly allocated and left for the per-connection child
+// process to free on exit.
+fn render(template: &Bytes, vars: &TemplateVars) -> Bytes {
+    // Each `{{` / `}}` in a UMAY string literal resolves to one `{` / `}`.
+    let open_tag = Bytes::from_str("{{{{")
+    let close_tag = Bytes::from_str("}}}}")
+    let mut out = String::new().reserve(template.len)
+    let mut cursor: usize = 0
+    while cursor < template.len {
+        let open = match template.find_slice(Bytes::view(open_tag.data, open_tag.len), cursor) {
+            Option::Some(i) => i,
+            Option::None => break,
+        }
+        if open > cursor {
+            out = out.reserve(open - cursor)
+            out = out.append_bytes(template.data, cursor, open - cursor)
+        }
+        let close = match template.find_slice(Bytes::view(close_tag.data, close_tag.len), open + 2) {
+            Option::Some(i) => i,
+            Option::None => {
+                let rest = template.len - open
+                out = out.reserve(rest)
+                out = out.append_bytes(template.data, open, rest)
+                out = out.write_terminator()
+                return Bytes::view(out.as_ptr(), out.len())
+            }
+        }
+        let key = trim(template.range(open + 2, close))
+        match template_lookup(vars, &key) {
+            Option::Some(v) => {
+                if v.raw {
+                    out = out.reserve(v.value.len)
+                    out = out.append_bytes(v.value.data, 0, v.value.len)
+                } else {
+                    out = template_append_escaped(out, &v.value)
+                }
+            }
+            Option::None => {
+                let _ = 0
+            }
+        }
+        cursor = close + 2
+    }
+    if cursor < template.len {
+        let rest = template.len - cursor
+        out = out.reserve(rest)
+        out = out.append_bytes(template.data, cursor, rest)
+    }
+    out = out.write_terminator()
+    return Bytes::view(out.as_ptr(), out.len())
+}
+
+// Reads the template at `path` and renders it with `vars`, or returns `None`
+// when the file is missing (or is a directory).
+fn render_file(path: &str, vars: &TemplateVars) -> Option<Bytes> {
+    let p = path as *const u8
+    if is_dir(p) || !file_exists(p) {
+        return Option::None
+    }
+    let data = read_file_bytes(p)
+    let tmpl = Bytes::view(data.ptr as *const u8, data.len)
+    let rendered = render(&tmpl, vars)
+    data.free()
+    return Option::Some(rendered)
+}
+
+// Joins `count` rendered fragments at `parts` into a single freshly allocated
+// `Bytes`. Useful for passing a fixed array of rendered rows to `.html(...)`.
+fn template_join(parts: *const Bytes, count: usize) -> Bytes {
+    let mut total: usize = 0
+    let mut i: usize = 0
+    while i < count {
+        let p = unsafe { *((parts as usize + i * sizeof(Bytes)) as *const Bytes) }
+        total = total + p.len
+        i = i + 1
+    }
+    let buf = alloc(total + 1)
+    let mut at: usize = 0
+    i = 0
+    while i < count {
+        let p = unsafe { *((parts as usize + i * sizeof(Bytes)) as *const Bytes) }
+        at = put_text(buf, at, p)
+        i = i + 1
+    }
+    unsafe { write_byte((buf as usize + at) as *mut u8, 0u8) }
+    return Bytes::view(buf as *const u8, at)
+}
+
+// Appends `part` onto `out`, for building a joined list of rendered rows in a
+// loop before passing `Bytes::view(out.as_ptr(), out.len())` to `.html(...)`.
+fn template_append(out: String, part: Bytes) -> String {
+    let mut buf = out.reserve(part.len)
+    buf = buf.append_bytes(part.data, 0, part.len)
+    return buf
+}
+
+// Appends `text` to `out` with HTML special characters escaped.
+fn template_append_escaped(out: String, text: &Bytes) -> String {
+    let mut buf = out.reserve(text.len)
+    let mut run_start: usize = 0
+    let mut i: usize = 0
+    while i < text.len {
+        let ch = text.get(i)
+        let mut esc = Bytes::from_str("")
+        if ch == 38u8 {
+            // &
+            esc = Bytes::from_str("&amp;")
+        } else if ch == 60u8 {
+            // <
+            esc = Bytes::from_str("&lt;")
+        } else if ch == 62u8 {
+            // >
+            esc = Bytes::from_str("&gt;")
+        } else if ch == 34u8 {
+            // "
+            esc = Bytes::from_str("&quot;")
+        } else if ch == 39u8 {
+            // '
+            esc = Bytes::from_str("&#39;")
+        }
+        if esc.len > 0 {
+            if i > run_start {
+                buf = buf.reserve(i - run_start)
+                buf = buf.append_bytes(text.data, run_start, i - run_start)
+            }
+            buf = buf.reserve(esc.len)
+            buf = buf.append_bytes(esc.data, 0, esc.len)
+            run_start = i + 1
+        }
+        i = i + 1
+    }
+    if i > run_start {
+        buf = buf.reserve(i - run_start)
+        buf = buf.append_bytes(text.data, run_start, i - run_start)
+    }
+    return buf
+}
+
+// Finds `name` in `vars`.
+fn template_lookup(vars: &TemplateVars, name: &Bytes) -> Option<TemplateVar> {
+    let mut i: usize = 0
+    while i < vars.len {
+        let slot = unsafe { (vars.entries as usize + i * sizeof(TemplateVar)) as *const TemplateVar }
+        if unsafe { (*slot).name.equals(name) } {
+            let found = unsafe { *slot }
+            return Option::Some(found)
+        }
+        i = i + 1
+    }
+    return Option::None
+}
+
+// Formats `value` as decimal ASCII in a freshly allocated `Bytes`.
+fn template_format_i64(value: i64) -> Bytes {
+    let mut digits = [0u8; 24]
+    let mut count: usize = 0
+    let negative = value < 0i64
+    if value == 0i64 {
+        digits[0] = 48u8
+        count = 1
+    } else {
+        let mut n = value
+        while n != 0i64 {
+            let rem = n % 10i64
+            let digit = if rem < 0i64 { -rem } else { rem }
+            digits[count] = 48u8 + digit as u8
+            n = n / 10i64
+            count = count + 1
+        }
+    }
+    let total = count + if negative { 1usize } else { 0usize }
+    let buf = alloc(total + 1)
+    let mut at: usize = 0
+    if negative {
+        unsafe { write_byte(buf, 45u8) }
+        at = 1
+    }
+    while count > 0 {
+        count = count - 1
+        unsafe { write_byte((buf as usize + at) as *mut u8, digits[count]) }
+        at = at + 1
+    }
+    unsafe { write_byte((buf as usize + at) as *mut u8, 0u8) }
+    return Bytes::view(buf as *const u8, at)
+}

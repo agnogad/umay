@@ -1,0 +1,51 @@
+// Clocks and random bytes on a POSIX system: bindings only.
+//
+// `CLOCK_MONOTONIC` is the one number that differs between Linux and macOS, so
+// it comes from `clock_<system>.um`. `CLOCK_REALTIME` is 0 on both.
+//
+// Random bytes come from `getentropy`, which Linux (glibc 2.25+, musl) and
+// macOS both provide; on Linux it is `getrandom` underneath. It fills all of a
+// request of up to 256 bytes or fails, so there is no short read to retry.
+
+extern fn "clock_gettime" umay_c_clock_gettime(clock: i32, ts: *mut u8) -> i32
+extern fn "getentropy" umay_c_getentropy(buf: *mut u8, count: usize) -> i32
+
+// The most `getentropy` accepts in one call.
+const UMAY_ENTROPY_MAX: usize = 256usize
+
+// Reads `clock` as `[seconds, nanoseconds]` into a fresh 16-byte `timespec`.
+fn umay_time_timespec(clock: i32) -> *mut u8 {
+    let ts = alloc(16)
+    write_i64(ts, 0i64)
+    write_i64(unsafe { (ts as usize + 8) as *mut u8 }, 0i64)
+    umay_c_clock_gettime(clock, ts)
+    return ts
+}
+
+fn umay_time_realtime_s() -> i64 {
+    let ts = umay_time_timespec(0)
+    let s = read_i64(ts as *const u8)
+    dealloc(ts)
+    return s
+}
+
+fn umay_time_monotonic_ms() -> i64 {
+    let ts = umay_time_timespec(UMAY_CLOCK_MONOTONIC)
+    let s = read_i64(ts as *const u8)
+    let ns = read_i64(unsafe { (ts as usize + 8) as *const u8 })
+    dealloc(ts)
+    return s * 1000 + ns / 1000000
+}
+
+fn umay_time_random(out: *mut u8, count: usize) -> bool {
+    let mut done: usize = 0
+    while done < count {
+        let left = count - done
+        let step = if left < UMAY_ENTROPY_MAX { left } else { UMAY_ENTROPY_MAX }
+        if umay_c_getentropy(unsafe { (out as usize + done) as *mut u8 }, step) != 0 {
+            return false
+        }
+        done = done + step
+    }
+    return true
+}

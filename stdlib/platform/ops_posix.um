@@ -1,0 +1,102 @@
+// POSIX `poll` and signal-mask operations for graceful server shutdown.
+//
+// Target-specific constants (`UMAY_SIGSET_BYTES`, `UMAY_SIG_BLOCK`,
+// `UMAY_SIG_SETMASK`) live in `ops_linux.um` and `ops_macos.um`.
+
+extern fn "poll" umay_c_poll(fds: *mut u8, nfds: usize, timeout: i32) -> i32
+extern fn "sigemptyset" umay_c_sigemptyset(set: *mut u8) -> i32
+extern fn "sigaddset" umay_c_sigaddset(set: *mut u8, signum: i32) -> i32
+extern fn "sigismember" umay_c_sigismember(set: *const u8, signum: i32) -> i32
+extern fn "sigprocmask" umay_c_sigprocmask(how: i32, set: *const u8, oldset: *mut u8) -> i32
+extern fn "sigpending" umay_c_sigpending(set: *mut u8) -> i32
+extern fn "sigwait" umay_c_sigwait(set: *const u8, sig: *mut i32) -> i32
+
+const UMAY_SIGINT: i32 = 2
+const UMAY_SIGTERM: i32 = 15
+const UMAY_POLLIN: u16 = 1u16
+const UMAY_EINTR: i32 = 4
+
+fn umay_ops_zero(buf: *mut u8, count: usize) {
+    let mut i: usize = 0usize
+    while i < count {
+        unsafe { write_byte((buf as usize + i) as *mut u8, 0u8) }
+        i = i + 1usize
+    }
+}
+
+// Blocks SIGINT and SIGTERM and returns a state buffer holding `mask`,
+// `old_mask`, `pending`, and a 4-byte `sig` scratch slot.
+fn umay_ops_block_shutdown_signals() -> *mut u8 {
+    let size = 3usize * UMAY_SIGSET_BYTES + 4usize
+    let state = alloc(size)
+    umay_ops_zero(state, size)
+    let mask = state
+    let old_mask = unsafe { (state as usize + UMAY_SIGSET_BYTES) as *mut u8 }
+    let _ = umay_c_sigemptyset(mask)
+    let _ = umay_c_sigaddset(mask, UMAY_SIGINT)
+    let _ = umay_c_sigaddset(mask, UMAY_SIGTERM)
+    let _ = umay_c_sigprocmask(UMAY_SIG_BLOCK, mask as *const u8, old_mask)
+    return state
+}
+
+// Restores the pre-`serve` signal mask in a forked child and frees its copy of
+// `state`.
+fn umay_ops_restore_signals(state: *mut u8) {
+    let old_mask = unsafe { (state as usize + UMAY_SIGSET_BYTES) as *const u8 }
+    let _ = umay_c_sigprocmask(UMAY_SIG_SETMASK, old_mask, unsafe { 0 as *mut u8 })
+    dealloc(state)
+}
+
+// True when SIGINT or SIGTERM is pending against the blocked parent mask.
+fn umay_ops_shutdown_pending(state: *mut u8) -> bool {
+    let pending = unsafe { (state as usize + 2usize * UMAY_SIGSET_BYTES) as *mut u8 }
+    let _ = umay_c_sigemptyset(pending)
+    if umay_c_sigpending(pending) != 0 {
+        return false
+    }
+    if umay_c_sigismember(pending as *const u8, UMAY_SIGINT) == 1 {
+        return true
+    }
+    if umay_c_sigismember(pending as *const u8, UMAY_SIGTERM) == 1 {
+        return true
+    }
+    return false
+}
+
+// Waits up to `timeout_ms` for `fd` to become readable. Returns 1 when ready,
+// 0 on timeout or EINTR, and -1 on error.
+fn umay_ops_wait_accept(fd: isize, timeout_ms: i32) -> i32 {
+    let pfd = alloc(8)
+    write_u32(pfd, fd as u32)
+    write_u16(unsafe { (pfd as usize + 4) as *mut u8 }, UMAY_POLLIN)
+    write_u16(unsafe { (pfd as usize + 6) as *mut u8 }, 0u16)
+    let rc = umay_c_poll(pfd, 1usize, timeout_ms)
+    let revents = read_u16(unsafe { (pfd as usize + 6) as *const u8 })
+    dealloc(pfd)
+    if rc < 0 {
+        if last_error() == UMAY_EINTR {
+            return 0
+        }
+        return -1
+    }
+    if rc == 0 {
+        return 0
+    }
+    if (revents & UMAY_POLLIN) != 0u16 {
+        return 1
+    }
+    return 0
+}
+
+// Consumes any pending SIGINT/SIGTERM so restoring the mask does not immediately
+// kill the process, restores the original mask, and frees `state`.
+fn umay_ops_finish_shutdown(state: *mut u8) {
+    let mask = state as *const u8
+    let old_mask = unsafe { (state as usize + UMAY_SIGSET_BYTES) as *const u8 }
+    let sig_out = unsafe { (state as usize + 3usize * UMAY_SIGSET_BYTES) as *mut i32 }
+    while umay_ops_shutdown_pending(state) {
+        let _ = umay_c_sigwait(mask, sig_out)
+    }
+    let _ = umay_c_sigprocmask(UMAY_SIG_SETMASK, old_mask, unsafe { 0 as *mut u8 })
+    dealloc(state)
+}

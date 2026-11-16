@@ -286,6 +286,10 @@ fn remove_dead_stores(function: &mut MachineFunction) -> usize {
                 continue;
             }
             let key = slot_key(&slot);
+            let stored = match memory_write(&insts[i]) {
+                Some(Some((_, bytes))) => bytes,
+                _ => continue,
+            };
             // Keep the store unless another store to the same slot overwrites it
             // before any read *within this block*. A block boundary is a
             // conservative stop: the next block may read the slot and this pass
@@ -297,7 +301,7 @@ fn remove_dead_stores(function: &mut MachineFunction) -> usize {
                     dead = false;
                     break;
                 }
-                if writes_slot(later, &key) {
+                if matches!(memory_write(later), Some(Some((k, bytes))) if k == key && bytes >= stored) {
                     dead = true;
                     break;
                 }
@@ -357,20 +361,31 @@ fn slots_read(inst: &Inst) -> Vec<(i64, i64)> {
 /// read a stale slot, which is a wrong answer rather than a crash -- the reason
 /// this check is exhaustive rather than convenient.
 fn loads_from_slot(inst: &Inst, key: &(i64, i64)) -> bool {
+    // A read of up to 8 bytes anywhere within 8 bytes of the slot may cover
+    // it, and a read through a pointer may reach any slot whose address was
+    // taken; both count. Only a symbol-addressed global is known not to.
+    fn mem_reads(m: &Mem, key: &(i64, i64)) -> bool {
+        if plain_stack(m) {
+            overlaps(slot_key(m), 8, *key, 8)
+        } else {
+            m.symbol.is_none() || m.base.is_some() || m.index.is_some()
+        }
+    }
     fn reads(op: &MOperand, key: &(i64, i64)) -> bool {
         match op {
-            MOperand::Mem(m) => plain_stack(m) && slot_key(m) == *key,
+            MOperand::Mem(m) => mem_reads(m, key),
             _ => false,
         }
     }
     match inst {
-        Inst::Load { src, .. } => plain_stack(src) && slot_key(src) == *key,
+        Inst::Load { src, .. } => mem_reads(src, key),
         Inst::Move { src, .. } => reads(src, key),
         // Any ALU instruction may read its source from memory. `dst` is not
         // checked on purpose: a read-modify-write of the slot (`addq $1, slot`)
         // is a write for this analysis, so the store before it is redundant
         // anyway.
-        Inst::Alu { src, .. } => reads(src, key),
+        // A memory destination is read as well as written (`addq $1, slot`).
+        Inst::Alu { src, dst, .. } => reads(src, key) || reads(dst, key),
         // A compare, a test and an extend all take memory operands.
         Inst::Cmp { lhs, rhs, .. } => reads(lhs, key) || reads(rhs, key),
         Inst::Test { lhs, rhs, .. } => reads(lhs, key) || reads(rhs, key),
@@ -382,15 +397,6 @@ fn loads_from_slot(inst: &Inst, key: &(i64, i64)) -> bool {
         // being optimistic costs correctness.
         Inst::Push(op) | Inst::Pop(op) => reads(op, key),
         _ => matches!(inst, Inst::Store { src, .. } if reads(src, key)),
-    }
-}
-
-/// True when `inst` overwrites the frame slot `key`.
-fn writes_slot(inst: &Inst, key: &(i64, i64)) -> bool {
-    match inst {
-        Inst::Store { dst, .. } => plain_stack(dst) && slot_key(dst) == *key,
-        Inst::Move { dst: MOperand::Mem(m), .. } => plain_stack(m) && slot_key(m) == *key,
-        _ => false,
     }
 }
 
@@ -470,7 +476,7 @@ fn forward_slots(function: &mut MachineFunction) -> usize {
         // `reg`, a load of `slot` becomes a register-to-register move (or
         // vanishes, if the target is already that register), and the store that
         // put it there is deleted once nothing has read the slot since.
-        let mut forwarded: std::collections::BTreeMap<(i64, i64), Reg> = std::collections::BTreeMap::new();
+        let mut forwarded: std::collections::BTreeMap<(i64, i64), (Reg, u64)> = std::collections::BTreeMap::new();
         for inst in std::mem::take(&mut block.insts) {
             if let Some(prev) = out.last() {
                 // `mov %r, %r` writes what is already there.
@@ -484,8 +490,8 @@ fn forward_slots(function: &mut MachineFunction) -> usize {
                 // This is true by construction -- no aliasing argument is needed
                 // because there is no instruction between the two.
                 #[allow(clippy::collapsible_if)] // let-chains need Rust 2024
-                if let Some((slot, reg)) = store_of_register(prev) {
-                    if loads_same_slot_into(&inst, &slot, reg) {
+                if let (Some((slot, reg)), Some(Some((_, stored)))) = (store_of_register(prev), memory_write(prev)) {
+                    if loads_same_slot_into(&inst, &slot, reg, stored) {
                         removed += 1;
                         continue;
                     }
@@ -505,8 +511,10 @@ fn forward_slots(function: &mut MachineFunction) -> usize {
             // rewritten -- a destination in memory is a real write and stays one.
             let inst = match &inst {
                 Inst::Load { kind: MoveKind::Move(w), src, dst: MOperand::Reg(d) } if plain_stack(src) => {
-                    match forwarded.get(&slot_key(src)) {
-                        Some(&src_reg) if src_reg != *d => Inst::Move {
+                    // Only a load no wider than the store is served: the
+                    // register holds the stored bytes and nothing above them.
+                    match forwarded.get(&slot_key(src)).filter(|(_, held)| w.bytes() <= *held) {
+                        Some(&(src_reg, _)) if src_reg != *d => Inst::Move {
                             kind: MoveKind::Move(*w),
                             src: MOperand::Reg(src_reg),
                             dst: MOperand::Reg(*d),
@@ -522,14 +530,14 @@ fn forward_slots(function: &mut MachineFunction) -> usize {
                     if std::env::var_os("UMAY_FWD_DEBUG").is_some() {
                         eprintln!("  alu read {:?} known={:?}", slot_key(m), forwarded.get(&slot_key(m)));
                     }
-                    match forwarded.get(&slot_key(m)) {
-                        Some(&src_reg) => Inst::Alu { op: *op, width: *width, src: MOperand::Reg(src_reg), dst: dst.clone() },
+                    match forwarded.get(&slot_key(m)).filter(|(_, held)| width.bytes() <= *held) {
+                        Some(&(src_reg, _)) => Inst::Alu { op: *op, width: *width, src: MOperand::Reg(src_reg), dst: dst.clone() },
                         None => inst,
                     }
                 }
                 Inst::Cmp { width, lhs: MOperand::Mem(m), rhs } if plain_stack(m) => {
-                    match forwarded.get(&slot_key(m)) {
-                        Some(&src_reg) => Inst::Cmp { width: *width, lhs: MOperand::Reg(src_reg), rhs: rhs.clone() },
+                    match forwarded.get(&slot_key(m)).filter(|(_, held)| width.bytes() <= *held) {
+                        Some(&(src_reg, _)) => Inst::Cmp { width: *width, lhs: MOperand::Reg(src_reg), rhs: rhs.clone() },
                         None => inst,
                     }
                 }
@@ -539,24 +547,36 @@ fn forward_slots(function: &mut MachineFunction) -> usize {
             // Anything that writes a register invalidates the forwarding for
             // that register: the slot still holds the value, but the register no
             // longer does, so a later load must really read memory.
-            if let Some(written) = registers_written(&inst) {
-                if std::env::var_os("UMAY_FWD_DEBUG").is_some() && !written.is_empty() {
-                    eprintln!("  writes {:?} :: {:?}", written, inst);
+            match registers_written(&inst) {
+                Some(written) => {
+                    if std::env::var_os("UMAY_FWD_DEBUG").is_some() && !written.is_empty() {
+                        eprintln!("  writes {:?} :: {:?}", written, inst);
+                    }
+                    for reg in written {
+                        forwarded.retain(|_, (held, _)| *held != reg);
+                    }
                 }
-                for reg in written {
-                    forwarded.retain(|_, held| *held != reg);
-                }
+                // A call clobbers the caller-saved registers and may write any
+                // slot whose address it was given.
+                None => forwarded.clear(),
+            }
+            // A write to memory ends the forwarding of every slot it overlaps;
+            // a write through a pointer may hit any slot, so it ends them all.
+            match memory_write(&inst) {
+                Some(Some((key, bytes))) => forwarded.retain(|k, (_, held)| !overlaps(*k, *held, key, bytes)),
+                Some(None) => forwarded.clear(),
+                None => {}
             }
 
             // Record a store of a register into a slot. Only a plain
             // `%rbp`-relative slot with no symbol or index qualifies, which is
             // what `plain_stack` checks.
-            if let Some((slot, reg)) = store_of_register(&inst) {
+            if let (Some((slot, reg)), Some(Some((_, bytes)))) = (store_of_register(&inst), memory_write(&inst)) {
                 if plain_stack(&slot) {
                     if std::env::var_os("UMAY_FWD_DEBUG").is_some() {
                         eprintln!("  fwd store {:?} -> {:?}", slot_key(&slot), reg);
                     }
-                    forwarded.insert(slot_key(&slot), reg);
+                    forwarded.insert(slot_key(&slot), (reg, bytes));
                 }
             }
 
@@ -593,8 +613,14 @@ fn registers_written(inst: &Inst) -> Option<Vec<Reg>> {
     match inst {
         Inst::Call { .. } => None,
         Inst::Move { dst, .. } => one(dst),
+        // `div`/`idiv` also leave the remainder in `%rdx`, and `cqto` fills it.
+        Inst::Alu { op: AluOp::Div | AluOp::Idiv, .. } => Some(vec![Reg::Phys(0), Reg::Phys(2)]),
+        Inst::SignExtendAcc { .. } => Some(vec![Reg::Phys(2)]),
         Inst::Alu { dst, .. } => one(dst),
-        Inst::Load { dst, kind: MoveKind::Move(_), .. } => one(dst),
+        // Every load writes its destination, a widening `movzb`/`movsb` too:
+        // leaving those out kept `%rcx` forwarded after `movzbq slot, %rcx`
+        // overwrote it, so a method's third argument read the second's value.
+        Inst::Load { dst, .. } => one(dst),
         Inst::Lea { dst, .. } => one(dst),
         Inst::SetCc { dst, .. } => one(dst),
         Inst::Pop(op) => one(op),
@@ -824,19 +850,51 @@ fn store_of_register(inst: &Inst) -> Option<(Mem, Reg)> {
 }
 
 /// True when `inst` loads `slot` into `reg`.
-fn loads_same_slot_into(inst: &Inst, slot: &Mem, reg: Reg) -> bool {
+///
+/// A load wider than the `stored` bytes reads bytes the register never held.
+fn loads_same_slot_into(inst: &Inst, slot: &Mem, reg: Reg, stored: u64) -> bool {
     let (src, dst) = match inst {
-        Inst::Load { src, dst, kind: MoveKind::Move(_) } => (src, dst),
-        Inst::Move { src: MOperand::Mem(m), dst: MOperand::Reg(r), kind: MoveKind::Move(_) } => {
-            return *r == reg && same_slot(m, slot);
+        Inst::Load { src, dst, kind: MoveKind::Move(w) } if w.bytes() <= stored => (src, dst),
+        Inst::Move { src: MOperand::Mem(m), dst: MOperand::Reg(r), kind: MoveKind::Move(w) } => {
+            return *r == reg && same_slot(m, slot) && w.bytes() <= stored;
         }
         _ => return false,
     };
     matches!(dst, MOperand::Reg(r) if *r == reg) && same_slot(src, slot)
 }
 
+/// A frame slot: `%rbp` plus a constant. A memory operand on any other base is
+/// an access through a pointer, whose register may change between two uses
+/// that look alike, so it is never treated as a slot.
 fn plain_stack(m: &Mem) -> bool {
-    m.symbol.is_none() && m.index.is_none() && m.base.is_some()
+    m.symbol.is_none() && m.index.is_none() && m.base == Some(Reg::Phys(5))
+}
+
+/// The bytes a move of `kind` writes.
+fn kind_bytes(kind: &MoveKind) -> u64 {
+    match kind {
+        MoveKind::Move(w) => w.bytes(),
+        MoveKind::SignExtend { to, .. } | MoveKind::ZeroExtend { to, .. } => to.bytes(),
+    }
+}
+
+/// The memory `inst` writes: `Some(Some((slot, bytes)))` for a frame slot,
+/// `Some(None)` for a write through a pointer (which may alias any slot whose
+/// address was taken), `None` when it writes no memory.
+fn memory_write(inst: &Inst) -> Option<Option<((i64, i64), u64)>> {
+    let (m, bytes) = match inst {
+        Inst::Store { kind, dst, .. } => (dst, kind_bytes(kind)),
+        Inst::Move { kind, dst: MOperand::Mem(m), .. } => (m, kind_bytes(kind)),
+        Inst::Alu { width, dst: MOperand::Mem(m), .. } => (m, width.bytes()),
+        Inst::SetCc { dst: MOperand::Mem(m), .. } | Inst::Pop(MOperand::Mem(m)) => (m, 8),
+        _ => return None,
+    };
+    Some(plain_stack(m).then(|| (slot_key(m), bytes)))
+}
+
+/// True when the byte ranges `[a, a + aw)` and `[b, b + bw)` of the frame share a byte.
+fn overlaps(a: (i64, i64), aw: u64, b: (i64, i64), bw: u64) -> bool {
+    a.0 == b.0 && a.1 < b.1 + bw as i64 && b.1 < a.1 + aw as i64
 }
 
 fn same_slot(a: &Mem, b: &Mem) -> bool {

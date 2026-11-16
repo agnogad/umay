@@ -94,3 +94,9 @@ pub fn umay_net_write(fd: isize, buf: *const u8, count: usize) -> i64 {
 pub fn umay_net_close(fd: isize) -> i32 {
     return umay_win_closesocket(unsafe { fd as usize })
 }
+
+// No-op on Windows: SO_REUSEADDR there allows another process to hijack a
+// bound port.
+pub fn umay_net_set_reuseaddr(_fd: isize) -> bool {
+    return true
+}

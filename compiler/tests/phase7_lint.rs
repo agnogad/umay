@@ -159,3 +159,9 @@ fn a_file_that_does_not_parse_reports_the_parse_error() {
         "a file that does not parse should report errors, not findings"
     );
 }
+
+#[test]
+fn a_parameter_used_in_an_if_blocks_last_expression_is_used() {
+    let src = "fn f(a: i64, b: i64) -> i64 {\n    let mut r = 0\n    if a > 0 {\n        r = b\n    }\n    return r\n}\n";
+    assert!(!codes(src).iter().any(|c| c == "L0105"), "{:?}", codes(src));
+}

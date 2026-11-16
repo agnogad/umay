@@ -364,7 +364,15 @@ pub fn print_inst(
             };
             format!("{mnemonic} {}, {}", op_str(src, width, target, foreign), mem_str(dst, width, target, foreign))
         }
-        Inst::SignExtendAcc { .. } => "cqto".to_string(),
+        // `idiv` at width w reads `dx:ax` at that width, so the sign has to be
+        // spread at the same width: `cqto` after a 32-bit move leaves `edx` zero
+        // and `-7 / 2` came out as 2147483644.
+        Inst::SignExtendAcc { width } => match width {
+            RegWidth::W64 => "cqto",
+            RegWidth::W32 => "cltd",
+            _ => "cwtd",
+        }
+        .to_string(),
     }
 }
 

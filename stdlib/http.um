@@ -12,11 +12,18 @@ struct Request {
     version: Bytes,
     headers: Bytes,
     body: Bytes,
+    // The route pattern that matched, set by `dispatch`; `param` reads it.
+    pattern: Bytes,
 }
 
-// A status code and the body that goes with it.
+// A status code, its body, and the headers that describe them.
+//
+// `headers` is a raw block of `Name: value\r\n` lines written as given, so a
+// handler that needs a `Location` or a `Set-Cookie` adds it without a map.
 struct Response {
     status: i32,
+    content_type: Bytes,
+    headers: Bytes,
     body: Bytes,
 }
 
@@ -40,17 +47,76 @@ impl Request {
     fn body(&self) -> Bytes {
         return self.body
     }
+
+    // The value of header `name`, matched without regard to case and trimmed.
+    fn header(&self, name: &str) -> Option<Bytes> {
+        return header_value(&self.headers, name)
+    }
+
+    // The target without its query string: `/users` for `/users?id=3`.
+    fn path(&self) -> Bytes {
+        let target = self.target
+        let cut = match target.find_byte('?' as u8, 0) {
+            Option::Some(i) => i,
+            Option::None => target.len,
+        }
+        return target.prefix(cut)
+    }
+
+    // The query string without its `?`, or an empty view when there is none.
+    fn query(&self) -> Bytes {
+        let target = self.target
+        let cut = match target.find_byte('?' as u8, 0) {
+            Option::Some(i) => i + 1,
+            Option::None => target.len,
+        }
+        return target.from(cut)
+    }
+
+    // The query parameter `name`, percent-decoded, or `None` when absent.
+    fn query_param(&self, name: &str) -> Option<Bytes> {
+        let query = self.query()
+        return url_decoded(query_param(query, name))
+    }
+
+    // The field `name` of an `application/x-www-form-urlencoded` body,
+    // percent-decoded, or `None` when absent.
+    fn form(&self, name: &str) -> Option<Bytes> {
+        let body = self.body
+        return url_decoded(query_param(body, name))
+    }
+
+    // The path segment the route's `:name` matched, e.g. `42` for `/users/:id`
+    // and `/users/42`, or the rest of the path for `*`. Empty when the route has
+    // no such parameter.
+    fn param(&self, name: &str) -> Bytes {
+        let pattern = self.pattern
+        let path = self.path()
+        let want = Bytes::from_str(name)
+        return match_path(&pattern, &path, &want).unwrap_or(Bytes::from_str(""))
+    }
 }
 
 impl Response {
     // A response with no body.
     fn new(status: i32) -> Response {
-        return Response { status: status, body: Bytes::from_str("") }
+        let empty = Bytes::from_str("")
+        return Response { status: status, content_type: empty, headers: empty, body: empty }
     }
 
     // The same response with `body` attached.
     fn with_body(self, body: Bytes) -> Response {
-        return Response { status: self.status, body: body }
+        return Response { status: self.status, content_type: self.content_type, headers: self.headers, body: body }
+    }
+
+    // The same response with a `Content-Type`, e.g. `application/json`.
+    fn with_type(self, content_type: &str) -> Response {
+        return Response { status: self.status, content_type: Bytes::from_str(content_type), headers: self.headers, body: self.body }
+    }
+
+    // The same response with extra header lines, each ending in `\r\n`.
+    fn with_headers(self, lines: Bytes) -> Response {
+        return Response { status: self.status, content_type: self.content_type, headers: lines, body: self.body }
     }
 
     // The number that goes on the status line.
@@ -74,19 +140,19 @@ fn parse_request(raw: Bytes) -> Request {
     }
     let line_end = match raw.end_of_line(0) {
         Option::Some(i) => i,
-        Option::None => return Request { method: empty, target: empty, version: empty, headers: empty, body: empty },
+        Option::None => return Request { method: empty, target: empty, version: empty, headers: empty, body: empty, pattern: empty },
     }
     let line = raw.prefix(line_end)
 
     let first = match line.find_byte(' ' as u8, 0) {
         Option::Some(i) => i,
-        Option::None => return Request { method: empty, target: empty, version: empty, headers: empty, body: empty },
+        Option::None => return Request { method: empty, target: empty, version: empty, headers: empty, body: empty, pattern: empty },
     }
     let method = line.prefix(first)
     let rest = line.from(first + 1)
     let second = match rest.find_byte(' ' as u8, 0) {
         Option::Some(i) => i,
-        Option::None => return Request { method: empty, target: empty, version: empty, headers: empty, body: empty },
+        Option::None => return Request { method: empty, target: empty, version: empty, headers: empty, body: empty, pattern: empty },
     }
     let target = rest.prefix(second)
     let version = rest.from(second + 1)
@@ -108,7 +174,7 @@ fn parse_request(raw: Bytes) -> Request {
         }
     }
 
-    return Request { method: method, target: target, version: version, headers: headers, body: body }
+    return Request { method: method, target: target, version: version, headers: headers, body: body, pattern: empty }
 }
 
 // The declared body length from the `Content-Length` header, or `-1` when it is
@@ -116,6 +182,16 @@ fn parse_request(raw: Bytes) -> Request {
 // needs to know that a declared zero differs from no declaration at all, and a
 // `usize` cannot say both.
 fn content_length(headers: &Bytes) -> i64 {
+    let value = match header_value(headers, "content-length") {
+        Option::Some(v) => v,
+        Option::None => return -1i64,
+    }
+    return parse_decimal(value)
+}
+
+// The trimmed value of header `name` in a block of `\r\n`-separated lines,
+// matched without regard to case.
+fn header_value(headers: &Bytes, name: &str) -> Option<Bytes> {
     let mut rest = *headers
     while rest.len > 0 {
         let end = match rest.end_of_line(0) {
@@ -130,13 +206,168 @@ fn content_length(headers: &Bytes) -> i64 {
                 continue
             }
         }
-        let name = trim(line.prefix(colon))
-        if name_equals(name, "content-length") {
-            return parse_decimal(trim(line.from(colon + 1)))
+        if name_equals(trim(line.prefix(colon)), name) {
+            return Option::Some(trim(line.from(colon + 1)))
         }
         rest = if end + 2 <= rest.len { rest.from(end + 2) } else { Bytes::view(rest.data, 0usize) }
     }
-    return -1i64
+    return Option::None
+}
+
+// The raw value of `name` in a `a=1&b=2` string, or `None` when it is absent.
+// A bare `flag` with no `=` is present with an empty value. The value is still
+// percent-encoded; `percent_decode` turns it into bytes. This reads a query
+// string and an `application/x-www-form-urlencoded` body alike.
+fn query_param(query: Bytes, name: &str) -> Option<Bytes> {
+    let want = Bytes::from_str(name)
+    let mut rest = query
+    while rest.len > 0 {
+        let end = match rest.find_byte('&' as u8, 0) {
+            Option::Some(i) => i,
+            Option::None => rest.len,
+        }
+        let pair = rest.prefix(end)
+        let eq = match pair.find_byte('=' as u8, 0) {
+            Option::Some(i) => i,
+            Option::None => pair.len,
+        }
+        if pair.prefix(eq).equals(&want) {
+            return Option::Some(pair.from(eq + 1))
+        }
+        rest = rest.from(end + 1)
+    }
+    return Option::None
+}
+
+// Decodes `%XX` escapes and `+` (a space, in form data) from `src` into `out`,
+// returning how many bytes were written. `out` needs `src.len` bytes: decoding
+// never grows the text. A `%` not followed by two hex digits is kept as it is.
+fn percent_decode(src: Bytes, out: *mut u8) -> usize {
+    let mut i: usize = 0
+    let mut n: usize = 0
+    while i < src.len {
+        let c = src.get(i)
+        let mut byte = c
+        if c == '+' as u8 {
+            byte = 32u8
+        } else if c == '%' as u8 && i + 2 < src.len {
+            let hi = hex_value(src.get(i + 1))
+            let lo = hex_value(src.get(i + 2))
+            if hi >= 0 && lo >= 0 {
+                byte = (hi * 16 + lo) as u8
+                i = i + 2
+            }
+        }
+        unsafe {
+            write_byte((out as usize + n) as *mut u8, byte)
+        }
+        n = n + 1
+        i = i + 1
+    }
+    return n
+}
+
+// A percent-decoded copy of a found value. The copy is allocated and not freed:
+// a handler runs in a per-connection child, and it goes when the child exits.
+fn url_decoded(value: Option<Bytes>) -> Option<Bytes> {
+    return match value {
+        Option::Some(v) => {
+            let out = alloc(v.len + 1)
+            Option::Some(Bytes::view(out as *const u8, percent_decode(v, out)))
+        }
+        Option::None => Option::None,
+    }
+}
+
+// The value of one hex digit, or `-1`.
+fn hex_value(c: u8) -> i32 {
+    if c >= 48u8 && c <= 57u8 { return (c - 48u8) as i32 }
+    if c >= 97u8 && c <= 102u8 { return (c - 87u8) as i32 }
+    if c >= 65u8 && c <= 70u8 { return (c - 55u8) as i32 }
+    return -1
+}
+
+// Reads one whole request into `buf`: the head, then as many more reads as the
+// `Content-Length` body needs. Returns the byte count, `-1` when the peer closed
+// or failed first, and `-2` when the request does not fit in `capacity` (answer
+// that with 413).
+fn read_request(s: &Socket, buf: *mut u8, capacity: usize) -> i64 {
+    let mut got: usize = 0
+    while got < capacity {
+        let n = socket_read(s, unsafe { (buf as usize + got) as *mut u8 }, capacity - got)
+        if n <= 0i64 {
+            return -1i64
+        }
+        got = got + n as usize
+        let seen = Bytes::view(buf as *const u8, got)
+        match seen.find_slice(Bytes::from_str("\r\n\r\n"), 0) {
+            Option::Some(head_end) => {
+                let head = seen.prefix(head_end)
+                let declared = content_length(&head)
+                let body = if declared > 0i64 { declared as usize } else { 0usize }
+                if head_end + 4 + body > capacity {
+                    return -2i64
+                }
+                if got >= head_end + 4 + body {
+                    return got as i64
+                }
+            }
+            Option::None => continue,
+        }
+    }
+    return -2i64
+}
+
+// Writes `r` as a complete HTTP/1.1 response and closes nothing: the caller owns
+// the socket. Returns false when the peer stopped reading.
+fn write_response(s: &Socket, r: &Response) -> bool {
+    let head = alloc(192 + r.content_type.len + r.headers.len)
+    let mut n = put_text(head, 0, Bytes::from_str("HTTP/1.1 "))
+    n = put_decimal(head, n, r.status as usize)
+    n = put_text(head, n, Bytes::from_str(" "))
+    n = put_text(head, n, Bytes::from_str(reason(r.status)))
+    n = put_text(head, n, Bytes::from_str("\r\nDate: "))
+    n = n + http_date(unix_now(), unsafe { (head as usize + n) as *mut u8 })
+    if r.content_type.len > 0 {
+        n = put_text(head, n, Bytes::from_str("\r\nContent-Type: "))
+        n = put_text(head, n, r.content_type)
+    }
+    n = put_text(head, n, Bytes::from_str("\r\nContent-Length: "))
+    n = put_decimal(head, n, r.body.len)
+    n = put_text(head, n, Bytes::from_str("\r\n"))
+    n = put_text(head, n, r.headers)
+    n = put_text(head, n, Bytes::from_str("Connection: close\r\n\r\n"))
+    let mut ok = socket_write_all(s, head as *const u8, n)
+    dealloc(head)
+    if ok && r.body.len > 0 {
+        ok = socket_write_all(s, r.body.data, r.body.len)
+    }
+    return ok
+}
+
+// Copies `text` to `buf` at `at`, returning the new end.
+fn put_text(buf: *mut u8, at: usize, text: Bytes) -> usize {
+    copy_bytes(text.data, unsafe { (buf as usize + at) as *mut u8 }, text.len)
+    return at + text.len
+}
+
+// Writes `value` in decimal at `at`, returning the new end.
+fn put_decimal(buf: *mut u8, at: usize, value: usize) -> usize {
+    let mut digits: usize = 1
+    let mut scale: usize = 1
+    while value / scale >= 10 {
+        scale = scale * 10
+        digits = digits + 1
+    }
+    let mut i: usize = 0
+    while i < digits {
+        unsafe {
+            write_byte((buf as usize + at + i) as *mut u8, 48u8 + ((value / scale) % 10) as u8)
+        }
+        scale = scale / 10
+        i = i + 1
+    }
+    return at + digits
 }
 
 // True when two views hold the same ASCII letters, ignoring case, so that
@@ -208,10 +439,21 @@ fn reason(status: i32) -> &str {
     if status == 200 { return "OK" }
     if status == 201 { return "Created" }
     if status == 204 { return "No Content" }
+    if status == 301 { return "Moved Permanently" }
+    if status == 302 { return "Found" }
+    if status == 303 { return "See Other" }
+    if status == 304 { return "Not Modified" }
     if status == 400 { return "Bad Request" }
+    if status == 401 { return "Unauthorized" }
+    if status == 403 { return "Forbidden" }
     if status == 404 { return "Not Found" }
     if status == 405 { return "Method Not Allowed" }
+    if status == 409 { return "Conflict" }
+    if status == 413 { return "Content Too Large" }
+    if status == 422 { return "Unprocessable Content" }
+    if status == 429 { return "Too Many Requests" }
     if status == 500 { return "Internal Server Error" }
+    if status == 503 { return "Service Unavailable" }
     return "Unknown"
 }
 
@@ -225,4 +467,216 @@ fn status_text(status: i32) -> &str {
     if status == 405 { return "405" }
     if status == 500 { return "500" }
     return "500"
+}
+
+// ---------------------------------------------------------------------------
+// Routing
+// ---------------------------------------------------------------------------
+
+// The largest request `handle_connection` reads; a bigger one is answered 413.
+const HTTP_MAX_REQUEST = 65536
+
+// One row of a route table: a method, a path pattern and its handler.
+//
+// The handler fills in a `Response` rather than returning one: a call through a
+// function pointer can return at most 16 bytes, and a `Response` is larger.
+// It is held as an address because a struct with a function-typed field has no
+// size the table walk can step by.
+struct Route {
+    method: Bytes,
+    pattern: Bytes,
+    handler: *const u8,
+}
+
+// A route. `pattern` is a path whose segments are literal, `:name` (any one
+// non-empty segment) or a final `*` (everything after it).
+fn route(method: &str, pattern: &str, handler: fn(&Request, &mut Response)) -> Route {
+    return Route { method: Bytes::from_str(method), pattern: Bytes::from_str(pattern), handler: unsafe { handler as *const u8 } }
+}
+
+// Matches `path` against `pattern` segment by segment. `None` when it does not
+// match; otherwise the segment `:name` (or `*` when `name` is `*`) matched, or
+// an empty view when the pattern has no such parameter.
+fn match_path(pattern: &Bytes, path: &Bytes, name: &Bytes) -> Option<Bytes> {
+    let star = Bytes::from_str("*")
+    let mut found = path.prefix(0)
+    let mut p: usize = 0
+    let mut q: usize = 0
+    while true {
+        let p_end = segment_end(pattern, p)
+        let q_end = segment_end(path, q)
+        let seg = pattern.range(p, p_end)
+        if seg.equals(&star) {
+            if name.equals(&star) {
+                found = path.from(q)
+            }
+            return Option::Some(found)
+        }
+        let got = path.range(q, q_end)
+        if seg.len > 0 && seg.get(0) == ':' as u8 {
+            if got.len == 0 {
+                return Option::None
+            }
+            if seg.from(1).equals(name) {
+                found = got
+            }
+        } else if !seg.equals(&got) {
+            return Option::None
+        }
+        let p_done = p_end >= pattern.len
+        let q_done = q_end >= path.len
+        if p_done || q_done {
+            if p_done && q_done {
+                return Option::Some(found)
+            }
+            return Option::None
+        }
+        p = p_end + 1
+        q = q_end + 1
+    }
+    return Option::None
+}
+
+// The index of the next `/` at or after `from`, or the end of `b`.
+fn segment_end(b: &Bytes, from: usize) -> usize {
+    return match b.find_byte('/' as u8, from) {
+        Option::Some(i) => i,
+        Option::None => b.len,
+    }
+}
+
+// Runs the first route whose method and pattern match. A path that some route
+// matches under another method is 405; a path no route matches is 404.
+fn dispatch(routes: *const Route, count: usize, req: Request) -> Response {
+    let path = req.path()
+    let mut path_seen = false
+    let mut i: usize = 0
+    while i < count {
+        let r = unsafe { *((routes as usize + i * sizeof(Route)) as *const Route) }
+        let none = r.pattern.prefix(0)
+        if match_path(&r.pattern, &path, &none).is_some() {
+            path_seen = true
+            if r.method.equals(&req.method) {
+                let mut matched = req
+                matched.pattern = r.pattern
+                let handler = unsafe { r.handler as *const fn(&Request, &mut Response) }
+                let mut res = Response::new(500)
+                unsafe { (*handler)(&matched, &mut res) }
+                return res
+            }
+        }
+        i = i + 1
+    }
+    return Response::new(if path_seen { 405 } else { 404 })
+}
+
+// Reads one request from `conn`, routes it, and writes the answer.
+// Writes one request log line (`METHOD PATH STATUS DURATIONms`) to stderr unless
+// `UMAY_LOG=off`; a 400 or 413 with no parsed request logs `- - 400 <ms>ms` /
+// `- - 413 <ms>ms`.
+fn handle_connection(conn: &Socket, routes: *const Route, count: usize) {
+    let start_ms = monotonic_ms()
+    let buf = alloc(HTTP_MAX_REQUEST as usize)
+    let got = read_request(conn, buf, HTTP_MAX_REQUEST as usize)
+    if got == - 1i64 {
+        dealloc(buf)
+        return
+    }
+    let mut method = Bytes::from_str("-")
+    let mut path = Bytes::from_str("-")
+    let mut res = Response::new(413)
+    if got > 0i64 {
+        let req = parse_request(Bytes::view(buf as *const u8, got as usize))
+        if req.target().is_empty() {
+            res = Response::new(400)
+        } else {
+            method = req.method()
+            path = req.path()
+            if method.len == 0 {
+                method = Bytes::from_str("-")
+            }
+            if path.len == 0 {
+                path = Bytes::from_str("-")
+            }
+            res = dispatch(routes, count, req)
+        }
+    }
+    // The response may borrow the request buffer, so it goes out first.
+    let _ = write_response(conn, &res)
+    if log_enabled() {
+        let mut elapsed = monotonic_ms() - start_ms
+        if elapsed < 0i64 {
+            elapsed = 0i64
+        }
+        write_request_log(&method, &path, res.status, elapsed)
+    }
+    dealloc(buf)
+}
+
+// Serves `routes` on `port`, one child process per connection. Returns 1 when
+// the port cannot be opened, or 0 after a graceful shutdown on SIGTERM/SIGINT
+// (Linux and macOS; on Windows it continues serving until terminated).
+fn serve(port: u16, routes: *const Route, count: usize) -> i32 {
+    let server = tcp_socket()
+    let addr = address(port)
+    if socket_is_closed(&server) || !socket_set_reuseaddr(&server) || !socket_bind(&server, &addr) || !socket_listen(&server, 128) {
+        eprintln("serve: cannot open the port")
+        socket_close(&server)
+        release_address(addr)
+        return 1
+    }
+    release_address(addr)
+    let sig_state = umay_ops_block_shutdown_signals()
+    let status = alloc(4)
+    while true {
+        if umay_ops_shutdown_pending(sig_state) {
+            break
+        }
+        let ready = umay_ops_wait_accept(server.fd, 250)
+        if umay_ops_shutdown_pending(sig_state) {
+            break
+        }
+        if ready < 0 {
+            break
+        }
+        if ready == 0 {
+            let mut reaped = umay_waitpid(-1, status as *mut i32, 1)
+            while reaped > 0 {
+                reaped = umay_waitpid(-1, status as *mut i32, 1)
+            }
+            continue
+        }
+        let conn = socket_accept(&server)
+        if socket_is_closed(&conn) {
+            continue
+        }
+        let pid = spawn()
+        if is_child(pid) {
+            umay_ops_restore_signals(sig_state)
+            dealloc(status)
+            socket_close(&server)
+            handle_connection(&conn, routes, count)
+            socket_close(&conn)
+            exit(0)
+        }
+        if pid < 0 {
+            // No child to hand it to: answer it here rather than drop it.
+            handle_connection(&conn, routes, count)
+        }
+        socket_close(&conn)
+        // Reap finished children without blocking (WNOHANG is 1).
+        let mut reaped = umay_waitpid(-1, status as *mut i32, 1)
+        while reaped > 0 {
+            reaped = umay_waitpid(-1, status as *mut i32, 1)
+        }
+    }
+    // Wait for all in-flight children to finish before closing the socket.
+    let mut waited = umay_waitpid(-1, status as *mut i32, 0)
+    while waited > 0 || (waited < 0 && last_error() == 4) {
+        waited = umay_waitpid(-1, status as *mut i32, 0)
+    }
+    dealloc(status)
+    socket_close(&server)
+    umay_ops_finish_shutdown(sig_state)
+    return 0
 }

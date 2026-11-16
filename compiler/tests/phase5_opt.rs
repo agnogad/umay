@@ -53,7 +53,9 @@ fn folding_respects_the_type_width() {
         out.contains("const 4"),
         "u8 arithmetic must wrap at 8 bits:\n{out}"
     );
-    assert!(!out.contains("const 260"), "260 does not fit in u8:\n{out}");
+    // Only `f`'s body: the prelude holds constants such as `2600822924`.
+    let body = body_of(&out, "f");
+    assert!(!body.contains("const 260"), "260 does not fit in u8:\n{body}");
 }
 
 #[test]
@@ -97,7 +99,8 @@ fn a_non_constant_condition_keeps_its_branch() {
 
 #[test]
 fn unused_bindings_are_removed() {
-    let out = mir("fn f() -> i32 { let unused = 42\n 1 }", OptLevel::O2);
+    // Scoped to `f`: the prelude holds other constants that start with 42.
+    let out = body_of(&mir("fn f() -> i32 { let unused = 42\n 1 }", OptLevel::O2), "f");
     assert!(!out.contains("const 42"), "an unused literal should be gone:\n{out}");
 }
 

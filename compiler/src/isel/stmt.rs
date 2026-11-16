@@ -400,15 +400,42 @@ impl<'a, 't> Isel<'a, 't> {
             }
         };
 
+        // `div` reads `rax`/`rdx` and writes both, so no virtual register may
+        // live there: a divisor allocated to `rax` is overwritten by the
+        // dividend and the division becomes `x / x`. Reserved for the whole
+        // function, as `%rcx` is for a variable shift.
+        self.reserved.extend([0, 2]);
+        self.reserved.sort_unstable();
+        self.reserved.dedup();
+
+        // An 8-bit `div` divides `ax` and leaves the remainder in `ah`, not
+        // `dl`, so a byte is widened and divided at 32 bits; its low byte is
+        // the same answer.
+        let (left, divisor, op_width) = if width == RegWidth::W8 {
+            let extend = |s: &mut Self, r: Reg| {
+                let wide = s.vreg();
+                let kind = if signed {
+                    MoveKind::SignExtend { from: RegWidth::W8, to: RegWidth::W32 }
+                } else {
+                    MoveKind::ZeroExtend { from: RegWidth::W8, to: RegWidth::W32 }
+                };
+                s.emit(Inst::Move { kind, src: MOperand::Reg(r), dst: MOperand::Reg(wide) });
+                wide
+            };
+            (extend(self, _left), extend(self, divisor), RegWidth::W32)
+        } else {
+            (_left, divisor, width)
+        };
+
         let acc = Reg::Phys(0); // rax
         let high = Reg::Phys(2); // rdx
         self.emit(Inst::Move {
-            kind: MoveKind::Move(width),
-            src: MOperand::Reg(_left),
+            kind: MoveKind::Move(op_width),
+            src: MOperand::Reg(left),
             dst: MOperand::Reg(acc),
         });
         if signed {
-            self.emit(Inst::SignExtendAcc { width });
+            self.emit(Inst::SignExtendAcc { width: op_width });
         } else {
             // The high half must be cleared at full width; a 32-bit write would
             // leave the upper 32 bits of `rdx` holding whatever was there.
@@ -420,7 +447,7 @@ impl<'a, 't> Isel<'a, 't> {
         }
         self.emit(Inst::Alu {
             op: if signed { AluOp::Idiv } else { AluOp::Div },
-            width,
+            width: op_width,
             src: MOperand::Reg(divisor),
             dst: MOperand::Reg(acc),
         });

@@ -1,0 +1,22 @@
+// Graceful shutdown stubs on Windows: `serve` keeps its existing blocking
+// accept-loop behaviour on Windows.
+
+fn umay_ops_block_shutdown_signals() -> *mut u8 {
+    return unsafe { 0 as *mut u8 }
+}
+
+fn umay_ops_restore_signals(_state: *mut u8) {
+    return
+}
+
+fn umay_ops_shutdown_pending(_state: *mut u8) -> bool {
+    return false
+}
+
+fn umay_ops_wait_accept(_fd: isize, _timeout_ms: i32) -> i32 {
+    return 1
+}
+
+fn umay_ops_finish_shutdown(_state: *mut u8) {
+    return
+}

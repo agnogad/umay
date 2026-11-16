@@ -1,0 +1,176 @@
+// SQLite, through its C API.
+//
+// A program that calls any of this is linked with `-lsqlite3` automatically;
+// one that does not never needs the library.
+//
+// Open the database inside the handler (or after `spawn`), not before `serve`:
+// a connection must not cross a `fork`. `db_open` sets a 5 second busy
+// timeout, so children writing at the same time wait for each other instead of
+// failing; `PRAGMA journal_mode=WAL` lets readers run beside a writer.
+//
+//     let db = db_open("app.db").unwrap_or(...)
+//     let q = db.prepare("SELECT id, name FROM users WHERE email = ?1")
+//     q.bind_text(1, &email)
+//     while q.row() { let id = q.int(0)  let name = q.text(1) }
+//     q.finish()
+
+extern fn "sqlite3_open_v2" umay_sqlite_open(path: *const u8, out: *mut u8, flags: i32, vfs: *const u8) -> i32
+extern fn "sqlite3_close_v2" umay_sqlite_close(db: *mut u8) -> i32
+extern fn "sqlite3_busy_timeout" umay_sqlite_busy_timeout(db: *mut u8, ms: i32) -> i32
+extern fn "sqlite3_errmsg" umay_sqlite_errmsg(db: *mut u8) -> *const u8
+extern fn "sqlite3_exec" umay_sqlite_exec(db: *mut u8, sql: *const u8, callback: *const u8, arg: *mut u8, err: *mut u8) -> i32
+extern fn "sqlite3_prepare_v2" umay_sqlite_prepare(db: *mut u8, sql: *const u8, bytes: i32, out: *mut u8, tail: *mut u8) -> i32
+extern fn "sqlite3_bind_text" umay_sqlite_bind_text(stmt: *mut u8, index: i32, text: *const u8, bytes: i32, destructor: isize) -> i32
+extern fn "sqlite3_bind_int64" umay_sqlite_bind_int64(stmt: *mut u8, index: i32, value: i64) -> i32
+extern fn "sqlite3_bind_null" umay_sqlite_bind_null(stmt: *mut u8, index: i32) -> i32
+extern fn "sqlite3_step" umay_sqlite_step(stmt: *mut u8) -> i32
+extern fn "sqlite3_reset" umay_sqlite_reset(stmt: *mut u8) -> i32
+extern fn "sqlite3_clear_bindings" umay_sqlite_clear_bindings(stmt: *mut u8) -> i32
+extern fn "sqlite3_finalize" umay_sqlite_finalize(stmt: *mut u8) -> i32
+extern fn "sqlite3_column_count" umay_sqlite_column_count(stmt: *mut u8) -> i32
+extern fn "sqlite3_column_type" umay_sqlite_column_type(stmt: *mut u8, column: i32) -> i32
+extern fn "sqlite3_column_int64" umay_sqlite_column_int64(stmt: *mut u8, column: i32) -> i64
+extern fn "sqlite3_column_text" umay_sqlite_column_text(stmt: *mut u8, column: i32) -> *const u8
+extern fn "sqlite3_column_bytes" umay_sqlite_column_bytes(stmt: *mut u8, column: i32) -> i32
+extern fn "sqlite3_last_insert_rowid" umay_sqlite_last_insert_rowid(db: *mut u8) -> i64
+extern fn "sqlite3_changes" umay_sqlite_changes(db: *mut u8) -> i32
+
+// An open database connection.
+struct Db {
+    handle: *mut u8,
+}
+
+// A prepared statement. Parameters and columns are numbered as SQLite numbers
+// them: parameters from 1 (`?1`), columns from 0.
+struct Stmt {
+    handle: *mut u8,
+}
+
+// Opens (creating if needed) the database file at `path`, or `None`.
+fn db_open(path: &str) -> Option<Db> {
+    let slot = alloc(8)
+    // SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+    let rc = umay_sqlite_open(path as *const u8, slot, 6, unsafe { 0 as *const u8 })
+    let handle = unsafe { read_i64(slot as *const u8) as usize as *mut u8 }
+    dealloc(slot)
+    if rc != 0 {
+        // SQLite hands back a handle even on failure, to carry the message.
+        umay_sqlite_close(handle)
+        return Option::None
+    }
+    umay_sqlite_busy_timeout(handle, 5000)
+    return Option::Some(Db { handle: handle })
+}
+
+impl Db {
+    // Runs one or more `;`-separated statements that take no parameters, such
+    // as a schema. Returns false on the first failure; `error` says why.
+    fn exec(&self, sql: &str) -> bool {
+        let none = unsafe { 0 as *mut u8 }
+        return umay_sqlite_exec(self.handle, sql as *const u8, none as *const u8, none, none) == 0
+    }
+
+    // Compiles one statement, or `None` when it does not compile.
+    fn prepare(&self, sql: &str) -> Option<Stmt> {
+        let slot = alloc(8)
+        let rc = umay_sqlite_prepare(self.handle, sql as *const u8, -1, slot, unsafe { 0 as *mut u8 })
+        let handle = unsafe { read_i64(slot as *const u8) as usize as *mut u8 }
+        dealloc(slot)
+        if rc != 0 {
+            return Option::None
+        }
+        return Option::Some(Stmt { handle: handle })
+    }
+
+    // The message for the most recent failure on this connection.
+    fn error(&self) -> Bytes {
+        return Bytes::from_str(unsafe { umay_sqlite_errmsg(self.handle) as &str })
+    }
+
+    // The rowid of the last successful INSERT.
+    fn last_insert_id(&self) -> i64 {
+        return umay_sqlite_last_insert_rowid(self.handle)
+    }
+
+    // How many rows the last INSERT, UPDATE or DELETE changed.
+    fn changes(&self) -> i64 {
+        return umay_sqlite_changes(self.handle) as i64
+    }
+
+    // Closes the connection. Unfinished statements keep it alive until they
+    // are finished.
+    fn close(self) {
+        let _ = umay_sqlite_close(self.handle)
+    }
+}
+
+impl Stmt {
+    // Binds parameter `index` to a copy of `value`.
+    fn bind_text(&self, index: i32, value: &Bytes) -> bool {
+        // -1 is SQLITE_TRANSIENT: SQLite copies the bytes before returning.
+        return umay_sqlite_bind_text(self.handle, index, value.data, value.len as i32, -1isize) == 0
+    }
+
+    fn bind_int(&self, index: i32, value: i64) -> bool {
+        return umay_sqlite_bind_int64(self.handle, index, value) == 0
+    }
+
+    fn bind_null(&self, index: i32) -> bool {
+        return umay_sqlite_bind_null(self.handle, index) == 0
+    }
+
+    // Advances to the next row: true while there is one. False when the rows
+    // ran out or the step failed; `Db::error` tells the two apart.
+    fn row(&self) -> bool {
+        return umay_sqlite_step(self.handle) == 100
+    }
+
+    // Runs a statement that returns no rows (INSERT, UPDATE, DELETE, CREATE).
+    // True when it completed; a constraint violation is false.
+    fn run(&self) -> bool {
+        return umay_sqlite_step(self.handle) == 101
+    }
+
+    // Column `column` of the current row as an integer; NULL is 0.
+    fn int(&self, column: i32) -> i64 {
+        return umay_sqlite_column_int64(self.handle, column)
+    }
+
+    // Column `column` of the current row as text, copied so it outlives the
+    // row. NULL is empty. The copy is not freed: a handler runs in a
+    // per-connection child and it goes when the child exits.
+    fn text(&self, column: i32) -> Bytes {
+        let source = umay_sqlite_column_text(self.handle, column)
+        let count = umay_sqlite_column_bytes(self.handle, column) as usize
+        let copy = alloc(count + 1)
+        if count > 0 {
+            copy_bytes(source, copy, count)
+        }
+        unsafe {
+            write_byte((copy as usize + count) as *mut u8, 0u8)
+        }
+        return Bytes::view(copy as *const u8, count)
+    }
+
+    // True when column `column` of the current row is NULL.
+    fn is_null(&self, column: i32) -> bool {
+        // SQLITE_NULL
+        return umay_sqlite_column_type(self.handle, column) == 5
+    }
+
+    // The number of columns each row has.
+    fn columns(&self) -> i32 {
+        return umay_sqlite_column_count(self.handle)
+    }
+
+    // Rewinds the statement and clears its parameters, to run it again.
+    fn reset(&self) {
+        umay_sqlite_reset(self.handle)
+        let _ = umay_sqlite_clear_bindings(self.handle)
+    }
+
+    // Frees the statement.
+    fn finish(self) {
+        let _ = umay_sqlite_finalize(self.handle)
+    }
+}

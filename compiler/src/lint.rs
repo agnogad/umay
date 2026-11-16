@@ -439,6 +439,9 @@ fn collect_idents_expr(e: &ast::Expr, used: &mut std::collections::HashSet<Strin
             for s in &then_block.stmts {
                 collect_idents_stmt(s, used);
             }
+            if let Some(tail) = &then_block.tail {
+                collect_idents_expr(tail, used);
+            }
             if let Some(e) = else_branch {
                 collect_idents_expr(e, used);
             }

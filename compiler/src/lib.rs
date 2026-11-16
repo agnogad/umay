@@ -371,11 +371,36 @@ pub const RUNTIME_PLATFORM_MACOS: &str = include_str!("../../runtime/platform/ma
 
 /// The Windows layer of the runtime: the MSVC CRT, and threads where `fork`
 /// would be.
-/// The standard library's POSIX bindings, shared by Linux and macOS.
-pub const STDLIB_PLATFORM_POSIX: &str = concat!(
-    include_str!("../../stdlib/platform/net_posix.um"),
-    "\n",
-    include_str!("../../stdlib/platform/thread_posix.um"),
+/// The standard library's POSIX bindings, shared by Linux and macOS, then the
+/// one constant that differs between them.
+macro_rules! stdlib_platform_posix {
+    ($clock:literal, $ops:literal) => {
+        concat!(
+            include_str!("../../stdlib/platform/net_posix.um"),
+            "\n",
+            include_str!("../../stdlib/platform/thread_posix.um"),
+            "\n",
+            include_str!("../../stdlib/platform/time_posix.um"),
+            "\n",
+            include_str!("../../stdlib/platform/ops_posix.um"),
+            "\n",
+            include_str!($clock),
+            "\n",
+            include_str!($ops),
+        )
+    };
+}
+
+/// The standard library's Linux bindings.
+pub const STDLIB_PLATFORM_LINUX: &str = stdlib_platform_posix!(
+    "../../stdlib/platform/clock_linux.um",
+    "../../stdlib/platform/ops_linux.um"
+);
+
+/// The standard library's macOS bindings.
+pub const STDLIB_PLATFORM_MACOS: &str = stdlib_platform_posix!(
+    "../../stdlib/platform/clock_macos.um",
+    "../../stdlib/platform/ops_macos.um"
 );
 
 /// The standard library's Windows bindings.
@@ -383,6 +408,10 @@ pub const STDLIB_PLATFORM_WINDOWS: &str = concat!(
     include_str!("../../stdlib/platform/net_windows.um"),
     "\n",
     include_str!("../../stdlib/platform/thread_windows.um"),
+    "\n",
+    include_str!("../../stdlib/platform/time_windows.um"),
+    "\n",
+    include_str!("../../stdlib/platform/ops_windows.um"),
 );
 
 pub const RUNTIME_PLATFORM_WINDOWS: &str = include_str!("../../runtime/platform/windows.um");

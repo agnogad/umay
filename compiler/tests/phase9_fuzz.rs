@@ -183,7 +183,7 @@ fn random_token_soup_never_panics() {
 
 #[test]
 fn an_empty_file_parses_to_nothing_without_crashing() {
-    let result = must_not_panic("empty", "");
+    let result = must_not_panic("empty_file", "");
     // `check` has nothing to complain about: an empty file is a valid program
     // text. Whether it can be *built* is a different question, answered by the
     // linker unless the build asks first.

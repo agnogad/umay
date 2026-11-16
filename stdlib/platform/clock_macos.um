@@ -1,0 +1,2 @@
+// macOS's `CLOCK_MONOTONIC` (Linux's is 1).
+const UMAY_CLOCK_MONOTONIC: i32 = 6

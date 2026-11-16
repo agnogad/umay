@@ -401,40 +401,58 @@ fn json_bool(value: Json) -> bool {
 // is the number of bytes written, or `-1` when `out` was too small, which a caller
 // checks once instead of at every byte.
 fn json_quote(out: *mut u8, capacity: usize, text: Bytes) -> i64 {
-    // A quote or a backslash in the text needs one more byte of room.
+    // A quote, a backslash or a common control character needs one more byte;
+    // any other control character is written as a six-byte `\u00XX`.
     let mut needed = text.len + 2
     let mut i: usize = 0
     while i < text.len {
         let ch = text.get(i)
-        if ch == 34u8 || ch == 92u8 {
+        if ch == 34u8 || ch == 92u8 || ch == 10u8 || ch == 13u8 || ch == 9u8 {
             needed = needed + 1
+        } else if ch < 32u8 {
+            needed = needed + 5
         }
         i = i + 1
     }
     if capacity < needed {
         return -1i64
     }
-    unsafe {
-        write_byte(out, 34u8)
-    }
-    let mut written: usize = 1
+    let hex = Bytes::from_str("0123456789abcdef")
+    let mut w: usize = put_byte_at(out, 0, 34u8)
     i = 0
     while i < text.len {
         let ch = text.get(i)
-        unsafe {
-            if ch == 34u8 || ch == 92u8 {
-                write_byte((out as usize + written) as *mut u8, 92u8)
-                written = written + 1
-            }
-            write_byte((out as usize + written) as *mut u8, ch)
+        if ch == 34u8 || ch == 92u8 {
+            w = put_byte_at(out, w, 92u8)
+            w = put_byte_at(out, w, ch)
+        } else if ch == 10u8 {
+            w = put_byte_at(out, w, 92u8)
+            w = put_byte_at(out, w, 'n' as u8)
+        } else if ch == 13u8 {
+            w = put_byte_at(out, w, 92u8)
+            w = put_byte_at(out, w, 'r' as u8)
+        } else if ch == 9u8 {
+            w = put_byte_at(out, w, 92u8)
+            w = put_byte_at(out, w, 't' as u8)
+        } else if ch < 32u8 {
+            w = put_text(out, w, Bytes::from_str("\\u00"))
+            w = put_byte_at(out, w, hex.get((ch / 16u8) as usize))
+            w = put_byte_at(out, w, hex.get((ch % 16u8) as usize))
+        } else {
+            w = put_byte_at(out, w, ch)
         }
-        written = written + 1
         i = i + 1
     }
+    w = put_byte_at(out, w, 34u8)
+    return w as i64
+}
+
+// Writes `byte` to `buf` at `at`, returning the next index.
+fn put_byte_at(buf: *mut u8, at: usize, byte: u8) -> usize {
     unsafe {
-        write_byte((out as usize + written) as *mut u8, 34u8)
+        write_byte((buf as usize + at) as *mut u8, byte)
     }
-    return (written + 1) as i64
+    return at + 1
 }
 
 // A number as JSON text, in a buffer the caller supplies.
@@ -476,4 +494,120 @@ fn json_write_i64(out: *mut u8, capacity: usize, value: i64) -> i64 {
         i = i + 1
     }
     return total as i64
+}
+
+// A JSON document written front to back:
+//
+//     let j = JsonOut::new().begin_object().key("id").int(7i64).key("tags")
+//         .begin_array().string(a).string(b).end_array().end_object()
+//     res = Response::new(200).with_type("application/json").with_body(j.bytes())
+//
+// Commas go in by themselves: a value or key that follows anything other than
+// an opening bracket or a `:` gets one. The caller still pairs `begin_*` with
+// `end_*` and puts a `key` before each object member.
+struct JsonOut {
+    text: String,
+}
+
+impl JsonOut {
+    // An empty document.
+    fn new() -> JsonOut {
+        return JsonOut { text: String::new() }
+    }
+
+    // The text written so far. It borrows this writer's buffer.
+    fn bytes(&self) -> Bytes {
+        return Bytes::view(self.text.ptr as *const u8, self.text.len)
+    }
+
+    fn begin_object(self) -> JsonOut {
+        return self.separate().push(123u8)
+    }
+
+    fn end_object(self) -> JsonOut {
+        return self.push(125u8)
+    }
+
+    fn begin_array(self) -> JsonOut {
+        return self.separate().push(91u8)
+    }
+
+    fn end_array(self) -> JsonOut {
+        return self.push(93u8)
+    }
+
+    // An object member's name and its `:`; the value comes next.
+    fn key(self, name: &str) -> JsonOut {
+        return self.separate().quoted(Bytes::from_str(name)).push(58u8)
+    }
+
+    // A string value, escaped.
+    fn string(self, value: Bytes) -> JsonOut {
+        return self.separate().quoted(value)
+    }
+
+    fn int(self, value: i64) -> JsonOut {
+        let mut out = self.separate()
+        out.text = out.text.reserve(24)
+        let n = json_write_i64(out.text.ptr.offset(out.text.len as isize), 24, value)
+        out.text.len = out.text.len + n as usize
+        return out
+    }
+
+    fn boolean(self, value: bool) -> JsonOut {
+        let word = if value { "true" } else { "false" }
+        return self.separate().raw(Bytes::from_str(word))
+    }
+
+    fn null(self) -> JsonOut {
+        return self.separate().raw(Bytes::from_str("null"))
+    }
+
+    // Already-encoded JSON, written as it is: a nested document from another
+    // `JsonOut`, or a value read with `json_field`.
+    fn json(self, encoded: Bytes) -> JsonOut {
+        return self.separate().raw(encoded)
+    }
+
+    // Frees the buffer. A handler running in a per-connection child can skip
+    // this: the buffer goes when the child exits.
+    fn free(self) {
+        if self.text.capacity > 0 {
+            dealloc(self.text.ptr)
+        }
+    }
+
+    fn quoted(self, value: Bytes) -> JsonOut {
+        let mut out = self
+        let room = value.len * 6 + 2
+        out.text = out.text.reserve(room)
+        let n = json_quote(out.text.ptr.offset(out.text.len as isize), room, value)
+        out.text.len = out.text.len + n as usize
+        return out
+    }
+
+    fn raw(self, b: Bytes) -> JsonOut {
+        let mut out = self
+        out.text = out.text.reserve(b.len)
+        out.text = out.text.append_bytes(b.data, 0, b.len)
+        return out
+    }
+
+    fn push(self, byte: u8) -> JsonOut {
+        let mut out = self
+        out.text = out.text.push(byte)
+        return out
+    }
+
+    // A comma, unless this is the first thing in its container or a member value.
+    fn separate(self) -> JsonOut {
+        if self.text.len == 0 {
+            return self
+        }
+        let last = self.bytes().get(self.text.len - 1)
+        if last == 123u8 || last == 91u8 || last == 58u8 {
+            return self
+        }
+        return self.push(44u8)
+    }
 }

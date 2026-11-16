@@ -519,6 +519,11 @@ impl<'a, 't> Isel<'a, 't> {
             }
             Operand::Constant(c) => {
                 let (value, _) = constant_value(c)?;
+                // x86-64 instructions other than `movabsq` take a sign-extended
+                // 32-bit immediate; `subq $11644473600, %rcx` does not assemble.
+                if i32::try_from(value).is_err() {
+                    return Ok(MOperand::Reg(self.operand_to_reg(op)?));
+                }
                 Ok(MOperand::Imm(value))
             }
             Operand::Copy(place) | Operand::Move(place) => {

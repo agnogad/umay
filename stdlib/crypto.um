@@ -1,0 +1,428 @@
+// Hashing and encodings for the web layer: SHA-256 (FIPS 180-4), HMAC-SHA-256
+// (RFC 2104) for signed cookies, PBKDF2-HMAC-SHA-256 (RFC 8018) for stored
+// passwords, a timing-safe comparison, hex, and unpadded base64url (RFC 4648).
+//
+// Every function writes into a buffer the caller owns; nothing here keeps a
+// pointer it was given. `u32` arithmetic wraps, which is what SHA-256 is
+// written in terms of.
+
+// The SHA-256 initial hash value.
+fn sha256_init(h: &mut [u32; 8]) {
+    h[0] = 0x6a09e667u32
+    h[1] = 0xbb67ae85u32
+    h[2] = 0x3c6ef372u32
+    h[3] = 0xa54ff53au32
+    h[4] = 0x510e527fu32
+    h[5] = 0x9b05688cu32
+    h[6] = 0x1f83d9abu32
+    h[7] = 0x5be0cd19u32
+}
+
+// The 64 SHA-256 round constants.
+fn sha256_constants(k: &mut [u32; 64]) {
+    k[0] = 0x428a2f98u32
+    k[1] = 0x71374491u32
+    k[2] = 0xb5c0fbcfu32
+    k[3] = 0xe9b5dba5u32
+    k[4] = 0x3956c25bu32
+    k[5] = 0x59f111f1u32
+    k[6] = 0x923f82a4u32
+    k[7] = 0xab1c5ed5u32
+    k[8] = 0xd807aa98u32
+    k[9] = 0x12835b01u32
+    k[10] = 0x243185beu32
+    k[11] = 0x550c7dc3u32
+    k[12] = 0x72be5d74u32
+    k[13] = 0x80deb1feu32
+    k[14] = 0x9bdc06a7u32
+    k[15] = 0xc19bf174u32
+    k[16] = 0xe49b69c1u32
+    k[17] = 0xefbe4786u32
+    k[18] = 0x0fc19dc6u32
+    k[19] = 0x240ca1ccu32
+    k[20] = 0x2de92c6fu32
+    k[21] = 0x4a7484aau32
+    k[22] = 0x5cb0a9dcu32
+    k[23] = 0x76f988dau32
+    k[24] = 0x983e5152u32
+    k[25] = 0xa831c66du32
+    k[26] = 0xb00327c8u32
+    k[27] = 0xbf597fc7u32
+    k[28] = 0xc6e00bf3u32
+    k[29] = 0xd5a79147u32
+    k[30] = 0x06ca6351u32
+    k[31] = 0x14292967u32
+    k[32] = 0x27b70a85u32
+    k[33] = 0x2e1b2138u32
+    k[34] = 0x4d2c6dfcu32
+    k[35] = 0x53380d13u32
+    k[36] = 0x650a7354u32
+    k[37] = 0x766a0abbu32
+    k[38] = 0x81c2c92eu32
+    k[39] = 0x92722c85u32
+    k[40] = 0xa2bfe8a1u32
+    k[41] = 0xa81a664bu32
+    k[42] = 0xc24b8b70u32
+    k[43] = 0xc76c51a3u32
+    k[44] = 0xd192e819u32
+    k[45] = 0xd6990624u32
+    k[46] = 0xf40e3585u32
+    k[47] = 0x106aa070u32
+    k[48] = 0x19a4c116u32
+    k[49] = 0x1e376c08u32
+    k[50] = 0x2748774cu32
+    k[51] = 0x34b0bcb5u32
+    k[52] = 0x391c0cb3u32
+    k[53] = 0x4ed8aa4au32
+    k[54] = 0x5b9cca4fu32
+    k[55] = 0x682e6ff3u32
+    k[56] = 0x748f82eeu32
+    k[57] = 0x78a5636fu32
+    k[58] = 0x84c87814u32
+    k[59] = 0x8cc70208u32
+    k[60] = 0x90befffau32
+    k[61] = 0xa4506cebu32
+    k[62] = 0xbef9a3f7u32
+    k[63] = 0xc67178f2u32
+}
+
+// Folds the 64-byte block at `block` into the hash state `h`.
+fn sha256_compress(h: &mut [u32; 8], k: &[u32; 64], block: *const u8) {
+    let mut w = [0u32; 64]
+    let mut i: usize = 0
+    while i < 16 {
+        let p = block.offset((i * 4) as isize)
+        let hi = (read_byte(p) as u32) << 24u32 | (read_byte(p.offset(1)) as u32) << 16u32
+        w[i] = hi | (read_byte(p.offset(2)) as u32) << 8u32 | read_byte(p.offset(3)) as u32
+        i = i + 1
+    }
+    while i < 64 {
+        let x = w[i - 15]
+        let y = w[i - 2]
+        let s0 = (x >> 7u32 | x << 25u32) ^ (x >> 18u32 | x << 14u32) ^ x >> 3u32
+        let s1 = (y >> 17u32 | y << 15u32) ^ (y >> 19u32 | y << 13u32) ^ y >> 10u32
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1
+        i = i + 1
+    }
+    let mut a = h[0]
+    let mut b = h[1]
+    let mut c = h[2]
+    let mut d = h[3]
+    let mut e = h[4]
+    let mut f = h[5]
+    let mut g = h[6]
+    let mut hh = h[7]
+    i = 0
+    while i < 64 {
+        let big1 = (e >> 6u32 | e << 26u32) ^ (e >> 11u32 | e << 21u32) ^ (e >> 25u32 | e << 7u32)
+        let ch = e & f ^ !e & g
+        let t1 = hh + big1 + ch + k[i] + w[i]
+        let big0 = (a >> 2u32 | a << 30u32) ^ (a >> 13u32 | a << 19u32) ^ (a >> 22u32 | a << 10u32)
+        let maj = a & b ^ a & c ^ b & c
+        hh = g
+        g = f
+        f = e
+        e = d + t1
+        d = c
+        c = b
+        b = a
+        a = t1 + big0 + maj
+        i = i + 1
+    }
+    h[0] = h[0] + a
+    h[1] = h[1] + b
+    h[2] = h[2] + c
+    h[3] = h[3] + d
+    h[4] = h[4] + e
+    h[5] = h[5] + f
+    h[6] = h[6] + g
+    h[7] = h[7] + hh
+}
+
+// Hashes `data` on top of state `h`, which has already absorbed `done` bytes
+// (a multiple of 64), pads, and writes the 32-byte digest to `out`.
+fn sha256_finish(h: &mut [u32; 8], done: usize, data: &Bytes, out: *mut u8) {
+    let mut k = [0u32; 64]
+    sha256_constants(&mut k)
+    let mut at: usize = 0
+    while at + 64 <= data.len {
+        sha256_compress(h, &k, data.data.offset(at as isize))
+        at = at + 64
+    }
+    // The tail, the 0x80 marker, zeros, and the bit length: one block, or two
+    // when fewer than 9 bytes remain after the tail.
+    let tail = alloc(128)
+    let rest = data.len - at
+    let mut i: usize = 0
+    while i < 128 {
+        write_byte(tail.offset(i as isize), 0u8)
+        i = i + 1
+    }
+    copy_bytes(data.data.offset(at as isize), tail, rest)
+    write_byte(tail.offset(rest as isize), 0x80u8)
+    let blocks: usize = if rest < 56 { 1 } else { 2 }
+    let bits = ((done + data.len) as u64) << 3u64
+    i = 0
+    while i < 8 {
+        let shift = (56 - i * 8) as u64
+        let byte = (bits >> shift & 0xffu64) as u8
+        write_byte(tail.offset((blocks * 64 - 8 + i) as isize), byte)
+        i = i + 1
+    }
+    sha256_compress(h, &k, tail as *const u8)
+    if blocks == 2 {
+        sha256_compress(h, &k, tail.offset(64) as *const u8)
+    }
+    dealloc(tail)
+    i = 0
+    while i < 8 {
+        let v = h[i]
+        let p = out.offset((i * 4) as isize)
+        write_byte(p, (v >> 24u32) as u8)
+        write_byte(p.offset(1), (v >> 16u32 & 0xffu32) as u8)
+        write_byte(p.offset(2), (v >> 8u32 & 0xffu32) as u8)
+        write_byte(p.offset(3), (v & 0xffu32) as u8)
+        i = i + 1
+    }
+}
+
+// Writes the 32-byte SHA-256 digest of `data` to `out`.
+fn sha256(data: &Bytes, out: *mut u8) {
+    let mut h = [0u32; 8]
+    sha256_init(&mut h)
+    sha256_finish(&mut h, 0, data, out)
+}
+
+// The HMAC inner and outer states for `key`: SHA-256 after absorbing the key
+// block XORed with 0x36 and with 0x5c. Computing them once lets PBKDF2 spend two
+// compressions per iteration instead of four.
+fn hmac_sha256_states(key: &Bytes, inner: &mut [u32; 8], outer: &mut [u32; 8]) {
+    let block = alloc(64)
+    let mut i: usize = 0
+    while i < 64 {
+        write_byte(block.offset(i as isize), 0u8)
+        i = i + 1
+    }
+    if key.len > 64 {
+        sha256(key, block)
+    } else {
+        copy_bytes(key.data, block, key.len)
+    }
+    let mut k = [0u32; 64]
+    sha256_constants(&mut k)
+    i = 0
+    while i < 64 {
+        let p = block.offset(i as isize)
+        write_byte(p, read_byte(p) ^ 0x36u8)
+        i = i + 1
+    }
+    sha256_init(inner)
+    sha256_compress(inner, &k, block as *const u8)
+    i = 0
+    while i < 64 {
+        let p = block.offset(i as isize)
+        write_byte(p, read_byte(p) ^ 0x6au8)
+        i = i + 1
+    }
+    sha256_init(outer)
+    sha256_compress(outer, &k, block as *const u8)
+    dealloc(block)
+}
+
+// HMAC-SHA-256 of `msg` from prepared states, 32 bytes to `out`. `out` may be
+// the same buffer as `msg`.
+fn hmac_sha256_with(inner: &[u32; 8], outer: &[u32; 8], msg: &Bytes, out: *mut u8) {
+    let mut h = [0u32; 8]
+    let mut i: usize = 0
+    while i < 8 {
+        h[i] = inner[i]
+        i = i + 1
+    }
+    sha256_finish(&mut h, 64, msg, out)
+    i = 0
+    while i < 8 {
+        h[i] = outer[i]
+        i = i + 1
+    }
+    let digest = Bytes::view(out as *const u8, 32)
+    sha256_finish(&mut h, 64, &digest, out)
+}
+
+// Writes the 32-byte HMAC-SHA-256 of `msg` under `key` to `out`. A key longer
+// than 64 bytes is hashed first, as RFC 2104 says.
+fn hmac_sha256(key: &Bytes, msg: &Bytes, out: *mut u8) {
+    let mut inner = [0u32; 8]
+    let mut outer = [0u32; 8]
+    hmac_sha256_states(key, &mut inner, &mut outer)
+    hmac_sha256_with(&inner, &outer, msg, out)
+}
+
+// PBKDF2-HMAC-SHA-256: derives `out_len` bytes from `password` and `salt` with
+// `iterations` rounds into `out`.
+fn pbkdf2_sha256(password: &Bytes, salt: &Bytes, iterations: u32, out: *mut u8, out_len: usize) {
+    let mut inner = [0u32; 8]
+    let mut outer = [0u32; 8]
+    hmac_sha256_states(password, &mut inner, &mut outer)
+    // `salt || INT(block)`, then U_j and the running XOR T.
+    let first = alloc(salt.len + 4)
+    copy_bytes(salt.data, first, salt.len)
+    let u = alloc(32)
+    let t = alloc(32)
+    let mut done: usize = 0
+    let mut index: u32 = 1
+    while done < out_len {
+        let p = first.offset(salt.len as isize)
+        write_byte(p, (index >> 24u32) as u8)
+        write_byte(p.offset(1), (index >> 16u32 & 0xffu32) as u8)
+        write_byte(p.offset(2), (index >> 8u32 & 0xffu32) as u8)
+        write_byte(p.offset(3), (index & 0xffu32) as u8)
+        let seed = Bytes::view(first as *const u8, salt.len + 4)
+        hmac_sha256_with(&inner, &outer, &seed, u)
+        copy_bytes(u as *const u8, t, 32)
+        let prev = Bytes::view(u as *const u8, 32)
+        let mut j: u32 = 1
+        while j < iterations {
+            hmac_sha256_with(&inner, &outer, &prev, u)
+            let mut i: usize = 0
+            while i < 32 {
+                let q = t.offset(i as isize)
+                write_byte(q, read_byte(q) ^ read_byte(u.offset(i as isize)))
+                i = i + 1
+            }
+            j = j + 1
+        }
+        let take = if out_len - done < 32 { out_len - done } else { 32 }
+        copy_bytes(t as *const u8, out.offset(done as isize), take)
+        done = done + take
+        index = index + 1
+    }
+    dealloc(first)
+    dealloc(u)
+    dealloc(t)
+}
+
+// True when `a` and `b` hold the same bytes. The time taken depends on the
+// length only, never on where the first difference is, so a MAC check through
+// it does not tell an attacker how many leading bytes were right.
+fn constant_time_equals(a: &Bytes, b: &Bytes) -> bool {
+    if a.len != b.len {
+        return false
+    }
+    let mut diff: u8 = 0
+    let mut i: usize = 0
+    while i < a.len {
+        diff = diff | read_byte(a.data.offset(i as isize)) ^ read_byte(b.data.offset(i as isize))
+        i = i + 1
+    }
+    return diff == 0u8
+}
+
+// Writes `src` as lowercase hex to `out` (2 bytes per input byte) and returns
+// the number of bytes written.
+fn hex_encode(src: &Bytes, out: *mut u8) -> usize {
+    let mut i: usize = 0
+    while i < src.len {
+        let c = read_byte(src.data.offset(i as isize))
+        write_byte(out.offset((i * 2) as isize), hex_digit(c >> 4u8))
+        write_byte(out.offset((i * 2 + 1) as isize), hex_digit(c & 15u8))
+        i = i + 1
+    }
+    return src.len * 2
+}
+
+// The lowercase hex digit for `v` (0..15).
+fn hex_digit(v: u8) -> u8 {
+    if v < 10u8 {
+        return v + 48u8
+    }
+    return v + 87u8
+}
+
+// The base64url character for `v` (0..63).
+fn base64url_char(v: u32) -> u8 {
+    if v < 26u32 { return (v + 65u32) as u8 }
+    if v < 52u32 { return (v + 71u32) as u8 }
+    if v < 62u32 { return (v - 4u32) as u8 }
+    if v == 62u32 { return 45u8 }
+    return 95u8
+}
+
+// The 6-bit value of base64url character `c`, or `-1`.
+fn base64url_value(c: u8) -> i32 {
+    if c >= 65u8 && c <= 90u8 { return (c - 65u8) as i32 }
+    if c >= 97u8 && c <= 122u8 { return (c - 71u8) as i32 }
+    if c >= 48u8 && c <= 57u8 { return (c + 4u8) as i32 }
+    if c == 45u8 { return 62 }
+    if c == 95u8 { return 63 }
+    return -1
+}
+
+// Writes `src` as base64url without padding to `out` and returns the length:
+// `(4 * src.len + 2) / 3` bytes.
+fn base64url_encode(src: &Bytes, out: *mut u8) -> usize {
+    let mut i: usize = 0
+    let mut n: usize = 0
+    while i < src.len {
+        let left = src.len - i
+        let mut v = (read_byte(src.data.offset(i as isize)) as u32) << 16u32
+        if left > 1 {
+            v = v | (read_byte(src.data.offset((i + 1) as isize)) as u32) << 8u32
+        }
+        if left > 2 {
+            v = v | read_byte(src.data.offset((i + 2) as isize)) as u32
+        }
+        let chars: usize = if left > 2 { 4 } else { left + 1 }
+        let mut j: usize = 0
+        while j < chars {
+            let shift = (18 - j * 6) as u32
+            write_byte(out.offset(n as isize), base64url_char(v >> shift & 63u32))
+            n = n + 1
+            j = j + 1
+        }
+        i = i + 3
+    }
+    return n
+}
+
+// Decodes unpadded base64url `src` into `out` and returns the byte count, or
+// `-1` when `src` is not canonical base64url: a character outside the
+// alphabet, `=` padding, a length of 1 mod 4, or nonzero unused trailing bits.
+// `out` needs `src.len * 3 / 4` bytes.
+fn base64url_decode(src: &Bytes, out: *mut u8) -> i64 {
+    if src.len % 4 == 1 {
+        return -1i64
+    }
+    let mut i: usize = 0
+    let mut n: usize = 0
+    while i < src.len {
+        let chars: usize = if src.len - i < 4 { src.len - i } else { 4 }
+        let mut v: u32 = 0
+        let mut j: usize = 0
+        while j < 4 {
+            let mut d: i32 = 0
+            if j < chars {
+                d = base64url_value(read_byte(src.data.offset((i + j) as isize)))
+                if d < 0 {
+                    return -1i64
+                }
+            }
+            v = v << 6u32 | d as u32
+            j = j + 1
+        }
+        // 2 characters carry 1 byte and 3 carry 2; the leftover bits must be zero.
+        let bytes = chars - 1
+        let unused = (bytes * 8) as u32
+        if bytes < 3 && v & (0xffffffu32 >> unused) != 0u32 {
+            return -1i64
+        }
+        j = 0
+        while j < bytes {
+            let shift = (16 - j * 8) as u32
+            write_byte(out.offset(n as isize), (v >> shift & 0xffu32) as u8)
+            n = n + 1
+            j = j + 1
+        }
+        i = i + 4
+    }
+    return n as i64
+}

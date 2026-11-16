@@ -302,6 +302,22 @@ impl Target {
         }
     }
 
+    /// Libraries a program's assembly needs beyond the C library, decided by the
+    /// external symbols it calls. A program that calls no `sqlite3_*` function
+    /// links exactly as before, so a machine without SQLite builds everything
+    /// else; one that does gets `-lsqlite3` without a flag or manifest key.
+    pub fn system_libraries(assembly: &str) -> Vec<&'static str> {
+        // The C name, with and without Mach-O's leading underscore.
+        const BY_PREFIX: &[(&str, &str)] = &[("sqlite3_", "-lsqlite3")];
+        BY_PREFIX
+            .iter()
+            .filter(|(prefix, _)| {
+                assembly.contains(&format!("call {prefix}")) || assembly.contains(&format!("call _{prefix}"))
+            })
+            .map(|(_, lib)| *lib)
+            .collect()
+    }
+
     /// The command that links this target's two objects into an executable.
     ///
     /// `--emit-object-only` produces objects and no executable, which leaves the
@@ -478,7 +494,8 @@ impl Target {
     pub fn stdlib_platform_source(&self) -> &'static str {
         match self.os {
             "windows" => crate::STDLIB_PLATFORM_WINDOWS,
-            _ => crate::STDLIB_PLATFORM_POSIX,
+            "macos" => crate::STDLIB_PLATFORM_MACOS,
+            _ => crate::STDLIB_PLATFORM_LINUX,
         }
     }
 }
@@ -572,6 +589,13 @@ mod tests {
         assert_eq!(Target::LINUX.executable_name("main"), "main");
         assert_eq!(Target::MACOS.executable_name("main"), "main");
         assert_eq!(Target::WINDOWS.executable_name("main"), "main.exe");
+    }
+
+    #[test]
+    fn sqlite_is_linked_only_when_called() {
+        assert_eq!(Target::system_libraries("    call sqlite3_open_v2\n"), vec!["-lsqlite3"]);
+        assert_eq!(Target::system_libraries("    call _sqlite3_step\n"), vec!["-lsqlite3"]);
+        assert!(Target::system_libraries("    call umay_println\n").is_empty());
     }
 
     #[test]

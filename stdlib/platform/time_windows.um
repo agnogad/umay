@@ -1,0 +1,38 @@
+// Clocks and random bytes on Windows: bindings only.
+//
+// The wall clock is a `FILETIME`: 100-nanosecond ticks since 1601-01-01.
+// `GetTickCount64` is already milliseconds and never goes backwards.
+// `SystemFunction036` is `RtlGenRandom`, the CSPRNG in advapi32, which MinGW
+// links by default (`BCryptGenRandom` would need `-lbcrypt`).
+
+extern fn "GetSystemTimeAsFileTime" umay_win_system_time(ft: *mut u8) -> ()
+extern fn "GetTickCount64" umay_win_tick_count() -> u64
+extern fn "SystemFunction036" umay_win_gen_random(buf: *mut u8, count: u32) -> u8
+
+// 1601-01-01 to 1970-01-01, in 100-nanosecond ticks.
+const UMAY_FILETIME_EPOCH: i64 = 116444736000000000i64
+
+fn umay_time_realtime_s() -> i64 {
+    let ft = alloc(8)
+    umay_win_system_time(ft)
+    let ticks = read_i64(ft as *const u8)
+    dealloc(ft)
+    return (ticks - UMAY_FILETIME_EPOCH) / 10000000
+}
+
+fn umay_time_monotonic_ms() -> i64 {
+    return umay_win_tick_count() as i64
+}
+
+fn umay_time_random(out: *mut u8, count: usize) -> bool {
+    let mut done: usize = 0
+    while done < count {
+        let left = count - done
+        let step = if left < 65536usize { left } else { 65536usize }
+        if umay_win_gen_random(unsafe { (out as usize + done) as *mut u8 }, step as u32) == 0u8 {
+            return false
+        }
+        done = done + step
+    }
+    return true
+}

@@ -1,0 +1,132 @@
+// Serving files from a directory.
+//
+// A route ending in `*` hands its tail to `serve_dir`, which maps it under a
+// root directory. A tail that could reach outside the root (a `..` segment, a
+// leading `/`, a backslash or a NUL, checked after percent-decoding) is answered
+// with 403, so a refused path is told apart from a missing one (404).
+//
+// ponytail: whole file read into memory, no Cache-Control, ETag, Last-Modified
+// or Range; add them when large or hot files make re-sending everything costly.
+
+// Answers `req` from the directory `root`, e.g. from a handler for
+// `route("GET", "/static/*", h)`. A directory is answered with its `index.html`.
+fn serve_dir(req: &Request, res: &mut Response, root: &str) {
+    let answer = static_file_response(req, root)
+    // `unsafe` only keeps `umay fmt` from reading a leading `*` as a continued
+    // multiplication.
+    unsafe { *res = answer }
+}
+
+// The response `serve_dir` gives, for a caller that wants to adjust it first.
+fn static_file_response(req: &Request, root: &str) -> Response {
+    let tail = req.param("*")
+    let dir = Bytes::from_str(root)
+    // Room for root, `/`, the decoded tail (never longer), `/index.html`, NUL.
+    let path = alloc(dir.len + tail.len + 13)
+    let mut n = put_text(path, 0, dir)
+    n = put_text(path, n, Bytes::from_str("/"))
+    let rel_at = n
+    n = n + static_path_decode(tail, unsafe { (path as usize + n) as *mut u8 })
+    let rel = Bytes::view(unsafe { (path as usize + rel_at) as *const u8 }, n - rel_at)
+    if !static_path_is_safe(&rel) {
+        return Response::new(403)
+    }
+    unsafe { write_byte((path as usize + n) as *mut u8, 0u8) }
+    if is_dir(path as *const u8) {
+        n = put_text(path, n, Bytes::from_str("/index.html"))
+        unsafe { write_byte((path as usize + n) as *mut u8, 0u8) }
+    }
+    if is_dir(path as *const u8) || !file_exists(path as *const u8) {
+        return Response::new(404)
+    }
+    // The file is not freed: like `url_decoded`, it goes when the
+    // per-connection child exits.
+    let data = read_file_bytes(path as *const u8)
+    let full = Bytes::view(path as *const u8, n)
+    return Response::new(200).with_type(mime_type(&full)).with_body(Bytes::view(data.ptr as *const u8, data.len))
+}
+
+// The `Content-Type` for a file name, by its extension (any case). Text types
+// carry `; charset=utf-8`; an unknown extension is `application/octet-stream`.
+fn mime_type(name: &Bytes) -> &str {
+    let mut dot = name.len
+    let mut i: usize = 0
+    while i < name.len {
+        let c = name.get(i)
+        if c == '.' as u8 {
+            dot = i + 1
+        } else if c == '/' as u8 {
+            dot = name.len
+        }
+        i = i + 1
+    }
+    let ext = name.from(dot)
+    if static_ext_is(&ext, "html") || static_ext_is(&ext, "htm") { return "text/html; charset=utf-8" }
+    if static_ext_is(&ext, "css") { return "text/css; charset=utf-8" }
+    if static_ext_is(&ext, "js") || static_ext_is(&ext, "mjs") { return "text/javascript; charset=utf-8" }
+    if static_ext_is(&ext, "json") { return "application/json; charset=utf-8" }
+    if static_ext_is(&ext, "txt") { return "text/plain; charset=utf-8" }
+    if static_ext_is(&ext, "xml") { return "application/xml; charset=utf-8" }
+    if static_ext_is(&ext, "svg") { return "image/svg+xml; charset=utf-8" }
+    if static_ext_is(&ext, "png") { return "image/png" }
+    if static_ext_is(&ext, "jpg") || static_ext_is(&ext, "jpeg") { return "image/jpeg" }
+    if static_ext_is(&ext, "gif") { return "image/gif" }
+    if static_ext_is(&ext, "webp") { return "image/webp" }
+    if static_ext_is(&ext, "ico") { return "image/x-icon" }
+    if static_ext_is(&ext, "wasm") { return "application/wasm" }
+    if static_ext_is(&ext, "woff") { return "font/woff" }
+    if static_ext_is(&ext, "woff2") { return "font/woff2" }
+    if static_ext_is(&ext, "pdf") { return "application/pdf" }
+    return "application/octet-stream"
+}
+
+// Decodes `%XX` escapes from a URL path into `out`, returning the byte count.
+// Unlike `percent_decode`, a `+` stays a `+`: it means a space only in forms.
+fn static_path_decode(src: Bytes, out: *mut u8) -> usize {
+    let mut i: usize = 0
+    let mut n: usize = 0
+    while i < src.len {
+        let mut byte = src.get(i)
+        if byte == '%' as u8 && i + 2 < src.len {
+            let hi = hex_value(src.get(i + 1))
+            let lo = hex_value(src.get(i + 2))
+            if hi >= 0 && lo >= 0 {
+                byte = (hi * 16 + lo) as u8
+                i = i + 2
+            }
+        }
+        unsafe { write_byte((out as usize + n) as *mut u8, byte) }
+        n = n + 1
+        i = i + 1
+    }
+    return n
+}
+
+// True when a decoded relative path stays under its root: no leading `/`, no
+// `\`, no NUL and no `..` segment.
+fn static_path_is_safe(rel: &Bytes) -> bool {
+    if rel.len > 0 && rel.get(0) == '/' as u8 {
+        return false
+    }
+    let mut start: usize = 0
+    let mut i: usize = 0
+    while i <= rel.len {
+        let c = if i < rel.len { rel.get(i) } else { '/' as u8 }
+        if c == 0u8 || c == 92u8 {
+            return false
+        }
+        if c == '/' as u8 {
+            if i - start == 2 && rel.get(start) == '.' as u8 && rel.get(start + 1) == '.' as u8 {
+                return false
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// True when the extension `ext` is `want`, ignoring case.
+fn static_ext_is(ext: &Bytes, want: &str) -> bool {
+    return name_equals(ext.from(0), want)
+}

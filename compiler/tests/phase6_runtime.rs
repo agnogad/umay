@@ -1423,12 +1423,12 @@ fn two_strings_are_equal_when_their_bytes_are() {
 fn a_route_table_walks_by_pointer_arithmetic() {
     expect_stdout(
         "route_table_walk",
-        "struct Route { path: *const u8, body: *const u8 }\n\
-         fn lookup(table: *const Route, count: usize, want: *const u8) -> *const u8 {\n\
+        "struct Row { path: *const u8, body: *const u8 }\n\
+         fn lookup(table: *const Row, count: usize, want: *const u8) -> *const u8 {\n\
              let key = unsafe { want as &str }\n\
              let mut i: usize = 0\n\
              while i < count {\n\
-                 let r = unsafe { (table as usize + i * sizeof(Route)) as *const Route }\n\
+                 let r = unsafe { (table as usize + i * sizeof(Row)) as *const Row }\n\
                  if unsafe { (*r).path as &str } == key { return unsafe { (*r).body } }\n\
                  i = i + 1\n\
              }\n\
@@ -1436,10 +1436,10 @@ fn a_route_table_walks_by_pointer_arithmetic() {
          }\n\
          fn main() -> i32 {\n\
              let routes = [\n\
-                 Route { path: \"/\" as *const u8, body: \"home\" as *const u8 },\n\
-                 Route { path: \"/about\" as *const u8, body: \"about us\" as *const u8 },\n\
+                 Row { path: \"/\" as *const u8, body: \"home\" as *const u8 },\n\
+                 Row { path: \"/about\" as *const u8, body: \"about us\" as *const u8 },\n\
              ]\n\
-             let table = routes as *const Route\n\
+             let table = routes as *const Row\n\
              println(unsafe { lookup(table, 2, \"/about\" as *const u8) as &str })\n\
              return 0\n\
          }",
