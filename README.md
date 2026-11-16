@@ -148,10 +148,14 @@ reported as `E3001` rather than miscompiled; see
 | 3 | HIR and MIR | **complete** |
 | 4 | Ownership and borrow checking | **complete** |
 | 5 | Custom x86_64 backend | **complete** |
-| 6 | Runtime and standard library | **runtime, `String`, generics and `Vec<T>` done** |
-| 7 | AI developer experience | not started |
-| 8 | Build system and packages | not started |
-| 9 | Stabilization | not started |
+| 6 | Runtime and standard library | **complete** |
+| 7 | AI developer experience | **complete** |
+| 8 | Build system and packages | **complete** |
+| 9 | Stabilization | **complete** (Linux verified; see below) |
+
+macOS and Windows emit the right objects and are asserted against a real
+assembler, but a linked, running binary on those systems has not been verified
+on this host. See `ROADMAP.md` Phase 10 for the exact status.
 
 See [ROADMAP.md](ROADMAP.md) for the detailed milestone plan and
 [docs/](docs/) for the specifications this implementation is held to.

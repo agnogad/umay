@@ -588,3 +588,53 @@ fn a_module_may_use_its_own_private_item_by_its_qualified_name() {
     let (status, stdout, stderr) = project.run(&["check", "main.um"]);
     assert_eq!(status, 0, "a module's own private item is visible to it:\n{stdout}{stderr}");
 }
+
+#[test]
+fn a_private_function_is_not_reachable_by_bare_name() {
+    // A private module item used to be registered in the global bare-name
+    // table, so `util::helper()` could be called as just `helper()` from
+    // anywhere. That made the `pub` check trivial to bypass.
+    let project = Project::new("private_bare");
+    project.write("util.um", "fn helper() -> i64 {\n    return 7i64\n}\n");
+    project.write(
+        "main.um",
+        "fn main() -> i32 {\n    println_i64(helper())\n    return 0\n}\n\nmod util;\n",
+    );
+    let (status, stdout, stderr) = project.run(&["check", "--explain", "main.um"]);
+    let report = format!("{stdout}{stderr}");
+    assert_ne!(status, 0, "a private function must not resolve by bare name");
+    assert!(report.contains("E0101"), "expected an unknown-name error:\n{report}");
+    assert!(report.contains("private to module `util`"), "the cause should be named:\n{report}");
+}
+
+#[test]
+fn a_private_method_is_not_reachable_from_another_module() {
+    let project = Project::new("private_method");
+    project.write(
+        "geo.um",
+        "pub struct Point {\n    x: i64,\n}\n\nimpl Point {\n    fn hidden(self) -> i64 {\n        return self.x\n    }\n}\n\npub fn make() -> Point {\n    return Point { x: 7i64 }\n}\n",
+    );
+    project.write(
+        "main.um",
+        "fn main() -> i32 {\n    let p = geo::make()\n    println_i64(p.hidden())\n    return 0\n}\n\nmod geo;\n",
+    );
+    let (status, stdout, stderr) = project.run(&["check", "main.um"]);
+    let report = format!("{stdout}{stderr}");
+    assert_ne!(status, 0, "a private method must not be callable from outside");
+    assert!(report.contains("E1018"), "expected E1018:\n{report}");
+}
+
+#[test]
+fn a_module_can_use_its_own_private_method() {
+    let project = Project::new("private_method_self");
+    project.write(
+        "geo.um",
+        "pub struct Point {\n    x: i64,\n}\n\nimpl Point {\n    fn hidden(self) -> i64 {\n        return self.x\n    }\n}\n\npub fn value() -> i64 {\n    let p = Point { x: 9i64 }\n    return p.hidden()\n}\n",
+    );
+    project.write(
+        "main.um",
+        "fn main() -> i32 {\n    println_i64(geo::value())\n    return 0\n}\n\nmod geo;\n",
+    );
+    let (status, stdout, stderr) = project.run(&["check", "main.um"]);
+    assert_eq!(status, 0, "a module's own private method is visible to it:\n{stdout}{stderr}");
+}

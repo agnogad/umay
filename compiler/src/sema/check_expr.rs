@@ -884,6 +884,21 @@ impl<'c, 's> FnChecker<'c, 's> {
         let mut d = Diagnostic::error("E0101", format!("unknown name `{name}`"))
             .at(span)
             .with_cause("no local variable, function, constant or type with this name is in scope");
+        // A private module item is deliberately absent from the bare-name
+        // table. When that is why the name is unknown, say so rather than
+        // claiming no such item exists at all.
+        if let Some((key, _)) = self
+            .cx
+            .visibility
+            .iter()
+            .find(|(key, is_pub)| !**is_pub && key.rsplit("::").next() == Some(name))
+        {
+            if let Some((owner, _)) = key.rsplit_once("::") {
+                d = d.with_explanation(format!(
+                    "`{name}` is private to module `{owner}`. Make it `pub` there, then call it as `{owner}::{name}`."
+                ));
+            }
+        }
         if let Some(s) = suggestion {
             d = d.with_suggestion(Suggestion::new(format!("did you mean `{s}`?"), span, s));
         }

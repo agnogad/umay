@@ -795,7 +795,7 @@ touch the frontend at all.
 
 ### Verified, and not yet verified
 
-- [x] Linux is unchanged: the 663-test suite passes, and the Linux assembly is
+- [x] Linux is unchanged: the test suite passes (740 tests at the last count), and the Linux assembly is
       asserted to carry no symbol prefix and to keep its ELF metadata.
 - [x] macOS and Windows assembly is accepted by a real assembler for its object
       format, and the produced object is a Mach-O 64 / x86-64 COFF file with

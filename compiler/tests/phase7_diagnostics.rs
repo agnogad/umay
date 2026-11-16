@@ -404,3 +404,51 @@ fn a_warning_is_reported_on_every_build_not_just_the_first() {
         );
     }
 }
+
+#[test]
+fn every_emitted_error_code_has_an_explanation() {
+    // `umay explain` is a promise that every code the compiler can emit has a
+    // stable explanation. Four module/trait codes once escaped it because
+    // nothing checked the promise; this walks the source instead of keeping a
+    // hand-maintained list that would go stale the same way.
+    fn collect(dir: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read the src directory") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                collect(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && path.file_name().is_some_and(|n| n != "explain.rs")
+            {
+                let text = std::fs::read_to_string(&path).expect("read source");
+                let bytes = text.as_bytes();
+                let mut i = 0;
+                while i + 6 < bytes.len() {
+                    if bytes[i] == b'"'
+                        && bytes[i + 1] == b'E'
+                        && bytes[i + 2..i + 6].iter().all(u8::is_ascii_digit)
+                        && bytes[i + 6] == b'"'
+                    {
+                        let code = text[i + 1..i + 6].to_string();
+                        if !out.contains(&code) {
+                            out.push(code);
+                        }
+                        i += 7;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut codes = Vec::new();
+    collect(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"), &mut codes);
+    codes.sort();
+    assert!(!codes.is_empty(), "the scan must find at least one code");
+    for code in codes {
+        assert!(
+            umayc::explain::lookup(&code).is_some(),
+            "no `umay explain` entry for {code}"
+        );
+    }
+}

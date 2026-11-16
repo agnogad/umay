@@ -303,7 +303,14 @@ impl FnChecker<'_, '_> {
             let ty = entry.ty;
             return HirExpr { kind: HirExprKind::Local(entry.id), ty, span };
         }
-        if let Some(entry) = self.cx.items.lookup(name) {
+        // A private module item has no bare entry in the global item scope, so
+        // code inside the declaring module reaches it through the qualified
+        // spelling. Public items and top-level names still resolve directly.
+        let entry = self.cx.items.lookup(name).cloned().or_else(|| {
+            let module = self.cx.module_prefix.as_ref()?;
+            self.cx.items.lookup(&format!("{module}::{name}")).cloned()
+        });
+        if let Some(entry) = entry {
             match entry.res {
                 Res::Fn(id) if id.0 != u32::MAX => {
                     let ty = self.fn_type(id);
@@ -414,6 +421,9 @@ impl FnChecker<'_, '_> {
                 }
             }
             if let Some(fn_id) = self.cx.methods.get(&(first.name.clone(), second.name.clone())).copied() {
+                if !self.cx.check_method_visibility(&first.name, &second.name, span) {
+                    return self.error_hir(span);
+                }
                 let ty = self.fn_type(fn_id);
                 return HirExpr { kind: HirExprKind::FnRef(fn_id), ty, span };
             }

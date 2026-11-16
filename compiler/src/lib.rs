@@ -12,8 +12,9 @@
 //! | [`diagnostics`] | error reporting (human + JSON) |
 //! | [`explain`]   | `umay explain` database        |
 //!
-//! Phases 2+ (semantic analysis, HIR/MIR, borrow checking, codegen) are not yet
-//! implemented; see `ROADMAP.md`.
+//! All phases are implemented: semantic analysis, HIR/MIR, borrow checking,
+//! code generation, the runtime and the standard library. `ROADMAP.md` records
+//! the phases and what has been verified on each supported system.
 
 pub mod ast;
 pub mod asm;
