@@ -139,22 +139,23 @@ fn run_one_seed(
     ))
 }
 
-/// A manual differential fuzzer, not a CI gate.
+/// Differential fuzzing as a CI gate.
 ///
-/// It found a real backend bug (8-bit `imul`, now fixed), but the generator is
-/// still incomplete: some seeds emit programs the type checker rightly refuses
-/// and seed 3 produces a program that hangs `umay check`. Until those are
-/// resolved this test runs only when `UMAY_DIFF_COUNT` is set explicitly.
+/// Every run compares the reference interpreter with both `-O0` and `-O2` on
+/// the same generated programs. It found a real backend bug (8-bit `imul`,
+/// now fixed) and later two front-end bugs (a `<` comparison mistaken for
+/// generic arguments and a borrow-liveness false positive), both fixed, so
+/// the generator now produces valid, well-typed UMAY for every seed checked.
 /// Failures are saved under `UMAY_DIFF_OUT` or the system temp directory.
 #[test]
 fn backend_differential_ci() {
-    let Some(count) = std::env::var("UMAY_DIFF_COUNT")
+    // A fixed default keeps CI meaningful; the override is for a human running
+    // a longer or shorter sweep locally. The ignored `long_run` test is the
+    // place for a multi-thousand-seed sweep.
+    let count = std::env::var("UMAY_DIFF_COUNT")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-    else {
-        eprintln!("skipping backend_differential_ci: set UMAY_DIFF_COUNT=N to run N seeds");
-        return;
-    };
+        .unwrap_or(30);
     if !toolchain_available() {
         eprintln!("skipping backend_differential_ci: `as` or `cc` is missing");
         return;

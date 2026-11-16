@@ -139,13 +139,29 @@ implementation-only changes.
 
 ### Fixed
 
+- **A `<` comparison could be parsed as generic arguments.** The lookahead that
+  distinguishes `f<T>()` from `x < y` scanned up to 64 tokens and ignored
+  boundaries, so a `>` in a *later* statement closed a phantom argument list:
+  `while (i < 6i32) ... return a > (b)` reported `E0224` at the `6i32`. The scan
+  now stops at any token that cannot appear in a type. A same-line case
+  (`if x < y && z > (w)`) was affected too.
+- **Borrow liveness crossed sibling CFG branches.** A `&mut` borrow created in
+  one arm and last used in another was treated as live in blocks on unrelated
+  paths, so a shared borrow after the `if` falsely reported `E0205`. Conflict
+  checks now require the earlier borrow's last use to be reachable on the CFG
+  from the later borrow's creation.
+- **Win64 struct returns crashed before they could be used.** The callee read
+  the hidden return pointer from `%rdi` (the SysV first-argument register)
+  instead of `%rcx` (Win64), writing the result through a garbage address. The
+  larger `http-router` example died this way under Wine; it now runs, and a
+  regression test checks a 40-byte struct round-trip.
 - **8-bit multiplication emitted an instruction the assembler rejects.** `imul`
   has no two-operand byte form, so `a * b` on `i8`/`u8` produced `imulb %cl, %dl`
   and the build failed with `invalid instruction suffix`. The selector now
   multiplies at 16 bits and keeps the low byte, which is the same result modulo
   2^8 for signed and unsigned operands. A differential fuzzing harness found it;
-  it stays a manual tool (`UMAY_DIFF_COUNT=N cargo test --test backend_diff`)
-  because its generator still emits programs that desynchronise the parser.
+  with the front-end bugs below fixed, that harness now runs as a CI gate over
+  30 seeds (`UMAY_DIFF_COUNT` still overrides the count for local sweeps).
 - **`-O2` folded `!255u8` to -256.** Unary constant folding ran in an i128
   scratch integer and never truncated back to the operand's width, so a later
   cast widened the wrong value. Bitwise not and negation now truncate to the

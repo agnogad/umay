@@ -795,7 +795,7 @@ touch the frontend at all.
 
 ### Verified, and not yet verified
 
-- [x] Linux is unchanged: the test suite passes (740 tests at the last count), and the Linux assembly is
+- [x] Linux is unchanged: the test suite passes (752 tests at the last count), and the Linux assembly is
       asserted to carry no symbol prefix and to keep its ELF metadata.
 - [x] macOS and Windows assembly is accepted by a real assembler for its object
       format, and the produced object is a Mach-O 64 / x86-64 COFF file with
@@ -804,11 +804,16 @@ touch the frontend at all.
       emitted COFF objects and Wine runs the result; the existing
       `an_emitted_windows_object_links_and_runs_elsewhere` test passes, and a
       program built with `build --target x86_64-pc-windows-gnu` was linked and
-      run here as well. Note that the larger HTTP example crashed under Wine;
-      that is a separate runtime question, not a linking failure.
+      run here as well. The larger `http-router` example runs under Wine too:
+      its crash was a Win64 ABI bug in the prologue, which read the hidden
+      struct-return pointer from `%rdi` (SysV) instead of `%rcx` (Win64).
+      `win64_struct_return_through_hidden_pointer_runs` pins the fix.
 - [ ] **macOS: a linked, running binary is not yet verified on this host.**
       Linux has no Apple SDK. CI has a `macos-latest` job that links and runs a
-      small program on a real Mac; its result is the remaining check.
+      small program on a real Mac; its result is the remaining check. As of
+      2026-11-17 no run exists for the pushed branch: `ci.yml` triggers only on
+      pushes to `main`, tags and pull requests, and a PR to `main` has not been
+      opened, so the job has never executed on the remaining-work branch.
 
 ---
 
