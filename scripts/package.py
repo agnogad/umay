@@ -79,9 +79,14 @@ def main() -> int:
     packaged = directory / executable
     shutil.copy2(binary, packaged)
     if args.strip and not windows:
-        shutil.which("strip") and subprocess.run(
-            ["strip", str(packaged)], check=False, stderr=subprocess.DEVNULL
-        )
+        # GNU `strip` is often built for the host's own file formats; llvm-strip
+        # handles a cross-built object without a cross binutils package.
+        for tool in ("llvm-strip", "strip"):
+            if shutil.which(tool):
+                subprocess.run(
+                    [tool, str(packaged)], check=False, stderr=subprocess.DEVNULL
+                )
+                break
 
     for name in DOCUMENTS:
         source = root / name

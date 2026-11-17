@@ -116,6 +116,13 @@ jobs:
           qemu-aarch64 -L /usr/aarch64-linux-gnu ./dist/main > output.txt
           printf 'arm64\n42\n42\n42\n42\n2\n42\n' > expected.txt
           diff -u expected.txt output.txt
+      - name: Build and run the AArch64 compiler
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+        run: |
+          rustup target add aarch64-unknown-linux-musl
+          cargo build --release --locked --target aarch64-unknown-linux-musl
+          qemu-aarch64 target/aarch64-unknown-linux-musl/release/umay version
 
   windows:
     runs-on: windows-latest
@@ -195,9 +202,36 @@ jobs:
           name: umay-release-linux
           path: out/*
 
+  release-aarch64:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add the static AArch64 target
+        run: rustup target add aarch64-unknown-linux-musl
+      - name: Build the static AArch64 compiler
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+        run: cargo build --release --locked --target aarch64-unknown-linux-musl
+      - name: Package the AArch64 artifact
+        run: |
+          python3 scripts/package.py \
+            --version "${GITHUB_REF_NAME#v}" \
+            --label aarch64-linux-musl \
+            --binary target/aarch64-unknown-linux-musl/release/umay \
+            --out out \
+            --strip
+      - name: Keep the AArch64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: umay-release-aarch64
+          path: out/*
+
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [release, macos, windows]
+    needs: [release, release-aarch64, macos, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write

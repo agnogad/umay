@@ -902,10 +902,11 @@ is breadth, packaging, and the two known quality gaps.
       composites in registers or by reference, and extra arguments on the
       stack; returns use `x0`/`x1`, `d0`/`s0`, or the hidden `x8` pointer. The
       program and runtime compile for `aarch64-unknown-linux-gnu`, and a CI job
-      links and runs a feature-covering program under qemu. HFA C interop,
-      register allocation, and ARM64 macOS/Windows remain; see
-      [ADR 0015](docs/adr/0015-aarch64-backend.md). Until a release artifact is
-      cut, the support matrix is x86_64 and the README says so.
+      links and runs a feature-covering program under qemu. The release
+      workflow builds a static `aarch64-linux-musl` compiler artifact, and the
+      installer selects it on ARM64 Linux. HFA C interop, register allocation
+      and ARM64 macOS/Windows remain; see
+      [ADR 0015](docs/adr/0015-aarch64-backend.md).
 - [ ] **Hosted `upm` registry.** The fetcher, version choice and content hash
       already work against a directory. A network registry is a transport layer
       over the same code, not a second resolver.

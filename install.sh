@@ -26,14 +26,17 @@ need curl
 need tar
 need uname
 
-case "$(uname -s)" in
-    Linux) label="x86_64-linux-musl" ;;
-    Darwin) label="x86_64-darwin" ;;
-    *) fail "unsupported system: $(uname -s); use the release archive for your system" ;;
-esac
-case "$(uname -m)" in
-    x86_64 | amd64) ;;
-    *) fail "unsupported architecture: $(uname -m); UMAY has only an x86_64 backend" ;;
+os_name="${UMAY_OS:-$(uname -s)}"
+arch_name="${UMAY_ARCH:-$(uname -m)}"
+case "${os_name}-${arch_name}" in
+    Linux-x86_64 | Linux-amd64) label="x86_64-linux-musl" ;;
+    Linux-aarch64 | Linux-arm64) label="aarch64-linux-musl" ;;
+    Darwin-x86_64 | Darwin-amd64) label="x86_64-darwin" ;;
+    Darwin-aarch64 | Darwin-arm64)
+        fail "ARM64 macOS artifacts are not published yet; build from source" ;;
+    *)
+        fail "unsupported system: ${os_name} ${arch_name}; use the release archive for your system"
+        ;;
 esac
 
 version="${UMAY_VERSION:-}"
@@ -67,7 +70,9 @@ tar -xzf "${tmp}/${archive}" -C "$tmp"
 mkdir -p "$install_dir"
 install -m 0755 "${tmp}/umay-${version}-${label}/umay" "${install_dir}/umay"
 
-"${install_dir}/umay" version
+if [ "${UMAY_VERIFY:-1}" = "1" ]; then
+    "${install_dir}/umay" version
+fi
 case ":${PATH}:" in
     *":${install_dir}:"*) ;;
     *) echo "Add ${install_dir} to PATH to run \`umay\` from anywhere." ;;

@@ -82,12 +82,10 @@ COFF object but cannot link it without an Apple SDK or a MinGW-w64 runtime.
 Only x86_64 has a backend, so an ARM triple is refused with an explanation
 rather than emitting a binary nothing can load.
 
-**Host support.** Prebuilt binaries are x86_64: static Linux (musl), Intel
-macOS, and Windows (MinGW). On Apple Silicon the macOS binary runs under
-Rosetta. The compiler also has an AArch64 Linux backend: `--target
-aarch64-unknown-linux-gnu` compiles a program and the runtime, and an AArch64 C
-toolchain links the result. It is not yet part of the prebuilt artifacts, and
-ARM64 macOS and Windows are not supported.
+**Host support.** Prebuilt binaries are static Linux and Windows on x86_64,
+static AArch64 Linux, and Intel macOS. The AArch64 compiler is a native ARM64
+binary; it targets `aarch64-unknown-linux-gnu`. On Apple Silicon the macOS
+binary runs under Rosetta, and ARM64 macOS and Windows are not supported yet.
 
 Every program is linked against a runtime written in UMAY itself, and the prelude
 and the first library types are UMAY source too, so a program can print, allocate
@@ -169,7 +167,7 @@ See [ROADMAP.md](ROADMAP.md) for the detailed milestone plan and
 
 ## Installing
 
-Linux x86_64 and Intel macOS:
+Linux x86_64, Linux ARM64 and Intel macOS:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/agnogad/umay/main/install.sh | sh

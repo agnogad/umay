@@ -50,23 +50,23 @@ Two versions move independently:
    git push origin v<version>
    ```
 
-8. **The GitHub release publishes itself.** Pushing the tag builds the Linux,
-   macOS and Windows artifacts. The Linux job also checks that its binary is
-   static. A final job attaches every archive and checksum to the tag. A user
-   should be able to download a pair and run `sha256sum -c` before executing
-   anything. If the jobs could not publish, attach the files by hand rather than
-   leaving the tag with no download.
+8. **The GitHub release publishes itself.** Pushing the tag builds the
+   x86_64 Linux, AArch64 Linux, macOS and Windows artifacts. The Linux jobs
+   check that their binaries are static. A final job attaches every archive and
+   checksum to the tag. A user should be able to download a pair and run
+   `sha256sum -c` before executing anything. If the jobs could not publish,
+   attach the files by hand rather than leaving the tag with no download.
 
 ## What the artifact contains
 
-- `umay` on Linux and macOS, `umay.exe` on Windows — the compiler. Linux and
-  macOS builds are stripped.
+- `umay` on Linux and macOS, `umay.exe` on Windows — the compiler. Linux,
+  AArch64 Linux and macOS builds are stripped.
 - `README.md`, `CHANGELOG.md` — what it is and what changed.
 - `language-specification.md`, `build-system.md` — the normative documents.
 - `LICENSE`.
 
-Linux and macOS use a `tar.gz`; Windows uses a `zip`. Each archive has a sibling
-`.sha256` file.
+Linux (x86_64 and AArch64) and macOS use a `tar.gz`; Windows uses a `zip`. Each
+archive has a sibling `.sha256` file.
 
 It does **not** contain the Cargo build directory, the source tree, or any
 project's `dist/`. On Linux the compiler is built against musl and statically

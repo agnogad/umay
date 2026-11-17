@@ -76,6 +76,9 @@ needs no cross C library.
   links a program that exercises strings, structs, aggregate arguments and
   returns, enums, tuples, floats, nine arguments and the runtime's integer
   formatting, then compares its output under qemu.
+- The compiler itself is built as a static `aarch64-unknown-linux-musl` binary
+  with `rust-lld`, published as the `aarch64-linux-musl` archive and selected by
+  `install.sh` on ARM64 Linux. CI builds it and runs `umay version` under qemu.
 
 ## Known limitations
 

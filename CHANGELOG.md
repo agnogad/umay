@@ -11,6 +11,11 @@ implementation-only changes.
 
 ### Added
 
+- **Static AArch64 Linux compiler.** The release workflow builds
+  `aarch64-unknown-linux-musl` with `rust-lld` and publishes an
+  `aarch64-linux-musl` archive next to the x86_64 ones. `install.sh` selects it
+  on `aarch64`/`arm64` Linux, so the compiler runs natively on ARM servers. A CI
+  step builds the ARM64 compiler and runs it under qemu.
 - **AArch64 Linux backend.** `aarch64-unknown-linux-gnu` (and `arm64-linux`)
   parse to a target with the AAPCS64 ABI. The backend lowers the full MIR
   surface: scalars, strings, pointers, arrays, structs, tuples, enums, generics,
