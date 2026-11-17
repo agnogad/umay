@@ -862,10 +862,23 @@ The compiler now builds with zero warnings and the full suite passes.
   program loop parse the next item, but an impl-body loop calling it on a stray
   `impl` never advanced. Body recovery now forces progress, covered by
   `recovery_inside_an_impl_body_always_makes_progress`.
-- [ ] **The fuzz generator still produces invalid programs on one seed.** With
-  the two compiler bugs fixed, six seeds leave a single case where generated
-  source desynchronises the parser. The harness stays opt-in via
-  `UMAY_DIFF_COUNT`; fixing the generator remains manual work.
+- [x] Differential fuzzing is a CI gate: `backend_differential_ci` checks seeds
+  1..=30 by default, with `UMAY_DIFF_COUNT` for local sweeps and an ignored
+  long run for thousands of seeds.
+- [x] The generator no longer emits assignments that mention their target or
+  assign to a variable borrowed anywhere in the same body. This covered
+  `v = f(&mut v)`, `s.f = f(&mut s, ...)`, `s.f = s.g + 1` and borrows whose
+  block order confused liveness. `generated_assignments_never_conflict_with_borrows`
+  checks the AST for 2000 seeds; the 30-seed CI gate remains the end-to-end
+  proof.
+- [x] A parenthesized comparison such as `(p < q) > r` no longer trips the
+  generic-argument lookahead. The fuzz generator produced it at seed 1573;
+  `parenthesized_comparison_is_not_generic_args` pins the fix.
+- [ ] Long fuzz runs still find generated programs that the checker rejects
+  because field-wise borrow liveness is coarse (`docs/memory-model.md` E0208).
+  The parser and generator faults they exposed are fixed; the remaining cases
+  are a documented compiler limitation, not silent miscompilation. The long
+  run stays manual.
 
 ---
 

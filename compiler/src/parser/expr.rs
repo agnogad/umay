@@ -537,6 +537,8 @@ impl Parser {
         // Scan forward: generic args must be closed by `>` followed by one of
         // `(`, `::`, `{`. Anything that cannot appear in a type ends the scan.
         let mut depth = 0i32;
+        let mut parens = 0i32;
+        let mut brackets = 0i32;
         let mut i = 1;
         let limit = 64;
         while i < limit {
@@ -551,15 +553,29 @@ impl Parser {
                     }
                     depth -= 1;
                 }
+                // A `)` or `]` that closes a group opened before the `<` means
+                // this `<` was a comparison: `(p < q) > r` must not be read as
+                // `p<q>(...)`. A group opened inside the generic arguments is
+                // fine, as in `f<(i32, i32)>()` or `f<[u8; 4]>()`.
+                TokenKind::LParen => parens += 1,
+                TokenKind::RParen => {
+                    if parens == 0 {
+                        return false;
+                    }
+                    parens -= 1;
+                }
+                TokenKind::LBracket => brackets += 1,
+                TokenKind::RBracket => {
+                    if brackets == 0 {
+                        return false;
+                    }
+                    brackets -= 1;
+                }
                 // Tokens accepted by `parse_type` (items.rs). Presence of any
                 // other token means this `<` is a comparison operator.
                 TokenKind::Ident(_)
                 | TokenKind::Amp
                 | TokenKind::Star
-                | TokenKind::LParen
-                | TokenKind::RParen
-                | TokenKind::LBracket
-                | TokenKind::RBracket
                 | TokenKind::Comma
                 | TokenKind::Colon
                 | TokenKind::ColonColon

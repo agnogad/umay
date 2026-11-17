@@ -98,9 +98,10 @@ it.
 - The checker rejects some programs a full lifetime-inference implementation
   would accept. `E0203` is reserved for saying so explicitly: a limitation
   reported under a code of its own is never mistaken for a bug.
-- Four of the thirteen documented codes are not yet enforced
-  (`E0202`, `E0203`, `E0208`, `E0209`, `E0212`, `E0213`). The memory model lists
-  exactly which, rather than implying full coverage.
+- Six of the thirteen documented codes are not enforced
+  (`E0202` is unreachable by construction; `E0203`, `E0208`, `E0209`, `E0212`
+  and `E0213` are deferred). The memory model lists exactly which, rather than
+  implying full coverage.
 
 ## Alternatives considered
 

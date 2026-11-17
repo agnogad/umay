@@ -6,11 +6,12 @@
 //! runtime's platform layer all follow the target that was asked for, and that
 //! the result assembles into the right *kind* of object.
 //!
-//! They do not link or run a non-host executable: this machine has no Apple SDK
-//! or MinGW runtime, and a test that required one would not run anywhere else.
-//! What they do verify is the part that would otherwise fail silently -- that the
-//! text the backend emits is accepted by a real assembler for that object format
-//! and that the entry symbol is defined where the linker will look for it.
+//! They do not link or run a non-host executable on every machine: a host
+//! without the matching SDK/runtime only assembles and checks objects. Windows
+//! link-and-run is additionally asserted where MinGW-w64 and Wine are installed.
+//! What they do verify is the part that would otherwise fail silently -- that
+//! the text the backend emits is accepted by a real assembler for that object
+//! format and that the entry symbol is defined where the linker will look for it.
 //!
 //! Each test is skipped, not failed, when the assembler is missing.
 

@@ -248,3 +248,145 @@ fn backend_differential_long_run() {
         fail_root.display()
     );
 }
+
+/// The generator used to emit assignments that conflicted with borrows:
+/// `s.f = f(&mut s, ...)`, `s.f = s.g + 1`, and assignments to a variable that
+/// is mutably borrowed elsewhere in the same body. Check the generated AST
+/// directly so a regression is caught without building 2000 programs.
+#[test]
+fn generated_assignments_never_conflict_with_borrows() {
+    fn expr_mentions(expr: &progen::Expr, name: &str) -> bool {
+        match expr {
+            progen::Expr::Var(v) => v == name,
+            progen::Expr::Lit(_) => false,
+            progen::Expr::Cast { expr, .. } | progen::Expr::Unary { expr, .. } => {
+                expr_mentions(expr, name)
+            }
+            progen::Expr::Binary { lhs, rhs, .. } => {
+                expr_mentions(lhs, name) || expr_mentions(rhs, name)
+            }
+            progen::Expr::FieldAccess { var, .. } => var == name,
+            progen::Expr::ArrayIndex { var, index } => {
+                var == name || expr_mentions(index, name)
+            }
+            progen::Expr::Call { args, .. } => {
+                args.iter().any(|arg| expr_mentions(arg, name))
+            }
+            progen::Expr::MethodCall { receiver, args, .. } => {
+                receiver == name || args.iter().any(|arg| expr_mentions(arg, name))
+            }
+            progen::Expr::StructLit { fields, .. } => {
+                fields.iter().any(|field| expr_mentions(field, name))
+            }
+            progen::Expr::ArrayLit { init, .. } => expr_mentions(init, name),
+        }
+    }
+
+    fn all_stmts<'a>(stmts: &'a [progen::Stmt], out: &mut Vec<&'a progen::Stmt>) {
+        for stmt in stmts {
+            out.push(stmt);
+            match stmt {
+                progen::Stmt::If { then_body, else_body, .. } => {
+                    all_stmts(then_body, out);
+                    all_stmts(else_body, out);
+                }
+                progen::Stmt::While { body, .. } => all_stmts(body, out),
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_expr_borrows(
+        expr: &progen::Expr,
+        prog: &progen::Program,
+        borrowed: &mut std::collections::BTreeSet<String>,
+    ) {
+        match expr {
+            progen::Expr::Lit(_) | progen::Expr::Var(_) | progen::Expr::FieldAccess { .. } => {}
+            progen::Expr::Cast { expr, .. } | progen::Expr::Unary { expr, .. } => {
+                collect_expr_borrows(expr, prog, borrowed)
+            }
+            progen::Expr::Binary { lhs, rhs, .. } => {
+                collect_expr_borrows(lhs, prog, borrowed);
+                collect_expr_borrows(rhs, prog, borrowed);
+            }
+            progen::Expr::ArrayIndex { index, .. } => collect_expr_borrows(index, prog, borrowed),
+            progen::Expr::Call { func, args } => {
+                let params = &prog.funcs[*func].params;
+                for (i, arg) in args.iter().enumerate() {
+                    if params[i].is_mut_ref {
+                        if let progen::Expr::Var(name) = arg {
+                            borrowed.insert(name.clone());
+                        }
+                    }
+                    collect_expr_borrows(arg, prog, borrowed);
+                }
+            }
+            progen::Expr::MethodCall { receiver, struct_id, method, args } => {
+                if prog.structs[*struct_id].methods[*method].is_mut_self {
+                    borrowed.insert(receiver.clone());
+                }
+                for arg in args {
+                    collect_expr_borrows(arg, prog, borrowed);
+                }
+            }
+            progen::Expr::StructLit { fields, .. } => {
+                for field in fields {
+                    collect_expr_borrows(field, prog, borrowed);
+                }
+            }
+            progen::Expr::ArrayLit { init, .. } => collect_expr_borrows(init, prog, borrowed),
+        }
+    }
+
+    fn body_has_conflict(stmts: &[progen::Stmt], prog: &progen::Program) -> bool {
+        let mut flat = Vec::new();
+        all_stmts(stmts, &mut flat);
+
+        let mut borrowed = std::collections::BTreeSet::new();
+        for stmt in &flat {
+            match stmt {
+                progen::Stmt::Let { init, .. }
+                | progen::Stmt::Return(init)
+                | progen::Stmt::Print(init)
+                | progen::Stmt::Expr(init) => collect_expr_borrows(init, prog, &mut borrowed),
+                progen::Stmt::Assign { target, value } => {
+                    if let progen::LValue::Index(_, index) = target {
+                        collect_expr_borrows(index, prog, &mut borrowed);
+                    }
+                    collect_expr_borrows(value, prog, &mut borrowed);
+                }
+                progen::Stmt::If { cond, .. } | progen::Stmt::While { cond, .. } => {
+                    collect_expr_borrows(cond, prog, &mut borrowed)
+                }
+            }
+        }
+
+        flat.iter().any(|stmt| match stmt {
+            progen::Stmt::Assign { target, value } => {
+                let name = match target {
+                    progen::LValue::Var(name)
+                    | progen::LValue::Field(name, _)
+                    | progen::LValue::Index(name, _) => name,
+                };
+                borrowed.contains(name)
+                    || expr_mentions(value, name)
+                    || matches!(target, progen::LValue::Index(_, index) if expr_mentions(index, name))
+            }
+            _ => false,
+        })
+    }
+
+    for seed in 1..=2000 {
+        let prog = progen::gen_program(seed);
+        let conflict = prog
+            .funcs
+            .iter()
+            .any(|f| body_has_conflict(&f.body, &prog))
+            || prog.structs.iter().any(|s| {
+                s.methods.iter().any(|m| body_has_conflict(&m.body, &prog))
+            })
+            || body_has_conflict(&prog.main_stmts, &prog);
+        assert!(!conflict, "seed {seed} generated a conflicting assignment");
+    }
+}

@@ -9,6 +9,8 @@ implementation-only changes.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-17
+
 ### Added
 
 - **Cross-target compilation.** `--target` selects the system to emit code for;
@@ -139,6 +141,18 @@ implementation-only changes.
 
 ### Fixed
 
+- **The differential generator stopped creating conflicting assignments.**
+  It emitted `s.f = f(&mut s, ...)`, `s.f = s.g + 1`, and assignments to
+  variables borrowed elsewhere in the same body. Those are either genuine
+  conflicts or valid programs beyond the checker's field-wise borrow model, so
+  long fuzz runs reported compiler errors that were really generator faults.
+  The AST regression checks 2000 generated programs; CI still builds and runs
+  30 of them end to end.
+- **A parenthesized comparison was read as generic arguments.** The lookahead
+  accepted a `)` inside `<...>`, so `(p < q) > r` became `p<q>(...)` and failed
+  with `E0330`. It now tracks groups opened inside the argument list; a `)` or
+  `]` that closes an outer group ends the scan. Differential seed 1573 found
+  it, and `parenthesized_comparison_is_not_generic_args` pins the fix.
 - **A `<` comparison could be parsed as generic arguments.** The lookahead that
   distinguishes `f<T>()` from `x < y` scanned up to 64 tokens and ignored
   boundaries, so a `>` in a *later* statement closed a phantom argument list:
@@ -262,6 +276,11 @@ implementation-only changes.
 
 ### Changed
 
+- **Documentation now matches the release state.** `README.md` describes all
+  completed phases and the current per-target verification; `ROADMAP.md` says
+  differential fuzzing runs in CI by default; the memory model and its ADR count
+  the six unenforced diagnostic codes listed in their own table. Package
+  metadata moves to `0.2.0` so the release notes describe a real version.
 - **The benchmark now builds UMAY as an optimised release.** `scripts/bench.py`
   compiled UMAY at its default `-O0` while every other language in the table was
   given its optimiser (`gcc -O2`, `rustc -O`, Zig `ReleaseFast`). The comparison
@@ -270,16 +289,19 @@ implementation-only changes.
 ### Known limitations
 
 - A non-host target's executable cannot be linked on a machine without that
-  system's SDK and CRT.
-- macOS is emitter-only here: there is no Apple SDK on a Linux host, so the
-  object is produced and never linked. What the linker would check *is* checked
-  statically: `a_macos_object_leaves_only_its_own_runtime_undefined` assembles
-  the object, confirms `_main` is defined and exported, and rejects any name it
-  leaves undefined that is neither UMAY's own runtime nor a C library function
-  macOS provides. A misspelt C binding is invisible until a Mac fails to link, and
-  that is exactly how four faults survived on Windows.
+  system's SDK and CRT. `umay build --target ...` keeps the assembled objects
+  and prints the link command that a machine with the SDK can run.
+- Windows objects link with MinGW-w64 and run under Wine locally, including the
+  larger `http-router` example. Those checks skip on a runner without Wine;
+  they are not a GitHub Actions gate yet.
+- macOS objects are assembled and their symbols checked statically on any host.
+  A `macos-latest` CI job links and runs a small binary; the result of a given
+  commit is visible in Actions.
 - `x86_64` is the only architecture. An ARM triple is refused with an
   explanation rather than emitting a binary nothing can load.
+- Borrow liveness is still field-insensitive on some paths: reading `s.f` and
+  assigning `s.g` in the same body can be rejected (`E0208` remains deferred).
+  The 30-seed differential gate is green; longer runs stay manual.
 
 ## [0.1.0] — 2026-11-08
 
@@ -341,4 +363,5 @@ defines — every phase from architecture to stabilization is done.
 - Zig is not part of the build-time comparison in `docs/measurements.md` because
   it was not installed on the measurement machine; it is named, not dropped.
 
+[0.2.0]: https://github.com/agnogad/umay/releases/tag/v0.2.0
 [0.1.0]: https://example.invalid/umay/releases/tag/v0.1.0

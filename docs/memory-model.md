@@ -248,7 +248,8 @@ Status of each code, as of Phase 4:
 UMAY does not claim "Rust-equivalent safety" until the borrow checker and its
 adversarial test suite are complete and validated. Phase 4 delivered a checker
 that enforces the ownership and aliasing rules on MIR and is tested against both
-an adversarial suite and an accept corpus, but four of the thirteen codes above
-are not yet enforced, for the reasons listed. The claim this repository supports
+an adversarial suite and an accept corpus, but six of the thirteen codes above
+are not enforced (`E0202` is unreachable by construction and the other five are
+deferred), for the reasons listed. The claim this repository supports
 today is: **the rules in sections 1–3 are checked; the rules in sections 4 and 7
 are checked only where listed.**

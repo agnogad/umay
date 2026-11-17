@@ -24,12 +24,11 @@ fn main() {
 
 ## Status
 
-UMAY is under active development. This repository currently contains **Phases 0
-through 5** of the roadmap and Phase 6 as far as the file layer: a
-complete lexer, parser and semantic analyser with the AI-first diagnostics
-infrastructure, a full HIR → MIR lowering with explicit control flow and drop
-elaboration, an ownership and borrow checker running on that MIR, and a custom
-x86_64 backend.
+UMAY is under active development. Phases 0 through 9 are complete: a complete
+lexer, parser and semantic analyser with AI-first diagnostics, HIR/MIR lowering
+with explicit control flow and drop elaboration, an ownership and borrow
+checker running on that MIR, a custom x86_64 backend, the runtime and standard
+library, the build system and stabilisation.
 `umay build` produces a working executable, `umay run` builds and runs it,
 and `umay asm` prints the generated assembly. The MIR can be inspected with
 `umay mir <file>`.
@@ -153,9 +152,10 @@ reported as `E3001` rather than miscompiled; see
 | 8 | Build system and packages | **complete** |
 | 9 | Stabilization | **complete** (Linux verified; see below) |
 
-macOS and Windows emit the right objects and are asserted against a real
-assembler, but a linked, running binary on those systems has not been verified
-on this host. See `ROADMAP.md` Phase 10 for the exact status.
+Linux is verified end to end. Windows objects link with MinGW-w64 and run under
+Wine, including the larger `http-router` example. macOS objects are assembled
+and their symbols checked on any host, and a `macos-latest` CI job links and
+runs a small binary. See `ROADMAP.md` Phase 10 for the exact status.
 
 See [ROADMAP.md](ROADMAP.md) for the detailed milestone plan and
 [docs/](docs/) for the specifications this implementation is held to.

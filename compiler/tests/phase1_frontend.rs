@@ -130,6 +130,23 @@ fn loop_then_cmp() -> bool {
 }
 
 #[test]
+fn parenthesized_comparison_is_not_generic_args() {
+    // The `)` closes a group opened before `<`, so this is `(p < q) > r`,
+    // not `p<q>(...)`. The lookahead must not treat that `)` as part of a
+    // generic argument list.
+    assert_clean(
+        r#"
+fn compare_inside_parens(p: i32, q: i32) -> bool {
+    if ((p < q) > (p == q)) {
+        return true
+    }
+    return false
+}
+"#,
+    );
+}
+
+#[test]
 fn trait_and_impl_parse() {
     assert_clean(
         r#"

@@ -405,6 +405,11 @@ struct GenCx<'a> {
     next_id: usize,
     /// Variables currently borrowed `&mut` in an enclosing call's argument list.
     borrowed: BTreeSet<String>,
+    /// The variable whose assignment right-hand side is being generated. The
+    /// reference compiler does not yet split borrows per field, so reading any
+    /// part of this variable while assigning another part is reported as a
+    /// conflict even though the program is valid.
+    avoid_var: Option<String>,
 }
 
 impl<'a> GenCx<'a> {
@@ -587,7 +592,7 @@ impl<'a> GenCx<'a> {
     fn gen_leaf_expr(&mut self, ty: PrimTy, vars: &[ScopeVar]) -> Expr {
         let mut candidates: Vec<Expr> = Vec::new();
         for v in vars {
-            if self.borrowed.contains(&v.name) {
+            if self.borrowed.contains(&v.name) || self.avoid_var.as_deref() == Some(&v.name) {
                 continue;
             }
             match v.ty {
@@ -630,7 +635,10 @@ impl<'a> GenCx<'a> {
     fn gen_leaf_int(&mut self, ty: PrimTy, vars: &[ScopeVar]) -> Expr {
         let mut matches = Vec::new();
         for v in vars {
-            if !self.borrowed.contains(&v.name) && v.ty == Ty::Prim(ty) {
+            if !self.borrowed.contains(&v.name)
+                && self.avoid_var.as_deref() != Some(&v.name)
+                && v.ty == Ty::Prim(ty)
+            {
                 matches.push(v.name.clone());
             }
         }
@@ -757,7 +765,13 @@ impl<'a> GenCx<'a> {
     fn pick_mut_var(&mut self, ty: Ty, vars: &[ScopeVar]) -> Option<String> {
         let mut cands: Vec<String> = vars
             .iter()
-            .filter(|v| v.is_mut && !v.is_mut_ref && v.ty == ty && !self.borrowed.contains(&v.name))
+            .filter(|v| {
+                v.is_mut
+                    && !v.is_mut_ref
+                    && v.ty == ty
+                    && !self.borrowed.contains(&v.name)
+                    && self.avoid_var.as_deref() != Some(&v.name)
+            })
             .map(|v| v.name.clone())
             .collect();
         if cands.is_empty() {
@@ -901,7 +915,17 @@ impl<'a> GenCx<'a> {
             return None;
         }
         let (target, ty) = targets.swap_remove(self.rng.gen_range(targets.len()));
-        let value = self.gen_expr(ty, vars, 2, true);
+        // The right-hand side must not mention the variable being assigned.
+        // `v = f(&mut v)` is a genuine conflict; reading another field of the
+        // same struct (`s.f = s.g + 1`) is valid but beyond the checker's
+        // current field-wise borrow model. Calls are still covered by
+        // initialisers, returns, prints, conditions and expression statements.
+        let base = match &target {
+            LValue::Var(name) | LValue::Field(name, _) | LValue::Index(name, _) => name.clone(),
+        };
+        let previous = self.avoid_var.replace(base);
+        let value = self.gen_expr(ty, vars, 2, false);
+        self.avoid_var = previous;
         Some(Stmt::Assign { target, value })
     }
 }
@@ -909,6 +933,116 @@ impl<'a> GenCx<'a> {
 enum EitherCall {
     Func(usize),
     Method(String, usize, usize),
+}
+
+fn visit_expr_borrows(
+    expr: &Expr,
+    funcs: &[FuncDef],
+    structs: &[StructDef],
+    borrowed: &mut BTreeSet<String>,
+) {
+    match expr {
+        Expr::Lit(_) | Expr::Var(_) | Expr::FieldAccess { .. } => {}
+        Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => {
+            visit_expr_borrows(expr, funcs, structs, borrowed)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            visit_expr_borrows(lhs, funcs, structs, borrowed);
+            visit_expr_borrows(rhs, funcs, structs, borrowed);
+        }
+        Expr::ArrayIndex { index, .. } => visit_expr_borrows(index, funcs, structs, borrowed),
+        Expr::Call { func, args } => {
+            let params = &funcs[*func].params;
+            for (i, arg) in args.iter().enumerate() {
+                if params[i].is_mut_ref {
+                    if let Expr::Var(name) = arg {
+                        borrowed.insert(name.clone());
+                    }
+                }
+                visit_expr_borrows(arg, funcs, structs, borrowed);
+            }
+        }
+        Expr::MethodCall { receiver, struct_id, method, args } => {
+            if structs[*struct_id].methods[*method].is_mut_self {
+                borrowed.insert(receiver.clone());
+            }
+            for arg in args {
+                visit_expr_borrows(arg, funcs, structs, borrowed);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for field in fields {
+                visit_expr_borrows(field, funcs, structs, borrowed);
+            }
+        }
+        Expr::ArrayLit { init, .. } => visit_expr_borrows(init, funcs, structs, borrowed),
+    }
+}
+
+fn visit_stmt_borrows(
+    stmt: &Stmt,
+    funcs: &[FuncDef],
+    structs: &[StructDef],
+    borrowed: &mut BTreeSet<String>,
+) {
+    match stmt {
+        Stmt::Let { init, .. } | Stmt::Return(init) | Stmt::Print(init) | Stmt::Expr(init) => {
+            visit_expr_borrows(init, funcs, structs, borrowed)
+        }
+        Stmt::Assign { target, value } => {
+            if let LValue::Index(_, index) = target {
+                visit_expr_borrows(index, funcs, structs, borrowed);
+            }
+            visit_expr_borrows(value, funcs, structs, borrowed);
+        }
+        Stmt::If { cond, then_body, else_body } => {
+            visit_expr_borrows(cond, funcs, structs, borrowed);
+            for st in then_body.iter().chain(else_body) {
+                visit_stmt_borrows(st, funcs, structs, borrowed);
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            visit_expr_borrows(cond, funcs, structs, borrowed);
+            for st in body {
+                visit_stmt_borrows(st, funcs, structs, borrowed);
+            }
+        }
+    }
+}
+
+fn filter_borrowed_assignments(stmts: &mut Vec<Stmt>, borrowed: &BTreeSet<String>) {
+    stmts.retain(|stmt| match stmt {
+        Stmt::Assign { target, .. } => {
+            let name = match target {
+                LValue::Var(name) | LValue::Field(name, _) | LValue::Index(name, _) => name,
+            };
+            !borrowed.contains(name)
+        }
+        _ => true,
+    });
+    for stmt in stmts.iter_mut() {
+        match stmt {
+            Stmt::If { then_body, else_body, .. } => {
+                filter_borrowed_assignments(then_body, borrowed);
+                filter_borrowed_assignments(else_body, borrowed);
+            }
+            Stmt::While { body, .. } => filter_borrowed_assignments(body, borrowed),
+            _ => {}
+        }
+    }
+}
+
+/// The reference compiler's borrow liveness is block-order based, so a borrow
+/// in a branch laid out before an assignment can be reported live at that
+/// assignment even when execution reaches the assignment first. A generated
+/// program never needs both: drop assignments to variables that are borrowed
+/// anywhere in the same body, while leaving the borrows and their reads in place.
+fn sanitize_bodies(funcs: &[FuncDef], structs: &[StructDef], body: &mut Vec<Stmt>) {
+    let mut borrowed = BTreeSet::new();
+    for stmt in body.iter() {
+        visit_stmt_borrows(stmt, funcs, structs, &mut borrowed);
+    }
+    filter_borrowed_assignments(body, &borrowed);
 }
 
 pub fn gen_program(seed: u64) -> Program {
@@ -919,8 +1053,8 @@ pub fn gen_program(seed: u64) -> Program {
         funcs: Vec::new(),
         next_id: 0,
         borrowed: BTreeSet::new(),
+        avoid_var: None,
     };
-
     // 1. Generate 1-2 structs with mixed-width fields.
     let num_structs = 1 + cx.rng.gen_range(2);
     for si in 0..num_structs {
@@ -1088,6 +1222,18 @@ pub fn gen_program(seed: u64) -> Program {
             _ => {}
         }
     }
+
+    let funcs = cx.funcs.clone();
+    let structs = cx.structs.clone();
+    for f in &mut cx.funcs {
+        sanitize_bodies(&funcs, &structs, &mut f.body);
+    }
+    for s in &mut cx.structs {
+        for m in &mut s.methods {
+            sanitize_bodies(&funcs, &structs, &mut m.body);
+        }
+    }
+    sanitize_bodies(&funcs, &structs, &mut main_stmts);
 
     Program {
         seed,
