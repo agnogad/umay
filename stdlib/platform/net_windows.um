@@ -22,6 +22,7 @@ extern fn "accept" umay_win_accept(fd: usize, addr: *mut u8, len: *mut i32) -> u
 extern fn "recv" umay_win_recv(fd: usize, buf: *mut u8, count: i32, flags: i32) -> i32
 extern fn "send" umay_win_send(fd: usize, buf: *const u8, count: i32, flags: i32) -> i32
 extern fn "closesocket" umay_win_closesocket(fd: usize) -> i32
+extern fn "setsockopt" umay_win_setsockopt(fd: usize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32
 
 // The version Winsock wants in the low and high halves of a `u16` word: 2.2.
 const UMAY_WSA_VERSION: u16 = 514u16
@@ -93,6 +94,29 @@ pub fn umay_net_write(fd: isize, buf: *const u8, count: usize) -> i64 {
 
 pub fn umay_net_close(fd: isize) -> i32 {
     return umay_win_closesocket(unsafe { fd as usize })
+}
+
+// Sets how long a read on `fd` may block, in milliseconds.
+//
+// Winsock takes a `DWORD` of milliseconds here, not a `struct timeval`.
+pub fn umay_net_set_read_timeout(fd: isize, millis: i32) -> bool {
+    if millis <= 0 {
+        return false
+    }
+    let value = alloc(4)
+    write_u32(value, millis as u32)
+    let rc = umay_win_setsockopt(unsafe { fd as usize }, 65535, 4102, value as *const u8, 4)
+    dealloc(value)
+    return rc == 0
+}
+
+// Disables Nagle's algorithm on a connected socket.
+pub fn umay_net_set_nodelay(fd: isize) -> bool {
+    let value = alloc(4)
+    write_u32(value, 1u32)
+    let rc = umay_win_setsockopt(unsafe { fd as usize }, 6, 1, value as *const u8, 4)
+    dealloc(value)
+    return rc == 0
 }
 
 // No-op on Windows: SO_REUSEADDR there allows another process to hijack a

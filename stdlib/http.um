@@ -319,15 +319,25 @@ fn read_request(s: &Socket, buf: *mut u8, capacity: usize) -> i64 {
 }
 
 // Writes `r` as a complete HTTP/1.1 response and closes nothing: the caller owns
-// the socket. Returns false when the peer stopped reading.
-fn write_response(s: &Socket, r: &Response) -> bool {
-    let head = alloc(192 + r.content_type.len + r.headers.len)
+// the socket. `date` is the already-formatted Date header value and `keep_alive`
+// decides the `Connection` line. Returns false when the peer stopped reading.
+fn write_response(s: &Socket, r: &Response, date: Bytes, keep_alive: bool) -> bool {
+    // The head is built in one buffer whose size is the fixed parts plus the
+    // variable ones; a response is small and this is one allocation, not a
+    // formatting pass that grows a string.
+    //
+    // A body small enough to fit the same buffer is appended to it, so the whole
+    // response leaves in one write instead of one segment for the head and
+    // another for the body.
+    let inline_body = r.body.len <= 4096usize
+    let body_bytes = if inline_body { r.body.len } else { 0usize }
+    let head = alloc(192 + r.content_type.len + r.headers.len + date.len + body_bytes)
     let mut n = put_text(head, 0, Bytes::from_str("HTTP/1.1 "))
     n = put_decimal(head, n, r.status as usize)
     n = put_text(head, n, Bytes::from_str(" "))
     n = put_text(head, n, Bytes::from_str(reason(r.status)))
     n = put_text(head, n, Bytes::from_str("\r\nDate: "))
-    n = n + http_date(unix_now(), unsafe { (head as usize + n) as *mut u8 })
+    n = put_text(head, n, date)
     if r.content_type.len > 0 {
         n = put_text(head, n, Bytes::from_str("\r\nContent-Type: "))
         n = put_text(head, n, r.content_type)
@@ -336,13 +346,60 @@ fn write_response(s: &Socket, r: &Response) -> bool {
     n = put_decimal(head, n, r.body.len)
     n = put_text(head, n, Bytes::from_str("\r\n"))
     n = put_text(head, n, r.headers)
-    n = put_text(head, n, Bytes::from_str("Connection: close\r\n\r\n"))
+    let closing = if keep_alive {
+        Bytes::from_str("Connection: keep-alive\r\n\r\n")
+    } else {
+        Bytes::from_str("Connection: close\r\n\r\n")
+    }
+    n = put_text(head, n, closing)
+    if inline_body && r.body.len > 0 {
+        n = put_text(head, n, r.body)
+    }
     let mut ok = socket_write_all(s, head as *const u8, n)
-    dealloc(head)
-    if ok && r.body.len > 0 {
+    if ok && !inline_body && r.body.len > 0 {
         ok = socket_write_all(s, r.body.data, r.body.len)
     }
+    dealloc(head)
     return ok
+}
+
+// Whether the connection can serve another request after this one.
+//
+// HTTP/1.1 keeps it open unless the request says `close`; HTTP/1.0 closes it
+// unless the request asks for `keep-alive`. A malformed or oversized request
+// never reaches this: it answers once and closes.
+fn wants_keep_alive(req: &Request) -> bool {
+    let version_11 = Bytes::from_str("HTTP/1.1")
+    let http11 = req.version().equals(&version_11)
+    let connection = req.header("connection")
+    return match connection {
+        Option::Some(value) => {
+            if http11 {
+                !has_token(value, "close")
+            } else {
+                has_token(value, "keep-alive")
+            }
+        }
+        Option::None => http11,
+    }
+}
+
+// True when a comma-separated header value contains `token`, ignoring case and
+// surrounding spaces. `Connection: keep-alive, Upgrade` names two.
+fn has_token(value: Bytes, token: &str) -> bool {
+    let want = Bytes::from_str(token)
+    let mut rest = value
+    while rest.len > 0 {
+        let end = match rest.find_byte(',' as u8, 0) {
+            Option::Some(i) => i,
+            Option::None => rest.len,
+        }
+        if trim(rest.prefix(end)).equals(&want) {
+            return true
+        }
+        rest = rest.from(end + 1)
+    }
+    return false
 }
 
 // Copies `text` to `buf` at `at`, returning the new end.
@@ -570,47 +627,68 @@ fn dispatch(routes: *const Route, count: usize, req: Request) -> Response {
     return Response::new(if path_seen { 405 } else { 404 })
 }
 
-// Reads one request from `conn`, routes it, and writes the answer.
+// Serves requests on `conn` until the peer closes, the connection goes idle, or
+// the response says close. A keep-alive connection handles all of its requests
+// in one child process, so the cost of `fork` is paid per connection rather than
+// per request.
+//
 // Writes one request log line (`METHOD PATH STATUS DURATIONms`) to stderr unless
 // `UMAY_LOG=off`; a 400 or 413 with no parsed request logs `- - 400 <ms>ms` /
 // `- - 413 <ms>ms`.
 fn handle_connection(conn: &Socket, routes: *const Route, count: usize) {
-    let start_ms = monotonic_ms()
     let buf = alloc(HTTP_MAX_REQUEST as usize)
-    let got = read_request(conn, buf, HTTP_MAX_REQUEST as usize)
-    if got == - 1i64 {
-        dealloc(buf)
-        return
-    }
-    let mut method = Bytes::from_str("-")
-    let mut path = Bytes::from_str("-")
-    let mut res = Response::new(413)
-    if got > 0i64 {
-        let req = parse_request(Bytes::view(buf as *const u8, got as usize))
-        if req.target().is_empty() {
-            res = Response::new(400)
-        } else {
-            method = req.method()
-            path = req.path()
-            if method.len == 0 {
-                method = Bytes::from_str("-")
-            }
-            if path.len == 0 {
-                path = Bytes::from_str("-")
-            }
-            res = dispatch(routes, count, req)
+    // The Date header is the same for every response in a given second, so it is
+    // formatted again only when the second changes.
+    let date = alloc(40)
+    let mut date_second: i64 = -1i64
+    while true {
+        let start_ms = monotonic_ms()
+        let got = read_request(conn, buf, HTTP_MAX_REQUEST as usize)
+        if got == - 1i64 {
+            break
         }
-    }
-    // The response may borrow the request buffer, so it goes out first.
-    let _ = write_response(conn, &res)
-    if log_enabled() {
-        let mut elapsed = monotonic_ms() - start_ms
-        if elapsed < 0i64 {
-            elapsed = 0i64
+        let mut method = Bytes::from_str("-")
+        let mut path = Bytes::from_str("-")
+        let mut res = Response::new(413)
+        let mut keep_alive = false
+        if got > 0i64 {
+            let req = parse_request(Bytes::view(buf as *const u8, got as usize))
+            if req.target().is_empty() {
+                res = Response::new(400)
+            } else {
+                keep_alive = wants_keep_alive(&req)
+                method = req.method()
+                path = req.path()
+                if method.len == 0 {
+                    method = Bytes::from_str("-")
+                }
+                if path.len == 0 {
+                    path = Bytes::from_str("-")
+                }
+                res = dispatch(routes, count, req)
+            }
         }
-        write_request_log(&method, &path, res.status, elapsed)
+        let now = unix_now()
+        if now != date_second {
+            let _ = http_date(now, date)
+            date_second = now
+        }
+        // The response may borrow the request buffer, so it goes out before the
+        // next request overwrites the buffer.
+        let ok = write_response(conn, &res, Bytes::view(date as *const u8, 29usize), keep_alive)
+        if log_enabled() {
+            let mut elapsed = monotonic_ms() - start_ms
+            if elapsed < 0i64 {
+                elapsed = 0i64
+            }
+            write_request_log(&method, &path, res.status, elapsed)
+        }
+        if !ok || !keep_alive {
+            break
+        }
     }
     dealloc(buf)
+    dealloc(date)
 }
 
 // Serves `routes` on `port`, one child process per connection. Returns 1 when
@@ -650,6 +728,10 @@ fn serve(port: u16, routes: *const Route, count: usize) -> i32 {
         if socket_is_closed(&conn) {
             continue
         }
+        // An idle keep-alive connection closes itself after this long, which is
+        // also what lets a child outlive a peer that vanished without a FIN.
+        let _ = socket_set_read_timeout(&conn, 1000)
+        let _ = socket_set_nodelay(&conn)
         let pid = spawn()
         if is_child(pid) {
             umay_ops_restore_signals(sig_state)

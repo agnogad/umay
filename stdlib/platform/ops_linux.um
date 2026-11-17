@@ -1,6 +1,9 @@
 // Linux socket option and signal constants for server operations.
 const UMAY_SOL_SOCKET: i32 = 1
 const UMAY_SO_REUSEADDR: i32 = 2
+const UMAY_SO_RCVTIMEO: i32 = 20
+const UMAY_IPPROTO_TCP: i32 = 6
+const UMAY_TCP_NODELAY: i32 = 1
 const UMAY_SIGSET_BYTES: usize = 128usize
 const UMAY_SIG_BLOCK: i32 = 0
 const UMAY_SIG_SETMASK: i32 = 2

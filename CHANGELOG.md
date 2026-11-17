@@ -9,6 +9,27 @@ implementation-only changes.
 
 ## [Unreleased]
 
+### Added
+
+- **HTTP keep-alive.** A connection now serves its requests in one child
+  process instead of forking per request. HTTP/1.1 keeps the connection open
+  unless the request says `close`, HTTP/1.0 closes unless it asks for
+  `keep-alive`, and a malformed or oversized request answers once and closes.
+  The `Date` header is formatted again only when the second changes, and an idle
+  connection closes after a second so an abandoned peer does not pin a child.
+  - `socket_set_read_timeout` and `socket_set_nodelay` join `stdlib/net.um`,
+    with POSIX (`struct timeval`, `IPPROTO_TCP`/`TCP_NODELAY`) and Winsock
+    (`DWORD`, `SO_RCVTIMEO`) implementations behind them.
+  - Nagle is disabled on accepted connections. With it on, the body written
+    after the head waited for the peer's delayed acknowledgement, so every
+    keep-alive response cost about 41 ms.
+  - A body of up to 4 KB is appended to the head buffer and written with it:
+    one `write` and one segment for an ordinary JSON response.
+  - `GET /api/health` through one keep-alive client: 10,064 requests/s at one
+    client and 60,085 at 64, against 1,441 and 5,286 when every request paid
+    fork and close. Go 1.27.0's `net/http` on the same workload and machine:
+    9,408 and 65,559. Method and caveats in `docs/measurements.md`.
+
 ### Changed
 
 - **A comparison against a literal no longer materialises the literal.** `n < 2`

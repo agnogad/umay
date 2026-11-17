@@ -182,6 +182,42 @@ python3 scripts/bench.py --only fib
 python3 scripts/bench.py --only alloc
 ```
 
+## HTTP requests against Go (2026-11-17)
+
+`examples/http-router.um` on `GET /api/health` (11-byte JSON body) and the same
+four routes written with Go's `net/http`, driven by one Go client (its default
+keep-alive) for 5 s after a 1 s warm-up on an otherwise idle 12-core machine.
+One connection per process on the UMAY side, a goroutine per connection on the
+Go side. Keep-alive on for both; `UMAY_LOG=off`; no request failed.
+
+| Concurrent clients | UMAY, close per request | UMAY, keep-alive | Go | UMAY p50 | Go p50 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1,441 | **10,064** | 9,408 | 0.09 ms | 0.10 ms |
+| 4 | 4,795 | **32,032** | 30,189 | 0.11 ms | 0.12 ms |
+| 16 | 5,645 | **53,219** | 50,736 | 0.24 ms | 0.25 ms |
+| 64 | 5,286 | **60,085** | 65,559 | 0.64 ms | 0.60 ms |
+
+The first column is the same server before keep-alive existed: every request
+paid `fork`, a fresh connection, and a close. Keeping the connection open moves
+that cost from per-request to per-connection and is worth 7x at one client and
+about 10x at 16; from there UMAY and Go are within 10% of each other.
+
+Two details were necessary for the keep-alive numbers, and both are in the
+library rather than in the program:
+
+- **Nagle off on accepted sockets.** A response is a head followed by a body;
+  with Nagle on, the second small write waited for the peer's delayed
+  acknowledgement, and every keep-alive response took ~41 ms. The first
+  keep-alive measurement was 24 requests/s because of it; disabling it on the
+  connection is what made the table above.
+- **A small body appended to its head.** A body of up to 4 KB is copied into the
+  head buffer and written with it, so an ordinary JSON response is one `write`
+  and one segment instead of two.
+
+As always for these numbers: loopback, one machine, and one client design. The
+ratio is what is meant to be checked; the absolute count says nothing about
+another machine.
+
 ## Reproducing
 
 ```sh

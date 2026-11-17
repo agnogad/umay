@@ -153,6 +153,10 @@ fn send_http(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body
     if !body.is_empty() || method == "POST" {
         raw.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
+    // The helper reads to EOF, so ask for a close rather than leave the
+    // connection open under HTTP/1.1 keep-alive. The header goes before the
+    // blank line that ends the head, not after it.
+    raw.push_str("Connection: close\r\n");
     raw.push_str("\r\n");
     raw.push_str(body);
 

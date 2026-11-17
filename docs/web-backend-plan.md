@@ -43,8 +43,12 @@ and runs a program, the same way `phase6_runtime.rs` does.
     — `env_or`/`env_port`, a stderr request log (`UMAY_LOG=off` disables it),
     `SO_REUSEADDR`, and graceful shutdown on SIGTERM/SIGINT (signals blocked,
     `poll` with a 250 ms timeout, in-flight children awaited; Linux and macOS
-    only). HTTP keep-alive is deliberately left out: the reverse proxy holds
-    client connections, and fork-per-connection gains little from it.
+    only). HTTP/1.1 keep-alive is on: a connection serves its requests in one
+    child, HTTP/1.0 requests close as the protocol says, and an idle connection
+    closes after a second. Nagle is off and a body that fits the head's buffer
+    is appended to it, so a response leaves in one write -- with Nagle on, the
+    second small write waited for the peer's delayed acknowledgement and every
+    keep-alive response cost about 40 ms.
 
 Order is the dependency order: 1 → 2 → 3/4 → 5 → 6 → 7; 8 and 9 are
 independent after 2. The capstone is an example app (`examples/web-app.um`):

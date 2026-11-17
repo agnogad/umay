@@ -113,7 +113,9 @@ fn main() -> i32 {
         let req = parse_request(Bytes::view(buf as *const u8, got as usize))
         println_i64(req.body().len as i64)
         let r = Response::new(201).with_type("text/plain").with_headers(Bytes::from_str("X-A: 1\r\n")).with_body(Bytes::from_str("ok"))
-        write_response(&peer, &r)
+        let date = alloc(40)
+        let n = http_date(unix_now(), date)
+        write_response(&peer, &r, Bytes::view(date as *const u8, n), false)
         socket_close(&peer)
         exit(0)
     }
@@ -227,7 +229,7 @@ fn main() -> i32 {
     socket_listen(&server, 4)
     let client = tcp_socket()
     sys_connect(client.fd, addr.bytes as *const u8, address_size() as i32)
-    let req = "GET /users/7 HTTP/1.1\r\nHost: x\r\n\r\n"
+    let req = "GET /users/7 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
     socket_write_all(&client, req as *const u8, byte_len(req as *const u8))
     let peer = socket_accept(&server)
     handle_connection(&peer, routes as *const Route, 4)

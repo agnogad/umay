@@ -31,6 +31,33 @@ fn umay_net_set_reuseaddr(fd: isize) -> bool {
     return rc == 0
 }
 
+// Sets how long a read on `fd` may block, in milliseconds.
+//
+// A keep-alive connection is idle between requests, and without this the child
+// process holding it would live until the peer closed. `struct timeval` is two
+// longs -- seconds then microseconds -- so a 1000 ms timeout is written at the
+// two offsets rather than as one number.
+fn umay_net_set_read_timeout(fd: isize, millis: i32) -> bool {
+    if millis <= 0 {
+        return false
+    }
+    let tv = alloc(16)
+    write_i64(tv, (millis / 1000) as i64)
+    write_i64(unsafe { (tv as usize + 8) as *mut u8 }, ((millis % 1000) * 1000) as i64)
+    let rc = umay_c_setsockopt(fd, UMAY_SOL_SOCKET, UMAY_SO_RCVTIMEO, tv as *const u8, 16)
+    dealloc(tv)
+    return rc == 0
+}
+
+// Disables Nagle's algorithm on a connected socket.
+fn umay_net_set_nodelay(fd: isize) -> bool {
+    let val = alloc(4)
+    write_u32(val, 1u32)
+    let rc = umay_c_setsockopt(fd, UMAY_IPPROTO_TCP, UMAY_TCP_NODELAY, val as *const u8, 4)
+    dealloc(val)
+    return rc == 0
+}
+
 // Nothing to initialise: a POSIX socket library is ready when the process is.
 fn umay_platform_net_start() -> bool {
     return true

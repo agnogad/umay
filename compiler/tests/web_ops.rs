@@ -109,11 +109,14 @@ fn connect_with_retry(port: u16) -> TcpStream {
 }
 
 fn send_http(port: u16, raw: &[u8]) -> String {
+    // These tests read the response to EOF, so the request asks for a close:
+    // an HTTP/1.1 keep-alive connection would wait for a second request instead.
+    let raw = String::from_utf8_lossy(raw).replacen("\r\n\r\n", "\r\nConnection: close\r\n\r\n", 1);
     let mut stream = connect_with_retry(port);
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    stream.write_all(raw).unwrap();
+    stream.write_all(raw.as_bytes()).unwrap();
     stream.flush().unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
@@ -389,7 +392,7 @@ fn main() -> i32 {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     stream
-        .write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();
     stream.flush().unwrap();
 
