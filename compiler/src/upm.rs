@@ -265,7 +265,10 @@ mod tests {
 
     #[test]
     fn roots_are_split_on_the_path_separator() {
-        let roots = split_roots("/a:/b");
+        // `split_paths` uses `;` on Windows and `:` elsewhere, so the joined
+        // form comes from the same API the reader uses.
+        let joined = std::env::join_paths([Path::new("/a"), Path::new("/b")]).expect("join roots");
+        let roots = split_roots(joined.to_str().expect("roots are UTF-8"));
         assert_eq!(roots, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
         assert_eq!(split_roots("/only"), vec![PathBuf::from("/only")]);
     }

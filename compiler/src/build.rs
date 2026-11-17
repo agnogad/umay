@@ -463,8 +463,10 @@ mod tests {
         let path = cache.entry_path(&key, Artifact::ProgramAsm);
         assert!(path.starts_with("/tmp/umay-cache-probe"), "got {}", path.display());
         // The path ends with the full key and the artifact's name, so a reader
-        // can tell what an entry is from its location alone.
-        assert!(path.to_string_lossy().ends_with(&format!("{}/program.s", key.hash)));
+        // can tell what an entry is from its location alone. Compare with `/`
+        // because `to_string_lossy` follows the host's separator on Windows.
+        let shown = path.to_string_lossy().replace('\\', "/");
+        assert!(shown.ends_with(&format!("{}/program.s", key.hash)));
     }
 
     #[test]
