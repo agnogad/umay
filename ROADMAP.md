@@ -930,7 +930,8 @@ is breadth, packaging, and the two known quality gaps.
       rest. Scalar assignments lower directly into those registers, cutting a
       twenty-local loop's `mov` count from 142 to 16. Constants and stack
       operands are staged in scratch registers, and aggregate copies move eight
-      bytes per iteration (an 8 KB copy loop improved 4.3x).
+      bytes per iteration (an 8 KB copy loop improved 4.3x). A final peephole
+      removes fallthrough branches, 64-bit self-moves and inverse move pairs.
 - [ ] **Reproducible release check.** Rebuild an artifact and compare bytes, so
       "the tarball matches the commit" is verified rather than assumed.
 

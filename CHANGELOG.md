@@ -50,8 +50,11 @@ implementation-only changes.
     (`ldrsb`/`ldrsh`/`ldrsw`) so negative values compare and divide correctly.
     Aggregate copies now move eight bytes per iteration with a 4/2/1-byte
     tail; a 2000-iteration 8 KB array copy fell from 0.097 s to 0.022 s in
-    qemu. Calls and aggregate construction still use fixed scratch registers;
-    see [ADR 0015](docs/adr/0015-aarch64-backend.md).
+    qemu. A final peephole removes fallthrough branches, 64-bit self-moves and
+    inverse move pairs; the large web example had 4478/2157/292 such
+    instructions and now has none. Calls and aggregate construction still use
+    fixed scratch registers; see
+    [ADR 0015](docs/adr/0015-aarch64-backend.md).
 - **HTTP(S) `upm` registry.** `UMAY_REGISTRY` now accepts `http://` and
   `https://` roots in a `;`-separated list alongside directories. The client
   reads `<base>/<name>/versions.txt`, downloads

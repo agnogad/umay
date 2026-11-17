@@ -75,7 +75,111 @@ pub fn generate(
         }
     }
     out.push_str(target.object_trailer());
-    Ok(out)
+    Ok(peephole(&out))
+}
+
+/// Removes instructions that cannot change behaviour.
+///
+/// Three patterns account for most of the waste in a large program: a branch to
+/// the label immediately after it, a move from a register to itself, and the
+/// second half of `mov xA, xB; mov xB, xA`. The pass is deliberately textual and
+/// local; it never reorders an instruction or crosses a label.
+fn peephole(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        if is_self_move(line) {
+            index += 1;
+            continue;
+        }
+        if let Some(target) = unconditional_branch(line) {
+            if index + 1 < lines.len() && lines[index + 1].trim() == format!("{target}:") {
+                index += 1;
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+        if let Some((left, right)) = move_pair(line).filter(|(left, _)| left.starts_with('x')) {
+            if index + 1 < lines.len() {
+                if let Some((other_left, other_right)) = move_pair(lines[index + 1]) {
+                    if other_left == right && other_right == left {
+                        index += 2;
+                        continue;
+                    }
+                }
+            }
+        }
+        index += 1;
+    }
+    out
+}
+
+fn move_pair(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim();
+    let rest = line.strip_prefix("mov ")?;
+    let (left, right) = rest.split_once(',')?;
+    let left = left.trim();
+    let right = right.trim();
+    if !is_register(left) || !is_register(right) {
+        return None;
+    }
+    Some((left, right))
+}
+
+fn is_self_move(line: &str) -> bool {
+    if let Some((left, right)) = move_pair(line) {
+        return left.starts_with('x') && left == right;
+    }
+    let line = line.trim();
+    let Some(rest) = line.strip_prefix("fmov ") else {
+        return false;
+    };
+    let Some((left, right)) = rest.split_once(',') else {
+        return false;
+    };
+    let left = left.trim();
+    let right = right.trim();
+    left.starts_with('d') && is_float_register(left) && left == right
+}
+
+fn is_register(text: &str) -> bool {
+    (text.starts_with('x') || text.starts_with('w'))
+        && text[1..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn is_float_register(text: &str) -> bool {
+    (text.starts_with('d') || text.starts_with('s'))
+        && text[1..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn unconditional_branch(line: &str) -> Option<&str> {
+    let line = line.trim();
+    let target = line.strip_prefix("b ")?;
+    if target.starts_with(".L") {
+        Some(target)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod peephole_tests {
+    use super::peephole;
+
+    #[test]
+    fn removes_redundant_local_patterns() {
+        let text = "    mov x19, x19\n    b .L1\n.L1:\n    mov x0, x19\n    mov x19, x0\n    ret\n";
+        assert_eq!(peephole(text), ".L1:\n    mov x0, x19\n    ret\n");
+    }
+
+    #[test]
+    fn keeps_a_branch_when_the_label_is_not_next() {
+        let text = "    b .L1\n    mov x0, #0\n.L1:\n    ret\n";
+        assert_eq!(peephole(text), text);
+    }
 }
 
 fn generate_one(

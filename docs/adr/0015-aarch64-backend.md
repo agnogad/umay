@@ -46,6 +46,11 @@ and `d0`/`d1`, but locals are now allocated:
 - Aggregate copies move eight bytes at a time (`ldr`/`str` with a 4/2/1-byte
   tail) instead of one byte at a time. Copies longer than 16 bytes run as a
   word loop; short copies are unrolled.
+- A final textual peephole removes a branch to the label immediately after it,
+  a 64-bit move from a register to itself, and the second half of an inverse
+  `mov xA, xB; mov xB, xA` pair. A large web example contained 4478
+  fallthrough branches, 2157 inverse move pairs and 292 self-moves before the
+  pass; the current output has none of those patterns.
 
 This keeps code generation local and testable while removing most stack traffic.
 Direct calls still follow AAPCS64.
