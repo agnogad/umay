@@ -275,6 +275,47 @@ fn a_nine_argument_call_uses_the_stack() {
 }
 
 #[test]
+fn float_locals_are_promoted_to_callee_saved_registers() {
+    let dir = scratch("float_promote");
+    let source = "fn main() -> i32 { let mut x: f64 = 0.0; let mut i: i64 = 0; while i < 3 { x = x + 0.5; i = i + 1 }; return x as i32 }\n";
+    let asm = asm_for(&dir, source).expect("float loop assembly");
+    assert!(asm.contains("stp d8, d9"), "the prologue must save d8:\n{asm}");
+    assert!(
+        asm.contains("fmov d0, d8") && asm.contains("fmov d8, d0"),
+        "the float local must stay in d8 instead of a stack slot:\n{asm}"
+    );
+    assemble(&dir, &asm);
+}
+
+#[test]
+fn a_ninth_float_argument_does_not_clobber_a_promoted_parameter() {
+    let dir = scratch("nine_floats");
+    let source = "fn sum(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64) -> f64 { return a+b+c+d+e+f+g+h+i }\nfn main() -> i32 { return sum(1.0f64,2.0f64,3.0f64,4.0f64,5.0f64,6.0f64,7.0f64,8.0f64,6.0f64) as i32 }\n";
+    let asm = asm_for(&dir, source).expect("nine-float assembly");
+    assert!(
+        asm.contains("ldr d0, [x29, #16]") && asm.contains("str d0, [x11]"),
+        "the stack argument must use d0, not a promoted parameter register:\n{asm}"
+    );
+    assert!(
+        !asm.contains("ldr d12, [x29, #16]"),
+        "d12 may hold parameter e and must not be the stack scratch:\n{asm}"
+    );
+    assemble(&dir, &asm);
+}
+
+#[test]
+fn float_values_reach_aggregate_fields_from_v_registers() {
+    let dir = scratch("float_fields");
+    let source = "struct S { a: f64, b: f64 }\nenum E { V(f64), N }\nfn main() -> i32 { let x = 1.5f64; let t = (x, 2.5f64); let s = S { a: x, b: 2.5f64 }; let e = E::V(x); let a = [x; 2]; return (t.0 + t.1 + s.a + s.b + a[0]) as i32 }\n";
+    let asm = asm_for(&dir, source).expect("float aggregate assembly");
+    assert!(
+        asm.contains("str d0, [x11]"),
+        "float fields must be stored from a `v` register:\n{asm}"
+    );
+    assemble(&dir, &asm);
+}
+
+#[test]
 fn windows_assembly_is_a_coff_arm64_object() {
     let dir = scratch("winarm");
     let source = "fn main() -> i32 { println(\"win-arm\"); return 42 }\n";

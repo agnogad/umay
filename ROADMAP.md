@@ -910,8 +910,9 @@ is breadth, packaging, and the two known quality gaps.
       `aarch64-w64-mingw32` emits COFF ARM64, links with llvm-mingw, and a
       native Windows ARM64 CI job runs the PE. The release workflow builds
       `aarch64-linux-musl`, `aarch64-darwin` and `aarch64-windows` artifacts.
-      Scalar locals are promoted to `x19`-`x28`, cutting a tight loop's qemu
-      time roughly in half; a full register allocator remains. See
+      Integer locals are promoted to `x19`-`x28` and float locals to
+      `d8`-`d15`, cutting a tight integer loop's qemu time roughly in half; a
+      full register allocator remains. See
       [ADR 0015](docs/adr/0015-aarch64-backend.md).
 - [x] **Hosted `upm` registry.** `UMAY_REGISTRY` accepts `;`-separated HTTP(S)
       base URLs alongside directories. The client reads `versions.txt`,
@@ -922,10 +923,10 @@ is breadth, packaging, and the two known quality gaps.
       top of the existing archives, with the same checksum gate.
 - [ ] **Close E0208.** Field-wise borrow liveness rejects some generated
       programs that are sound. The long fuzz run stays manual until it does not.
-- [~] **Register-allocation quality.** Scalar locals are promoted to
-      callee-saved registers when their address is never taken, which halves a
-      tight loop's qemu time. A full allocator for intermediates, floats and
-      aggregates is still open.
+- [~] **Register-allocation quality.** Integer and float locals are promoted
+      to callee-saved registers when their address is never taken; this halves
+      a tight integer loop's qemu time and removes a float loop's stack traffic.
+      A full allocator for intermediates and aggregates is still open.
 - [ ] **Reproducible release check.** Rebuild an artifact and compare bytes, so
       "the tarball matches the commit" is verified rather than assumed.
 

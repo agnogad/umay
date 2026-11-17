@@ -109,7 +109,7 @@ fn generate_one(
     };
     let needs_sret = is_aggregate(types.kind(body.ret_ty)) && ret_size > 16;
     let (offsets, frame, sret_offset) = frame_layout(body, types, hir, needs_sret)?;
-    let local_reg = promote_locals(body, types);
+    let (local_reg, local_freg) = promote_locals(body, types);
 
     let mut emitter = Emitter {
         out: String::new(),
@@ -125,7 +125,9 @@ fn generate_one(
         hir,
         sret_offset,
         saved_regs: local_reg.iter().flatten().copied().collect(),
+        saved_fregs: local_freg.iter().flatten().copied().collect(),
         local_reg,
+        local_freg,
     };
 
     let _ = writeln!(emitter.out, ".p2align 2");
@@ -152,6 +154,17 @@ fn generate_one(
             }
             [a] => {
                 let _ = writeln!(emitter.out, "    stp x{a}, xzr, [sp, #-16]!");
+            }
+            _ => {}
+        }
+    }
+    for chunk in emitter.saved_fregs.clone().chunks(2) {
+        match chunk {
+            [a, b] => {
+                let _ = writeln!(emitter.out, "    stp d{a}, d{b}, [sp, #-16]!");
+            }
+            [a] => {
+                let _ = writeln!(emitter.out, "    str d{a}, [sp, #-16]!");
             }
             _ => {}
         }
@@ -220,7 +233,9 @@ struct Emitter<'a> {
     hir: &'a Hir,
     sret_offset: Option<u32>,
     local_reg: Vec<Option<u8>>,
+    local_freg: Vec<Option<u8>>,
     saved_regs: Vec<u8>,
+    saved_fregs: Vec<u8>,
 }
 
 impl Emitter<'_> {
@@ -250,8 +265,20 @@ impl Emitter<'_> {
                             self.copy_aggregate(place, source, size)?;
                             return Ok(());
                         }
-                        self.operand(operand, 0)?;
-                        self.normalize(place_ty)?;
+                        if self.is_float(place_ty) {
+                            if matches!(operand, Operand::Constant(Constant::Unit)) {
+                                return Ok(());
+                            }
+                            self.operand_float(
+                                operand,
+                                0,
+                                matches!(self.types.kind(place_ty), TyKind::F64),
+                            )?;
+                            float_result = true;
+                        } else {
+                            self.operand(operand, 0)?;
+                            self.normalize(place_ty)?;
+                        }
                     }
                     Rvalue::Binary { op, lhs, rhs } => {
                         let lhs_ty = self.operand_ty(lhs);
@@ -277,27 +304,27 @@ impl Emitter<'_> {
                         }
                     }
                     Rvalue::Unary { op, operand } => {
-                        self.operand(operand, 0)?;
+                        let float_operand = self
+                            .operand_ty(operand)
+                            .map(|ty| self.is_float(ty))
+                            .unwrap_or(false);
                         match op {
-                            UnOp::Neg => {
-                                if self
+                            UnOp::Neg if float_operand => {
+                                let float64 = self
                                     .operand_ty(operand)
-                                    .map(|ty| self.is_float(ty))
-                                    .unwrap_or(false)
-                                {
-                                    let float64 = self
-                                        .operand_ty(operand)
-                                        .map(|ty| matches!(self.types.kind(ty), TyKind::F64))
-                                        .unwrap_or(false);
-                                    self.operand_float(operand, 0, float64)?;
-                                    let prefix = if float64 { "d" } else { "s" };
-                                    let _ = writeln!(self.out, "    fneg {prefix}0, {prefix}0");
-                                    float_result = true;
-                                } else {
-                                    let _ = writeln!(self.out, "    neg x0, x0");
-                                }
+                                    .map(|ty| matches!(self.types.kind(ty), TyKind::F64))
+                                    .unwrap_or(false);
+                                self.operand_float(operand, 0, float64)?;
+                                let prefix = if float64 { "d" } else { "s" };
+                                let _ = writeln!(self.out, "    fneg {prefix}0, {prefix}0");
+                                float_result = true;
+                            }
+                            UnOp::Neg => {
+                                self.operand(operand, 0)?;
+                                let _ = writeln!(self.out, "    neg x0, x0");
                             }
                             UnOp::Not => {
+                                self.operand(operand, 0)?;
                                 if matches!(
                                     self.operand_ty(operand).map(|t| self.types.kind(t)),
                                     Some(TyKind::Bool)
@@ -432,10 +459,14 @@ impl Emitter<'_> {
         let element = self.element(ty)?;
         let size = self.size_of(element)?;
         let aggregate = is_aggregate(self.types.kind(element));
+        let float = self.is_float(element);
+        let float64 = matches!(self.types.kind(element), TyKind::F64);
         let label = self.label();
         if aggregate {
             self.operand_address(operand)?;
             let _ = writeln!(self.out, "    mov x13, x11");
+        } else if float {
+            self.operand_float(operand, 0, float64)?;
         } else {
             self.operand(operand, 0)?;
         }
@@ -456,7 +487,12 @@ impl Emitter<'_> {
             self.emit_mov_u64(12, size)?;
             let _ = writeln!(self.out, "    mul x12, x10, x12");
             let _ = writeln!(self.out, "    add x11, x14, x12");
-            self.store_at(element, 0)?;
+            if float {
+                let kind = if float64 { "d" } else { "s" };
+                let _ = writeln!(self.out, "    str {kind}0, [x11]");
+            } else {
+                self.store_at(element, 0)?;
+            }
         }
         let _ = writeln!(self.out, "    add x10, x10, #1");
         let _ = writeln!(self.out, "    b .L{label}");
@@ -517,6 +553,12 @@ impl Emitter<'_> {
             let _ = writeln!(self.out, "    mov x13, x11");
             let _ = writeln!(self.out, "    mov x11, x9");
             self.copy_bytes(13, size)?;
+        } else if self.is_float(ty) {
+            let kind = if matches!(self.types.kind(ty), TyKind::F64) { "d" } else { "s" };
+            self.operand_float(operand, 0, kind == "d")?;
+            let _ = writeln!(self.out, "    mov x11, x{base}");
+            self.add_to_address(offset)?;
+            let _ = writeln!(self.out, "    str {kind}0, [x11]");
         } else {
             self.operand(operand, 0)?;
             let _ = writeln!(self.out, "    mov x11, x{base}");
@@ -701,6 +743,17 @@ impl Emitter<'_> {
                 } else {
                     let _ = writeln!(self.out, "    mov x0, #0");
                 }
+                for chunk in self.saved_fregs.chunks(2).rev() {
+                    match chunk {
+                        [a, b] => {
+                            let _ = writeln!(self.out, "    ldp d{a}, d{b}, [sp], #16");
+                        }
+                        [a] => {
+                            let _ = writeln!(self.out, "    ldr d{a}, [sp], #16");
+                        }
+                        _ => {}
+                    }
+                }
                 for chunk in self.saved_regs.chunks(2).rev() {
                     match chunk {
                         [a, b] => {
@@ -767,10 +820,14 @@ impl Emitter<'_> {
                     self.copy_from_pointer(location.regs[0], index, location.size)?;
                 }
                 ArgKind::Float => {
-                    self.local_address(index, 11)?;
                     let reg = location.freg.unwrap();
                     let kind = if location.float64 { "d" } else { "s" };
-                    let _ = writeln!(self.out, "    str {kind}{reg}, [x11]");
+                    if let Some(local) = self.local_freg[index] {
+                        let _ = writeln!(self.out, "    fmov {kind}{local}, {kind}{reg}");
+                    } else {
+                        self.local_address(index, 11)?;
+                        let _ = writeln!(self.out, "    str {kind}{reg}, [x11]");
+                    }
                 }
                 ArgKind::Hfa => {
                     let hfa = location.hfa.as_ref().unwrap();
@@ -815,9 +872,16 @@ impl Emitter<'_> {
                 }
                 ArgKind::Float => {
                     let kind = if location.float64 { "d" } else { "s" };
-                    self.local_address(index, 11)?;
-                    let _ = writeln!(self.out, "    ldr {kind}12, [x29, #{from}]");
-                    let _ = writeln!(self.out, "    str {kind}12, [x11]");
+                    // `d0`-`d7` are free here: every register argument has
+                    // already been stored, and `d8`-`d15` may hold promoted
+                    // parameters that must survive this copy.
+                    let _ = writeln!(self.out, "    ldr {kind}0, [x29, #{from}]");
+                    if let Some(local) = self.local_freg[index] {
+                        let _ = writeln!(self.out, "    fmov {kind}{local}, {kind}0");
+                    } else {
+                        self.local_address(index, 11)?;
+                        let _ = writeln!(self.out, "    str {kind}0, [x11]");
+                    }
                 }
                 ArgKind::Hfa => {
                     let hfa = location.hfa.as_ref().unwrap();
@@ -826,10 +890,10 @@ impl Emitter<'_> {
                         let _ = writeln!(self.out, "    mov x11, x13");
                         self.add_to_address(*offset)?;
                         let kind = if location.float64 { "d" } else { "s" };
-                        let _ = writeln!(self.out, "    ldr {kind}12, [x11]");
+                        let _ = writeln!(self.out, "    ldr {kind}0, [x11]");
                         self.local_address(index, 11)?;
                         self.add_to_address(*offset)?;
-                        let _ = writeln!(self.out, "    str {kind}12, [x11]");
+                        let _ = writeln!(self.out, "    str {kind}0, [x11]");
                     }
                 }
             }
@@ -909,9 +973,11 @@ impl Emitter<'_> {
                     let _ = writeln!(self.out, "    str x11, [sp, #{stack}]");
                 }
                 ArgKind::Float => {
-                    self.operand_float(arg, 12, location.float64)?;
+                    // Register arguments are emitted after this, so `d0` is
+                    // free and cannot clobber a promoted caller local.
+                    self.operand_float(arg, 0, location.float64)?;
                     let kind = if location.float64 { "d" } else { "s" };
-                    let _ = writeln!(self.out, "    str {kind}12, [sp, #{stack}]");
+                    let _ = writeln!(self.out, "    str {kind}0, [sp, #{stack}]");
                 }
                 ArgKind::Hfa => {
                     let hfa = location.hfa.as_ref().unwrap();
@@ -921,14 +987,13 @@ impl Emitter<'_> {
                         let _ = writeln!(self.out, "    mov x11, x13");
                         self.add_to_address(*offset)?;
                         let kind = if location.float64 { "d" } else { "s" };
-                        let _ = writeln!(self.out, "    ldr {kind}12, [x11]");
+                        let _ = writeln!(self.out, "    ldr {kind}0, [x11]");
                         if stack + offset <= 4095 {
-                            let _ =
-                                writeln!(self.out, "    str {kind}12, [sp, #{}]", stack + offset);
+                            let _ = writeln!(self.out, "    str {kind}0, [sp, #{}]", stack + offset);
                         } else {
                             self.emit_mov_u64(12, stack + offset)?;
                             let _ = writeln!(self.out, "    add x12, sp, x12");
-                            let _ = writeln!(self.out, "    str {kind}12, [x12]");
+                            let _ = writeln!(self.out, "    str {kind}0, [x12]");
                         }
                     }
                 }
@@ -1279,7 +1344,9 @@ impl Emitter<'_> {
                 }
                 Ok(())
             }
-            _ => Err("a floating-point argument must be a float value".into()),
+            other => Err(format!(
+                "a floating-point argument must be a float value, found {other:?}"
+            )),
         }
     }
 
@@ -1297,15 +1364,29 @@ impl Emitter<'_> {
     }
 
     fn load_float(&mut self, place: &Place, freg: u8, float64: bool) -> Result<(), String> {
-        self.address_of(place)?;
         let kind = if float64 { "d" } else { "s" };
+        if place.projection.is_empty() {
+            if let Some(local) = self.local_freg[place.local.0 as usize] {
+                if local != freg {
+                    let _ = writeln!(self.out, "    fmov {kind}{freg}, {kind}{local}");
+                }
+                return Ok(());
+            }
+        }
+        self.address_of(place)?;
         let _ = writeln!(self.out, "    ldr {kind}{freg}, [x11]");
         Ok(())
     }
 
     fn store_float_result(&mut self, destination: &Place, float64: bool) -> Result<(), String> {
-        self.address_of(destination)?;
         let kind = if float64 { "d" } else { "s" };
+        if destination.projection.is_empty() {
+            if let Some(local) = self.local_freg[destination.local.0 as usize] {
+                let _ = writeln!(self.out, "    fmov {kind}{local}, {kind}0");
+                return Ok(());
+            }
+        }
+        self.address_of(destination)?;
         let _ = writeln!(self.out, "    str {kind}0, [x11]");
         Ok(())
     }
@@ -1498,10 +1579,14 @@ impl Emitter<'_> {
 
     /// Computes the address of `place` into `x11`.
     fn address_of(&mut self, place: &Place) -> Result<(), String> {
-        if place.projection.is_empty() && self.local_reg[place.local.0 as usize].is_some() {
-            return Err(
-                "the AArch64 backend tried to take the address of a register-promoted local".into(),
-            );
+        if place.projection.is_empty()
+            && (self.local_reg[place.local.0 as usize].is_some()
+                || self.local_freg[place.local.0 as usize].is_some())
+        {
+            return Err(format!(
+                "the AArch64 backend tried to take the address of register-promoted local {}",
+                place.local.0
+            ));
         }
         let mut ty = self.body.local(place.local).ty;
         self.local_address(place.local.0 as usize, 11)?;
@@ -1999,7 +2084,10 @@ impl Emitter<'_> {
 /// never taken and no projected place names it. That covers counters, indices
 /// and scalar temporaries, which are the values that otherwise pay two stack
 /// accesses each. Aggregates, floats and address-taken values stay in memory.
-fn promote_locals(body: &Body, types: &TyCtxt) -> Vec<Option<u8>> {
+fn promote_locals(
+    body: &Body,
+    types: &TyCtxt,
+) -> (Vec<Option<u8>>, Vec<Option<u8>>) {
     let mut address_taken = vec![false; body.locals.len()];
     let mut projected = vec![false; body.locals.len()];
     for block in &body.blocks {
@@ -2011,24 +2099,27 @@ fn promote_locals(body: &Body, types: &TyCtxt) -> Vec<Option<u8>> {
         }
         scan_terminator(&block.terminator, &mut address_taken, &mut projected);
     }
-    let mut next = 19u8;
+    let mut next_int = 19u8;
+    let mut next_float = 8u8;
     let mut promoted = vec![None; body.locals.len()];
+    let mut promoted_float = vec![None; body.locals.len()];
     for (index, local) in body.locals.iter().enumerate() {
-        if next > 28 {
-            break;
-        }
         if address_taken[index] || projected[index] {
             continue;
         }
-        if is_promotable(types.kind(local.ty)) {
-            promoted[index] = Some(next);
-            next += 1;
+        let kind = types.kind(local.ty);
+        if is_promotable_int(kind) && next_int <= 28 {
+            promoted[index] = Some(next_int);
+            next_int += 1;
+        } else if is_promotable_float(kind) && next_float <= 15 {
+            promoted_float[index] = Some(next_float);
+            next_float += 1;
         }
     }
-    promoted
+    (promoted, promoted_float)
 }
 
-fn is_promotable(kind: &TyKind) -> bool {
+fn is_promotable_int(kind: &TyKind) -> bool {
     matches!(
         kind,
         TyKind::Bool
@@ -2050,6 +2141,10 @@ fn is_promotable(kind: &TyKind) -> bool {
             | TyKind::FnPtr { .. }
             | TyKind::IntVar(_)
     )
+}
+
+fn is_promotable_float(kind: &TyKind) -> bool {
+    matches!(kind, TyKind::F32 | TyKind::F64)
 }
 
 fn scan_place(place: &Place, _address_taken: &mut [bool], projected: &mut [bool]) {

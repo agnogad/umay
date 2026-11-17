@@ -100,7 +100,8 @@ OPTIONS:
     -O0 .. -O3             Optimisation level for build, run and asm (-O = -O2)
     --target <triple>      Build for another system (x86_64-unknown-linux-gnu,
                            x86_64-apple-darwin, x86_64-pc-windows-gnu,
-                           aarch64-unknown-linux-gnu — asm only for now)
+                           aarch64-unknown-linux-gnu, aarch64-apple-darwin,
+                           aarch64-w64-mingw32)
     --emit-object-only     Also leave the object in dist/ (build, asm)
 
 EXIT CODES:

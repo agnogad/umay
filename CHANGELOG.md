@@ -35,10 +35,12 @@ implementation-only changes.
   - `aarch64-w64-mingw32` emits COFF ARM64, links with llvm-mingw and produces
     a console PE. A native `windows-11-arm` CI job runs the result, and the
     `aarch64-windows` archive is published on tags.
-  - Scalar locals whose address is not taken are promoted to `x19`-`x28` with a
-    save/restore prologue. A three-million iteration loop halved under qemu
-    (0.064 s to 0.030 s median), with stack loads and stores falling from 21 to
-    2. A full allocator is still future work; see
+  - Scalar locals whose address is not taken are promoted to `x19`-`x28`, and
+    float locals to `d8`-`d15`, with a save/restore prologue. A three-million
+    iteration integer loop halved under qemu (0.064 s to 0.030 s median), with
+    stack loads and stores falling from 21 to 2. A float loop fell from 0.076 s
+    to 0.071 s. Stack-argument staging uses `d0`, so it cannot clobber a
+    promoted parameter. A full allocator is still future work; see
     [ADR 0015](docs/adr/0015-aarch64-backend.md).
 - **HTTP(S) `upm` registry.** `UMAY_REGISTRY` now accepts `http://` and
   `https://` roots in a `;`-separated list alongside directories. The client

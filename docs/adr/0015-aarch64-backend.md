@@ -94,12 +94,14 @@ needs no cross C library.
   aggregate that is not homogeneous (for example `{ i64, f64 }`) still travels
   through the integer-register path; UMAY's own calls agree on that, but it is
   not AAPCS64 C interop.
-- **No full register allocator.** Scalar locals are promoted to callee-saved
-  registers when their address is never taken and no projected place names
-  them. Values still pass through `x0`/`x1` or `d0`/`d1`, and floats,
+- **No full register allocator.** Integer and float locals are promoted to
+  callee-saved registers when their address is never taken and no projected
+  place names them. Values still pass through `x0`/`x1` or `d0`/`d1`, and
   aggregates and address-taken locals remain in stack slots. On a three-million
-  iteration loop the promotion roughly halved qemu wall time (0.064 s to
-  0.030 s median) and reduced the loop's stack loads and stores from 21 to 2.
+  iteration integer loop the promotion roughly halved qemu wall time (0.064 s
+  to 0.030 s median) and reduced the loop's stack loads and stores from 21 to
+  2. A float loop improved from 0.076 s to 0.071 s: its stack traffic also
+  disappeared, but the remaining arithmetic dominates.
 - **Windows ARM64 C aggregate calls follow Microsoft's ABI, not AAPCS64's
   HFA rule.** UMAY-to-UMAY calls are internally consistent. The runtime's
   external calls pass scalars, so startup, file and console calls are not
