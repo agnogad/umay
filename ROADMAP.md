@@ -795,7 +795,7 @@ touch the frontend at all.
 
 ### Verified, and not yet verified
 
-- [x] Linux is unchanged: the test suite passes (752 tests at the last count), and the Linux assembly is
+- [x] Linux is unchanged: the test suite passes (754 tests at the last count), and the Linux assembly is
       asserted to carry no symbol prefix and to keep its ELF metadata.
 - [x] macOS and Windows assembly is accepted by a real assembler for its object
       format, and the produced object is a Mach-O 64 / x86-64 COFF file with
@@ -808,12 +808,12 @@ touch the frontend at all.
       its crash was a Win64 ABI bug in the prologue, which read the hidden
       struct-return pointer from `%rdi` (SysV) instead of `%rcx` (Win64).
       `win64_struct_return_through_hidden_pointer_runs` pins the fix.
-- [ ] **macOS: a linked, running binary is not yet verified on this host.**
-      Linux has no Apple SDK. CI has a `macos-15-intel` job that links and runs a
-      small program on a real Mac; its result is the remaining check. As of
-      2026-11-17 no run exists for the pushed branch: `ci.yml` triggers only on
-      pushes to `main`, tags and pull requests, and a PR to `main` has not been
-      opened, so the job has never executed on the remaining-work branch.
+- [x] **macOS: a linked, running binary is verified in CI.** A `macos-15-intel`
+      job links the emitted x86_64 objects with Apple's linker and runs a small
+      program; the check passed in run `44040427906`. The failures that blocked
+      it were real: arm64 runners could not link x86_64 objects, Mach-O C calls
+      lacked their leading underscore, and the linker needed the object
+      architecture before its inputs. All three are fixed and pinned by tests.
 
 ---
 
