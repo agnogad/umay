@@ -890,6 +890,28 @@ compiler passes the same test corpus.
 
 ---
 
+## Production follow-ups (after 0.3.1)
+
+The compiler and the three x86_64 release artifacts are in place. What remains
+is breadth, packaging, and the two known quality gaps.
+
+- [ ] **ARM64.** A second backend and a native Apple Silicon build. Until then
+      the support matrix is x86_64 only and the README says so.
+- [ ] **Hosted `upm` registry.** The fetcher, version choice and content hash
+      already work against a directory. A network registry is a transport layer
+      over the same code, not a second resolver.
+- [ ] **Package-manager distribution.** Homebrew, Scoop, and an AUR package on
+      top of the existing archives, with the same checksum gate.
+- [ ] **Close E0208.** Field-wise borrow liveness rejects some generated
+      programs that are sound. The long fuzz run stays manual until it does not.
+- [ ] **Register-allocation quality.** The runtime-speed comparison is the
+      measurable score; the named work is keeping intermediates in registers
+      instead of storing and reloading them.
+- [ ] **Reproducible release check.** Rebuild an artifact and compare bytes, so
+      "the tarball matches the commit" is verified rather than assumed.
+
+---
+
 ## Rules that do not relax
 
 - No LLVM or Cranelift in the production backend.

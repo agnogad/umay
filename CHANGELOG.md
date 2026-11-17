@@ -7,6 +7,24 @@ specification carries its own version (`v1.0`), which moves only when the
 language surface changes; the compiler's package version can move for
 implementation-only changes.
 
+## [Unreleased]
+
+### Added
+
+- **Installer.** `install.sh` downloads the latest release for Linux x86_64 or
+  Intel macOS, verifies its SHA-256, and installs `umay` to `~/.local/bin`
+  (overridable with `UMAY_INSTALL_DIR`). Windows users install from the zip.
+- **Project policies.** `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue forms for
+  bugs and feature requests, and a pull-request checklist.
+- **Clippy is clean and gated.** `cargo clippy --all-targets -- -D warnings`
+  passes; CI and `scripts/release.sh` run it before a build.
+
+### Changed
+
+- **Support matrix is explicit.** README and the roadmap say x86_64 only:
+  static Linux, Intel macOS, and Windows. ARM64 and native Apple Silicon are a
+  planned follow-up, not a current target.
+
 ## [0.3.1] — 2026-11-17
 
 ### Added

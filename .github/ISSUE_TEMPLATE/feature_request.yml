@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a language, compiler, standard library, or tooling change
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can you not do today? Keep it concrete.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change, and what should it look like from a user's side?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Project rules
+      options:
+        - label: The proposal does not require weakening memory safety.
+        - label: The proposal can be verified by a test.

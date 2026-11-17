@@ -82,6 +82,11 @@ COFF object but cannot link it without an Apple SDK or a MinGW-w64 runtime.
 Only x86_64 has a backend, so an ARM triple is refused with an explanation
 rather than emitting a binary nothing can load.
 
+**Host support.** Prebuilt binaries are x86_64 only: static Linux (musl),
+Intel macOS, and Windows (MinGW). There is no ARM64 backend yet, so an ARM
+triple is refused rather than producing a binary the loader rejects. On Apple
+Silicon the macOS binary runs under Rosetta.
+
 Every program is linked against a runtime written in UMAY itself, and the prelude
 and the first library types are UMAY source too, so a program can print, allocate
 build strings and read and write files without importing anything:
@@ -159,6 +164,20 @@ runs a small binary. See `ROADMAP.md` Phase 10 for the exact status.
 
 See [ROADMAP.md](ROADMAP.md) for the detailed milestone plan and
 [docs/](docs/) for the specifications this implementation is held to.
+
+## Installing
+
+Linux x86_64 and Intel macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/agnogad/umay/main/install.sh | sh
+```
+
+The installer reads the latest release, verifies the archive's SHA-256, and
+installs `umay` into `~/.local/bin`. Set `UMAY_VERSION` to pin a release or
+`UMAY_INSTALL_DIR` to choose another destination. On Windows, download the
+`x86_64-windows` zip from the [releases page](https://github.com/agnogad/umay/releases)
+and put `umay.exe` on `PATH`. Each archive has a sibling `.sha256` file.
 
 ## What works today
 

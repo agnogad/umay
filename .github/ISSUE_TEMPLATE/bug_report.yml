@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a compiler bug or a wrong program result
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security problems here. See SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: UMAY version
+      description: Output of `umay version`.
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Host system and target
+      description: OS, architecture, and the `--target` triple if one was used.
+    validations:
+      required: true
+  - type: textarea
+    id: program
+    attributes:
+      label: Minimal program
+      description: The smallest UMAY source that shows the problem.
+      render: umay
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The command you ran.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: What happened. Include the full diagnostic or program output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
