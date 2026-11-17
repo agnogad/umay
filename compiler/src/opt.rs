@@ -307,13 +307,18 @@ fn fold_rvalue(value: &Rvalue, types: &TyCtxt) -> Option<Rvalue> {
         Rvalue::Unary { op, operand } => {
             let v = const_int(operand)?;
             let ty = const_ty(operand)?;
+            let kind = types.kind(ty);
+            let signed = types.is_signed(ty);
             let result = match op {
-                UnOp::Neg => v.checked_neg()?,
+                // Fold at the value's own width. `!255u8` is 0, not -256: a
+                // bitwise not computed in the i128 scratch integer has to be
+                // truncated back to u8 before a later cast widens it.
+                UnOp::Neg => truncate_to(v.wrapping_neg(), kind, signed),
                 UnOp::Not => {
-                    if matches!(types.kind(ty), crate::types::TyKind::Bool) {
+                    if matches!(kind, crate::types::TyKind::Bool) {
                         if v == 0 { 1 } else { 0 }
                     } else {
-                        !v
+                        truncate_to(!v, kind, signed)
                     }
                 }
             };

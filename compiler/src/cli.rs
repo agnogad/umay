@@ -563,6 +563,8 @@ fn cmd_doctor(_args: &[String]) -> u8 {
     println!("  cache writable   : {}", if cache_ok { "yes" } else { "NO (check permissions)" });
     let (entries, bytes) = umayc::build::Cache::open().stats();
     println!("  cache entries    : {entries} ({})", human_bytes(bytes));
+    let cap = umayc::build::cache_max_bytes();
+    println!("  cache limit      : {}", if cap == u64::MAX { "unlimited".to_string() } else { human_bytes(cap) });
     let roots = umayc::upm::registry_roots();
     if roots.is_empty() {
         println!("  registry         : none (set UMAY_REGISTRY to fetch dependencies)");
@@ -1206,10 +1208,16 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         // Link with the C compiler driver, which knows where the C library and
         // crt objects live. Nothing else from C is used.
         let mut link = std::process::Command::new(target.linker);
+        // Driver-wide flags must precede the inputs: `-arch` selects the
+        // slice of the implicit C library as well as the output architecture.
+        // This backend is x86_64-only even when the host is arm64.
+        if target.triple.contains("darwin") {
+            link.arg("-arch").arg("x86_64");
+        }
         link.arg("-o").arg(&exe_path).arg(&obj_path).arg(&runtime_obj);
-        // The driver's own flags: `-no-pie` on Linux ELF, `-mconsole` on
-        // Windows PE, nothing on Mach-O. Passing the wrong one is a hard
-        // linker error rather than a warning.
+        // The driver's own flags: `-no-pie` on Linux ELF, `-lSystem` on macOS,
+        // `-mconsole` and `-lws2_32` on Windows PE. Passing the wrong one is a
+        // hard linker error rather than a warning.
         for flag in target.linker_flags() {
             link.arg(flag);
         }

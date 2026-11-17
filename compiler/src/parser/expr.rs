@@ -526,14 +526,19 @@ impl Parser {
 
     /// Heuristic for distinguishing `f::<T>()`-style generics from `<` comparison.
     /// UMAY requires `<` in expression position to be followed by a type-ish
-    /// token to be treated as generic arguments.
+    /// token to be treated as generic arguments. Every token up to the closing
+    /// `>` must also be type-ish: without that check a `<` comparison can pick
+    /// up a `>` from a later expression or statement (e.g.
+    /// `while x < 6i32 ... { ... return a > (b) }`).
     fn looks_like_generic_args(&self) -> bool {
         if !self.at(&TokenKind::Lt) {
             return false;
         }
         // Scan forward: generic args must be closed by `>` followed by one of
-        // `(`, `::`, `{`, or `,`/`)` (in type position).
+        // `(`, `::`, `{`. Anything that cannot appear in a type ends the scan.
         let mut depth = 0i32;
+        let mut parens = 0i32;
+        let mut brackets = 0i32;
         let mut i = 1;
         let limit = 64;
         while i < limit {
@@ -548,8 +553,45 @@ impl Parser {
                     }
                     depth -= 1;
                 }
-                TokenKind::Eof | TokenKind::Semi => return false,
-                _ => {}
+                // A `)` or `]` that closes a group opened before the `<` means
+                // this `<` was a comparison: `(p < q) > r` must not be read as
+                // `p<q>(...)`. A group opened inside the generic arguments is
+                // fine, as in `f<(i32, i32)>()` or `f<[u8; 4]>()`.
+                TokenKind::LParen => parens += 1,
+                TokenKind::RParen => {
+                    if parens == 0 {
+                        return false;
+                    }
+                    parens -= 1;
+                }
+                TokenKind::LBracket => brackets += 1,
+                TokenKind::RBracket => {
+                    if brackets == 0 {
+                        return false;
+                    }
+                    brackets -= 1;
+                }
+                // Tokens accepted by `parse_type` (items.rs). Presence of any
+                // other token means this `<` is a comparison operator.
+                TokenKind::Ident(_)
+                | TokenKind::Amp
+                | TokenKind::Star
+                | TokenKind::Comma
+                | TokenKind::Colon
+                | TokenKind::ColonColon
+                | TokenKind::Arrow
+                | TokenKind::Underscore
+                | TokenKind::Bang
+                | TokenKind::Keyword(
+                    Keyword::Fn
+                    | Keyword::Impl
+                    | Keyword::Dyn
+                    | Keyword::Mut
+                    | Keyword::Const
+                    | Keyword::SelfValue
+                    | Keyword::SelfType
+                ) => {}
+                _ => return false,
             }
             i += 1;
         }

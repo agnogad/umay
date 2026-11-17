@@ -9,6 +9,8 @@ implementation-only changes.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-17
+
 ### Added
 
 - **Cross-target compilation.** `--target` selects the system to emit code for;
@@ -129,7 +131,83 @@ implementation-only changes.
   a real assembler for its object format and yields the right object kind with
   `_main` defined, and that the Linux output did not change.
 
+### Added
+
+- **GitHub Actions CI.** Every push and pull request runs `cargo test --locked`
+  and a release build. Tagged `v*` releases additionally build the checksummed
+  artifact with `scripts/release.sh` and keep it as a workflow artifact.
+- **A `LICENSE` file.** `Cargo.toml` declared `MIT OR Apache-2.0`, but the texts
+  were not in the repository or the release tarball. Both are now included.
+
 ### Fixed
+
+- **The differential generator stopped creating conflicting assignments.**
+  It emitted `s.f = f(&mut s, ...)`, `s.f = s.g + 1`, and assignments to
+  variables borrowed elsewhere in the same body. Those are either genuine
+  conflicts or valid programs beyond the checker's field-wise borrow model, so
+  long fuzz runs reported compiler errors that were really generator faults.
+  The AST regression checks 2000 generated programs; CI still builds and runs
+  30 of them end to end.
+- **A parenthesized comparison was read as generic arguments.** The lookahead
+  accepted a `)` inside `<...>`, so `(p < q) > r` became `p<q>(...)` and failed
+  with `E0330`. It now tracks groups opened inside the argument list; a `)` or
+  `]` that closes an outer group ends the scan. Differential seed 1573 found
+  it, and `parenthesized_comparison_is_not_generic_args` pins the fix.
+- **macOS C calls now use Mach-O's leading underscore.** Foreign symbols were
+  emitted bare, as ELF and Win64 require, so the Mach-O linker looked for
+  `malloc` instead of `_malloc` and reported every libc function undefined.
+  The assembler now prefixes foreign symbols only for Mach-O, and the object
+  test rejects a bare C name. The CI smoke job also runs on `macos-15-intel`;
+  an arm64 runner cannot link this x86_64 backend's objects against its libc.
+- **A `<` comparison could be parsed as generic arguments.** The lookahead that
+  distinguishes `f<T>()` from `x < y` scanned up to 64 tokens and ignored
+  boundaries, so a `>` in a *later* statement closed a phantom argument list:
+  `while (i < 6i32) ... return a > (b)` reported `E0224` at the `6i32`. The scan
+  now stops at any token that cannot appear in a type. A same-line case
+  (`if x < y && z > (w)`) was affected too.
+- **Borrow liveness crossed sibling CFG branches.** A `&mut` borrow created in
+  one arm and last used in another was treated as live in blocks on unrelated
+  paths, so a shared borrow after the `if` falsely reported `E0205`. Conflict
+  checks now require the earlier borrow's last use to be reachable on the CFG
+  from the later borrow's creation.
+- **Win64 struct returns crashed before they could be used.** The callee read
+  the hidden return pointer from `%rdi` (the SysV first-argument register)
+  instead of `%rcx` (Win64), writing the result through a garbage address. The
+  larger `http-router` example died this way under Wine; it now runs, and a
+  regression test checks a 40-byte struct round-trip.
+- **8-bit multiplication emitted an instruction the assembler rejects.** `imul`
+  has no two-operand byte form, so `a * b` on `i8`/`u8` produced `imulb %cl, %dl`
+  and the build failed with `invalid instruction suffix`. The selector now
+  multiplies at 16 bits and keeps the low byte, which is the same result modulo
+  2^8 for signed and unsigned operands. A differential fuzzing harness found it;
+  with the front-end bugs below fixed, that harness now runs as a CI gate over
+  30 seeds (`UMAY_DIFF_COUNT` still overrides the count for local sweeps).
+- **`-O2` folded `!255u8` to -256.** Unary constant folding ran in an i128
+  scratch integer and never truncated back to the operand's width, so a later
+  cast widened the wrong value. Bitwise not and negation now truncate to the
+  value's own type.
+- **The parser could spin forever on a malformed `impl` body.** Error recovery
+  stops at a top-level keyword so the program loop can parse the next item; a
+  body loop calling it on a stray `impl` saw the same token again forever. Body
+  recovery now guarantees one token of progress.
+- **The cache grew without bound.** Every source edit creates new content keys,
+  so the cache had reached 1.3 GiB / 19,000 entries on an active machine. New
+  key directories now trigger eviction of the oldest entries down to 512 MiB;
+  `UMAY_CACHE_MAX_BYTES` overrides it and `umay doctor` reports the limit.
+- **`pub` could be bypassed two ways.** A private module item was also entered
+  in the global bare-name table, so `util::helper()` resolved as a bare
+  `helper()` from any module; a bare reference now resolves only inside the
+  declaring module and reports `E0101` with the owner named elsewhere. Methods
+  declared in an `impl` were not checked at all, so `value.hidden()` reached a
+  private method from outside; that now reports `E1018`. A module's own private
+  items and methods still work.
+- **Four emitted diagnostics had no `umay explain` entry**: `E0192`, `E0193`,
+  `E0194` (module loading) and `E1017` (trait bounds). A test now scans the
+  compiler source and fails if any emitted code lacks an explanation.
+- **Stale documentation**: the README phase table showed phases 6–9 as partial
+  or unstarted, `lib.rs` said phases 2+ were unimplemented, `Cargo.toml` pointed
+  at a repository URL that is not this one, and the ROADMAP's test count was
+  out of date.
 
 - **A pipe silently became two half-handles on Windows.** `umay_pipe` was a stub
   that always failed, and the storage callers read back was four bytes per end --
@@ -204,6 +282,11 @@ implementation-only changes.
 
 ### Changed
 
+- **Documentation now matches the release state.** `README.md` describes all
+  completed phases and the current per-target verification; `ROADMAP.md` says
+  differential fuzzing runs in CI by default; the memory model and its ADR count
+  the six unenforced diagnostic codes listed in their own table. Package
+  metadata moves to `0.2.0` so the release notes describe a real version.
 - **The benchmark now builds UMAY as an optimised release.** `scripts/bench.py`
   compiled UMAY at its default `-O0` while every other language in the table was
   given its optimiser (`gcc -O2`, `rustc -O`, Zig `ReleaseFast`). The comparison
@@ -212,16 +295,19 @@ implementation-only changes.
 ### Known limitations
 
 - A non-host target's executable cannot be linked on a machine without that
-  system's SDK and CRT.
-- macOS is emitter-only here: there is no Apple SDK on a Linux host, so the
-  object is produced and never linked. What the linker would check *is* checked
-  statically: `a_macos_object_leaves_only_its_own_runtime_undefined` assembles
-  the object, confirms `_main` is defined and exported, and rejects any name it
-  leaves undefined that is neither UMAY's own runtime nor a C library function
-  macOS provides. A misspelt C binding is invisible until a Mac fails to link, and
-  that is exactly how four faults survived on Windows.
+  system's SDK and CRT. `umay build --target ...` keeps the assembled objects
+  and prints the link command that a machine with the SDK can run.
+- Windows objects link with MinGW-w64 and run under Wine locally, including the
+  larger `http-router` example. Those checks skip on a runner without Wine;
+  they are not a GitHub Actions gate yet.
+- macOS objects are assembled and their symbols checked statically on any host.
+  A `macos-15-intel` CI job links and runs a small binary; the result of a given
+  commit is visible in Actions.
 - `x86_64` is the only architecture. An ARM triple is refused with an
   explanation rather than emitting a binary nothing can load.
+- Borrow liveness is still field-insensitive on some paths: reading `s.f` and
+  assigning `s.g` in the same body can be rejected (`E0208` remains deferred).
+  The 30-seed differential gate is green; longer runs stay manual.
 
 ## [0.1.0] — 2026-11-08
 
@@ -283,4 +369,5 @@ defines — every phase from architecture to stabilization is done.
 - Zig is not part of the build-time comparison in `docs/measurements.md` because
   it was not installed on the measurement machine; it is named, not dropped.
 
+[0.2.0]: https://github.com/agnogad/umay/releases/tag/v0.2.0
 [0.1.0]: https://example.invalid/umay/releases/tag/v0.1.0

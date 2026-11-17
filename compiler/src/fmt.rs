@@ -165,12 +165,6 @@ impl Writer {
         }
     }
 
-    /// True when the line was already ended and nothing has been written since,
-    /// so a comment can start at once.
-    fn awaiting_comment_line(&self) -> bool {
-        self.line.is_empty() && self.out.ends_with('\n')
-    }
-
     /// Writes the pending line, if it holds anything but indentation.
     fn flush(&mut self) {
         let text = self.line.trim_end();
@@ -515,17 +509,6 @@ fn continues_line(tok: &Token, next: Option<&Token>) -> bool {
             | K::Ge
             | K::Dot
     )
-}
-
-/// How far a continuation line was indented beyond the block it sits in.
-fn continuation_width(gap: &str) -> usize {
-    let after_break = match gap.rfind('\n') {
-        Some(at) => &gap[at + 1..],
-        None => return 0,
-    };
-    after_break
-        .len()
-        .saturating_sub(after_break.trim_start().len())
 }
 
 /// True when the author put a line break right after the token at `i`.

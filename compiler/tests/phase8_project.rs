@@ -96,7 +96,7 @@ fn a_new_project_builds_and_runs_with_no_arguments() {
         return;
     }
     let project = Project::created("hello");
-    let (status, stdout, stderr) = project.run(&["build"]);
+    let (status, _stdout, stderr) = project.run(&["build"]);
     assert_eq!(status, 0, "`umay build` should work from the manifest:\n{stderr}");
 
     let (status, stdout, _) = project.run(&["run"]);
@@ -400,18 +400,6 @@ impl Tree {
             }
         }
         std::fs::write(dir.join("umay.toml"), manifest).expect("write the manifest");
-        self
-    }
-
-    /// Gives a package a library file, so it can be depended on.
-    ///
-    /// Separate from `package` because only the package that is depended on
-    /// needs one. Writing `src/lib.um` into every package put a placeholder in
-    /// the app's own directory, where the app's `mod lib;` found it instead of
-    /// the dependency -- a test that passed while the thing it tested was broken.
-    fn library(&self, name: &str, functions: &str) -> &Self {
-        std::fs::write(self.root.join(name).join("src/lib.um"), functions)
-            .expect("write the library");
         self
     }
 

@@ -67,8 +67,15 @@ pub struct Checker<'a> {
     pub(crate) def_by_name: HashMap<String, DefId>,
     pub(crate) fn_by_name: HashMap<String, FnId>,
     pub(crate) const_by_name: HashMap<String, ConstId>,
+    /// Whether an item was declared `pub`, keyed by the qualified name it is
+    /// registered under (`module::name`, or just `name` at the top level).
+    /// Missing entries mean a prelude/builtin name, which is always visible.
+    pub(crate) visibility: HashMap<String, bool>,
     /// Methods declared in `impl` blocks, keyed by (type name, method name).
     pub(crate) methods: HashMap<(String, String), FnId>,
+    /// A method's `pub` flag and declaring module, keyed the same way. A method
+    /// without `pub` is callable only from code in that same module.
+    pub(crate) method_visibility: HashMap<(String, String), (bool, Option<String>)>,
     /// Method names belonging to each type, for "unknown method" suggestions.
     pub(crate) methods_of_type: HashMap<String, Vec<String>>,
     /// The parameters the `impl` block around a method declared, keyed by
@@ -135,6 +142,8 @@ impl<'a> Checker<'a> {
             def_by_name: HashMap::new(),
             fn_by_name: HashMap::new(),
             const_by_name: HashMap::new(),
+            visibility: HashMap::new(),
+            method_visibility: HashMap::new(),
             methods: HashMap::new(),
             methods_of_type: HashMap::new(),
             method_generics: HashMap::new(),

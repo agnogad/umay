@@ -48,7 +48,7 @@ impl<'a> Checker<'a> {
                     // carry the same one. The definition list holds both, which
                     // makes its length the shared counter.
                     let def = DefId(self.next_def_id());
-                    self.register_type_name(&s.name, s.name_span, def, ItemKind::Struct, DefKind::Struct);
+                    self.register_type_name(&s.name, s.name_span, def, ItemKind::Struct, DefKind::Struct, s.is_pub);
                     self.hir.structs.push(StructInfo {
                         name: s.name.clone(),
                         span: s.name_span,
@@ -62,15 +62,16 @@ impl<'a> Checker<'a> {
                         span: s.name_span,
                         def_id: def,
                         kind: DefKind::Struct,
-                        is_pub: true,
+                        is_pub: s.is_pub,
                     });
                     // Keyed by the name the item is reachable under, so a type
                     // inside a module is found as `module::Name`.
                     self.def_by_name.insert(self.scoped_name(&s.name), def);
+                    self.visibility.insert(self.scoped_name(&s.name), s.is_pub);
                 }
                 ast::Item::Enum(e) => {
                     let def = DefId(self.next_def_id());
-                    self.register_type_name(&e.name, e.name_span, def, ItemKind::Enum, DefKind::Enum);
+                    self.register_type_name(&e.name, e.name_span, def, ItemKind::Enum, DefKind::Enum, e.is_pub);
                     self.hir.enums.push(EnumInfo {
                         name: e.name.clone(),
                         span: e.name_span,
@@ -83,9 +84,10 @@ impl<'a> Checker<'a> {
                         span: e.name_span,
                         def_id: def,
                         kind: DefKind::Enum,
-                        is_pub: true,
+                        is_pub: e.is_pub,
                     });
                     self.def_by_name.insert(self.scoped_name(&e.name), def);
+                    self.visibility.insert(self.scoped_name(&e.name), e.is_pub);
                 }
                 _ => {}
             }
@@ -103,7 +105,7 @@ impl<'a> Checker<'a> {
                     span: t.name_span,
                     arity: 0,
                 };
-                if let Err(existing) = self.declare_scoped(&t.name, entry) {
+                if let Err(existing) = self.declare_scoped(&t.name, entry, true) {
                     self.duplicate_name(&t.name, t.name_span, existing.span, existing.kind);
                 } else {
                     self.traits.insert(t.name.clone(), t.clone());
@@ -122,7 +124,7 @@ impl<'a> Checker<'a> {
         // ---- functions (free functions) ----
         for item in items {
             if let ast::Item::Fn(f) = item {
-                self.register_fn_name(&f.name, f.name_span, f.params.len());
+                self.register_fn_name(&f.name, f.name_span, f.params.len(), f.is_pub);
             }
         }
 
@@ -136,12 +138,13 @@ impl<'a> Checker<'a> {
                     span: c.name_span,
                     arity: 0,
                 };
-                if let Err(existing) = self.declare_scoped(&c.name, entry) {
+                if let Err(existing) = self.declare_scoped(&c.name, entry, c.is_pub) {
                     self.duplicate_name(&c.name, c.name_span, existing.span, existing.kind);
                 } else {
                     // Keyed the way the body pass will look it up, so a module's
                     // constant is found under `module::NAME`.
                     self.const_by_name.insert(self.scoped_name(&c.name), id);
+                    self.visibility.insert(self.scoped_name(&c.name), c.is_pub);
                     self.hir.consts.push(HirConst {
                         // A module's constant is emitted under its qualified name,
                         // for the same reason a function is: two modules may each
@@ -226,21 +229,21 @@ impl<'a> Checker<'a> {
     }
 
     /// A name as it is registered: qualified when it belongs to a module, and
-    /// also reachable by its bare name from inside that module.
+    /// also reachable by its bare name from inside that module when it is `pub`.
     ///
-    /// Registering only the qualified spelling made a module unable to use its
-    /// own types: `Kind::Large` inside the file that declares `Kind` was unknown,
-    /// because by then the enclosing scope holds `kinds::Kind` and not `Kind`.
-    fn declare_scoped(&mut self, name: &str, entry: ItemEntry) -> Result<(), ItemEntry>
+    /// A private item must NOT get a bare entry in the global item scope: that
+    /// entry let any other module call `m::helper` simply as `helper()`, which
+    /// made `pub` enforcement trivial to bypass. Inside its own module a bare
+    /// private name is resolved by the `module::name` fallback in `check_ident`.
+    fn declare_scoped(&mut self, name: &str, entry: ItemEntry, is_pub: bool) -> Result<(), ItemEntry>
     where
         ItemEntry: Clone,
     {
         let key = self.scoped_name(name);
         let result = self.items.declare(key, entry.clone());
-        if self.module_prefix.is_some() {
-            // The bare name is a second spelling inside the module, not a second
-            // definition: a clash there is the duplicate the qualified insert
-            // already reported.
+        if self.module_prefix.is_some() && is_pub {
+            // The bare name is a second spelling, not a second definition: a
+            // clash there is the duplicate the qualified insert already reported.
             let _ = self.items.declare(name.to_string(), entry);
         }
         result
@@ -254,6 +257,65 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Rejects a cross-module reference to an item that was not declared `pub`.
+    ///
+    /// Only a qualified spelling crosses a module boundary. A name whose owner
+    /// is the current module is that module referring to its own item by its
+    /// full name, which is always allowed.
+    ///
+    /// A private item is never registered under its bare name outside its own
+    /// module, so `m::helper` cannot be reached as a bare `helper()` either.
+    pub(crate) fn check_path_visibility(&mut self, spelled: &str, span: Span, what: &str) {
+        let Some((owner, _)) = spelled.rsplit_once("::") else { return };
+        if self.module_prefix.as_deref() == Some(owner) {
+            return;
+        }
+        if self.visibility.get(spelled).copied() == Some(false) {
+            self.push(
+                Diagnostic::error("E1018", format!("`{spelled}` is private"))
+                    .at(span)
+                    .with_cause(format!(
+                        "a {what} declared without `pub` is visible only inside its own module `{owner}`"
+                    ))
+                    .with_explanation(format!(
+                        "Write `pub {what} {name}` in the module that declares it to make it part \
+                         of that module's public surface.",
+                        name = spelled.rsplit("::").next().unwrap_or(spelled)
+                    )),
+            );
+        }
+    }
+
+    /// Checks a call to a method declared in an `impl`. Returns false (and
+    /// reports `E1018`) when the method is private to another module.
+    pub(crate) fn check_method_visibility(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        span: Span,
+    ) -> bool {
+        let Some(&(is_pub, ref owner)) =
+            self.method_visibility.get(&(type_name.to_string(), method.to_string()))
+        else {
+            return true;
+        };
+        if is_pub || owner == &self.module_prefix {
+            return true;
+        }
+        let owner = owner.clone().unwrap_or_default();
+        self.push(
+            Diagnostic::error("E1018", format!("`{type_name}::{method}` is private"))
+                .at(span)
+                .with_cause(format!(
+                    "a method declared without `pub` is visible only inside its own module `{owner}`"
+                ))
+                .with_explanation(format!(
+                    "Write `pub fn {method}` in the `impl` in `{owner}` to make it callable here."
+                )),
+        );
+        false
+    }
+
     fn register_type_name(
         &mut self,
         name: &str,
@@ -261,16 +323,17 @@ impl<'a> Checker<'a> {
         def: DefId,
         kind: ItemKind,
         _def_kind: DefKind,
+        is_pub: bool,
     ) {
         let entry = ItemEntry { res: crate::hir::Res::Type(def), kind, span, arity: 0 };
-        if let Err(existing) = self.declare_scoped(name, entry) {
+        if let Err(existing) = self.declare_scoped(name, entry, is_pub) {
             // A name inside a module is only a duplicate of another name in the
             // same module; the qualified key makes that the only comparison.
             self.duplicate_name(name, span, existing.span, existing.kind);
         }
     }
 
-    fn register_fn_name(&mut self, name: &str, span: Span, arity: usize) -> FnId {
+    fn register_fn_name(&mut self, name: &str, span: Span, arity: usize, is_pub: bool) -> FnId {
         let id = FnId(self.hir.fns.len() as u32);
         let entry = ItemEntry {
             res: crate::hir::Res::Fn(id),
@@ -279,7 +342,8 @@ impl<'a> Checker<'a> {
             arity,
         };
         let key = self.scoped_name(name);
-        if let Err(existing) = self.declare_scoped(name, entry) {
+        self.visibility.insert(key.clone(), is_pub);
+        if let Err(existing) = self.declare_scoped(name, entry, is_pub) {
             self.duplicate_name(name, span, existing.span, existing.kind);
             return id;
         }
@@ -307,7 +371,7 @@ impl<'a> Checker<'a> {
             self_by_ref: false,
             locals: Vec::new(),
             body: None,
-            is_pub: true,
+            is_pub,
             owner: None,
             link_name: None,
             declared_local_tys: Default::default(),
@@ -357,7 +421,10 @@ impl<'a> Checker<'a> {
         }
         for method in &block.methods {
             let id = FnId(self.hir.fns.len() as u32);
-            self.methods.insert((self_ty_name.clone(), method.name.clone()), id);
+            let method_key = (self_ty_name.clone(), method.name.clone());
+            self.methods.insert(method_key.clone(), id);
+            self.method_visibility
+                .insert(method_key, (method.is_pub, self.module_prefix.clone()));
             self.methods_of_type.entry(self_ty_name.clone()).or_default().push(method.name.clone());
             self.hir.fns.push(HirFn {
                 id,
@@ -371,7 +438,7 @@ impl<'a> Checker<'a> {
                 self_by_ref: method.self_param.as_ref().map(|s| s.by_ref.is_some()).unwrap_or(false),
                 locals: Vec::new(),
                 body: None,
-                is_pub: true,
+                is_pub: method.is_pub,
                 owner: Some(self_ty_name.clone()),
                 link_name: None,
                 declared_local_tys: Default::default(),
@@ -669,6 +736,7 @@ impl<'a> Checker<'a> {
                     let args: Vec<TyId> =
                         seg.args.iter().map(|a| self.resolve_type(a, generics)).collect();
                     let spelled = path.as_string();
+                    self.check_path_visibility(&spelled, path.span, "type");
                     if let Some(def) = self.def_by_name.get(&spelled).copied() {
                         return self.cx.adt(def, args);
                     }

@@ -161,6 +161,30 @@ pub static EXPLAIN: &[ExplainEntry] = &[
     e("E0183", "expected an alias after `as`", "Aliases rename an import: `use std::io as input`.", None),
     e("E0190", "expected a module name", "Modules are declared `mod name;` (file module) or `mod name { ... }` (inline).", None),
     e("E0191", "malformed module body", "An inline module body must be closed with `}`.", None),
+    e(
+        "E0192",
+        "module includes itself",
+        "A module reached itself, directly or through another module, while its files were being \
+         loaded. The loader expands `mod name;` at compile time, so a cycle has no base case and \
+         would grow without end. Break the cycle by moving the shared items into a third module \
+         that neither includes the other.",
+        Some("// a.um: mod b;    b.um: mod a;   -> E0192"),
+    ),
+    e(
+        "E0193",
+        "module has no file",
+        "A `mod name;` without a body needs a file next to the declaring file. The compiler looks \
+         for `name.um` first and then `name/mod.um`, and reports both paths so the author can see \
+         which one was expected.",
+        Some("mod util;   // needs util.um or util/mod.um"),
+    ),
+    e(
+        "E0194",
+        "cannot read module file",
+        "The module file was found but could not be opened or read. This is usually a permission \
+         or encoding problem rather than a syntax error in the module.",
+        None,
+    ),
     e("E0195", "expected a type alias name", "Type aliases are `type Name = Type`.", None),
     e("E0196", "type alias is missing `=`", "Type aliases are `type Name = Type`.", None),
     e(
@@ -353,6 +377,23 @@ pub static EXPLAIN: &[ExplainEntry] = &[
          so the language asks the type to answer. Nothing is inferred: `impl Send for Type {}` is \
          the answer, and forgetting it is an error rather than a silent unsafe move.",
         Some("impl Send for Job {}\nlet t = thread_spawn::<Job, i64>(work, job)"),
+    ),
+    e(
+        "E1017",
+        "type does not implement a required trait",
+        "A generic function's bound was not met by the type at the call site. A bound is a promise \
+         the callee's body relies on, so it is checked where the call is made, not where the \
+         function is declared. Add the missing `impl` for the argument's type.",
+        Some("fn send<T: Send>(x: T) {}\nstruct Job {}\nimpl Send for Job {}\nsend(Job {})"),
+    ),
+    e(
+        "E1018",
+        "item is private to its module",
+        "A name from another module was reached without `pub`. A module's items belong to that \
+         module, so a function, type, enum or constant it declares is reachable from outside only \
+         when it is written `pub`. The name still resolves, which is why the error is about \
+         visibility rather than an unknown name.",
+        Some("mod util;\nfn main() { util::helper() }   // helper must be `pub fn` in util.um"),
     ),
     // ---- ownership and borrowing ------------------------------------------
     e(

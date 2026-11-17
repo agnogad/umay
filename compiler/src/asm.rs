@@ -91,11 +91,16 @@ pub fn print_function(
     // Move incoming arguments into their stack slots. They are stored after the
     // prologue because the prologue uses the same registers.
     //
-    // When the return value travels through a hidden pointer, `rdi` holds that
-    // pointer instead of the first argument, so every argument moves along one
-    // register.
+    // When the return value travels through a hidden pointer, the ABI's first
+    // integer argument register holds that pointer instead of the first real
+    // argument, so every argument moves along one register: `%rdi` on SysV,
+    // `%rcx` on Win64.
     if let Some(offset) = function.sret_offset {
-        let _ = writeln!(out, "    movq %rdi, {offset}(%rbp)");
+        let sret_reg = match target.abi {
+            crate::target::Abi::SysV => "%rdi",
+            crate::target::Abi::Win64 => "%rcx",
+        };
+        let _ = writeln!(out, "    movq {sret_reg}, {offset}(%rbp)");
     }
     // The argument registers this ABI uses, in order. Win64 passes the first
     // argument in `%rcx` and has only four registers, so a function with five
@@ -496,15 +501,17 @@ fn mangle_symbol(
     if name.starts_with(".L") {
         return name.to_string();
     }
-    // A symbol that names code outside this program is used verbatim: MinGW's
-    // CRT exports `malloc`, and adding the prefix MSVC uses turned every libc
-    // call into an undefined reference. Everything else is UMAY's own and takes
-    // the target's prefix, so its definition and its references agree.
+    // A symbol that names code outside this program is normally used verbatim:
+    // ELF and Win64 C symbols have no leading underscore, and adding one turned
+    // every libc call into an undefined reference. Mach-O is the exception:
+    // its C symbols carry `_`, so `malloc` must be emitted as `_malloc`.
     if foreign.contains(name) {
-        name.to_string()
-    } else {
-        target.mangle(name)
+        if target.format == crate::target::ObjectFormat::MachO {
+            return target.mangle(name);
+        }
+        return name.to_string();
     }
+    target.mangle(name)
 }
 
 pub fn mem_str(

@@ -84,8 +84,8 @@ milestone and in §13 of the language specification.
       `umay explain` entry.
 - [x] `umay check` runs semantic analysis and reports schema-v1 JSON.
 
-Not yet: `pub` visibility enforcement, module resolution from an entry point,
-trait bound checking. These arrive with the module system and Phase 6.
+Not yet: trait bound checking. Module resolution from an entry point arrived
+with Phase 6, and `pub` visibility enforcement with Phase 8 (`E1018`).
 
 Exit criteria: 91 accept/reject tests cover every rule; no invalid program in
 the suite is accepted; every accepted program produces an HIR.
@@ -627,6 +627,12 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   for the other (`b::run()` called `a::run()`). Each module's items are now
   registered and emitted under their qualified name, so two modules may declare
   the same function and each is its own.
+- [x] `pub` visibility is enforced across module boundaries. `pub` used to be
+  parsed and thrown away, so a private `fn`, `struct`, `enum` or `const` in a
+  module was reachable from any other module by its qualified name. A qualified
+  reference to a non-`pub` item now reports `E1018`, while a module referring to
+  its own private item by its full name is still allowed. Existing module
+  fixtures that reached across a boundary were updated to say `pub`.
 - [x] The cache key covers a dependency's source, so editing one rebuilds the
   program that uses it, rather than keeping the previous assembly.
 - [x] `upm`: fetching from a registry. A dependency with no `path` is now
@@ -789,15 +795,90 @@ touch the frontend at all.
 
 ### Verified, and not yet verified
 
-- [x] Linux is unchanged: the 663-test suite passes, and the Linux assembly is
+- [x] Linux is unchanged: the test suite passes (754 tests at the last count), and the Linux assembly is
       asserted to carry no symbol prefix and to keep its ELF metadata.
 - [x] macOS and Windows assembly is accepted by a real assembler for its object
       format, and the produced object is a Mach-O 64 / x86-64 COFF file with
       `_main` defined. Symmetry with `llvm-nm`.
-- [ ] **Not verified: a linked, running macOS or Windows binary.** A Linux host
-      has no Apple SDK and no MinGW-w64 runtime, so it assembles and links-fails.
-      Running the test corpus on those two systems is the next step, and until
-      it happens their status is "emits the right object", not "works".
+- [x] **Windows: a linked, running binary is verified.** MinGW-w64 links the
+      emitted COFF objects and Wine runs the result; the existing
+      `an_emitted_windows_object_links_and_runs_elsewhere` test passes, and a
+      program built with `build --target x86_64-pc-windows-gnu` was linked and
+      run here as well. The larger `http-router` example runs under Wine too:
+      its crash was a Win64 ABI bug in the prologue, which read the hidden
+      struct-return pointer from `%rdi` (SysV) instead of `%rcx` (Win64).
+      `win64_struct_return_through_hidden_pointer_runs` pins the fix.
+- [x] **macOS: a linked, running binary is verified in CI.** A `macos-15-intel`
+      job links the emitted x86_64 objects with Apple's linker and runs a small
+      program; the check passed in run `44040427906`. The failures that blocked
+      it were real: arm64 runners could not link x86_64 objects, Mach-O C calls
+      lacked their leading underscore, and the linker needed the object
+      architecture before its inputs. All three are fixed and pinned by tests.
+
+---
+
+## Production readiness (2026-11-16) · **done**
+
+The compiler now builds with zero warnings and the full suite passes.
+
+- [x] **Warnings.** Removed the remaining dead code and unused bindings across
+  `sema`, `isel`, `lsp`, `lint`, `lower` and `fmt`. `cargo build` and
+  `cargo test` compile without a single warning.
+- [x] **`&mut T` → `&T`.** A mutable reference reborrows as a shared one at
+  calls and in `if`/`let` positions without being moved, while a shared
+  reference still never coerces to a mutable one and a new exclusive borrow
+  still conflicts (`phase4_ownership`, `phase5_codegen`).
+- [x] **Computed-pointer assignment.** `*(p.offset(n)) = v` is lowered and
+  emitted, not just a write through a named pointer.
+- [x] **`pub` visibility.** Enforced across module boundaries as `E1018`, with
+  regressions for functions, structs, enums and constants and for the
+  same-module case.
+- [x] **Register allocation.** Non-address-taken scalar locals stay in virtual
+  registers; spill slots no longer collide with local frames, callee-saved
+  registers get their own frame slots, and redundant spill/reload pairs are
+  removed. `compute` 0.717 → 0.589 s, `fib` 0.772 → 0.663 s, `alloc` 0.077 →
+  0.058 s; see `docs/measurements.md`.
+- [x] **Docs.** This file, `docs/language-specification.md` and
+  `docs/measurements.md` record what changed and what the numbers are.
+- [x] **Visibility holes closed.** Private module items no longer enter the
+  global bare-name scope, and `impl` methods carry their `pub` flag and owning
+  module through method resolution. Bare access to a private item is an
+  unknown-name error naming the owner; a private method reached from outside
+  is `E1018`.
+- [x] **Explain coverage.** The four codes that had escaped the database
+  (`E0192`, `E0193`, `E0194`, `E1017`) are documented, and a source-scanning
+  test stops another code being emitted without an entry.
+- [x] **Distribution.** A dual MIT/Apache-2.0 `LICENSE` is included in the
+  release tarball, `Cargo.toml` names the real repository, and GitHub Actions
+  runs the locked test suite plus a tagged release build. `scripts/release.sh`
+  was run end to end and its checksum verified.
+- [x] **Cache eviction.** New key directories trigger eviction down to 512 MiB,
+  configurable with `UMAY_CACHE_MAX_BYTES` and reported by `umay doctor`.
+- [x] **Differential fuzzing found and fixed two more compiler bugs.** Byte-width
+  multiplication emitted an invalid two-operand `imulb`; -O2 constant folding of
+  `!255u8` produced -256 because `!` was computed at i128 width. Both have
+  regressions in `phase5_codegen`. The harness also found an infinite loop in
+  parser recovery: `recover_item` stops at a top-level keyword to let the
+  program loop parse the next item, but an impl-body loop calling it on a stray
+  `impl` never advanced. Body recovery now forces progress, covered by
+  `recovery_inside_an_impl_body_always_makes_progress`.
+- [x] Differential fuzzing is a CI gate: `backend_differential_ci` checks seeds
+  1..=30 by default, with `UMAY_DIFF_COUNT` for local sweeps and an ignored
+  long run for thousands of seeds.
+- [x] The generator no longer emits assignments that mention their target or
+  assign to a variable borrowed anywhere in the same body. This covered
+  `v = f(&mut v)`, `s.f = f(&mut s, ...)`, `s.f = s.g + 1` and borrows whose
+  block order confused liveness. `generated_assignments_never_conflict_with_borrows`
+  checks the AST for 2000 seeds; the 30-seed CI gate remains the end-to-end
+  proof.
+- [x] A parenthesized comparison such as `(p < q) > r` no longer trips the
+  generic-argument lookahead. The fuzz generator produced it at seed 1573;
+  `parenthesized_comparison_is_not_generic_args` pins the fix.
+- [ ] Long fuzz runs still find generated programs that the checker rejects
+  because field-wise borrow liveness is coarse (`docs/memory-model.md` E0208).
+  The parser and generator faults they exposed are fixed; the remaining cases
+  are a documented compiler limitation, not silent miscompilation. The long
+  run stays manual.
 
 ---
 

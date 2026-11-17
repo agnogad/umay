@@ -72,19 +72,6 @@ impl Runner {
     }
 }
 
-/// A program that returns 0 when `condition` is the expected truth value.
-///
-/// The comparison is against the value rather than a branch on it: an earlier
-/// version of this harness printed "PASS" whenever the computed value was true
-/// and so reported every correctly-false result as a failure. Comparing to the
-/// expected constant cannot make that mistake.
-fn expects(a: i64, b: i64, op: &str, expected: bool) -> String {
-    let truth = if expected { "true" } else { "false" };
-    format!(
-        "fn main() -> i32 {{\n    let a = {a}i64\n    let b = {b}i64\n    let r = a {op} b\n    if r == {truth} {{\n        return 0\n    }}\n    return 1\n}}\n"
-    )
-}
-
 /// A program that returns 0 if every `(a, b, op, expected)` holds.
 ///
 /// One build per sample instead of one per case: forty programs that each check

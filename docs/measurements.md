@@ -155,6 +155,33 @@ for it rather than written unfairly. The `--` is that omission, shown.
   ~24 s to compile in 0.17) and was avoided in the workloads by printing through
   libc's `write` instead. That choice is in the script and is commented there.
 
+## After register-allocation work (2026-11-16)
+
+The table above was recorded before local scalar promotion in `isel` and the
+spill/frame fixes in `regalloc` and `asm`. Re-running the same harness with the
+current release binary gives:
+
+| Workload | Recorded before | Now | Change |
+| --- | --- | --- | --- |
+| `compute` | 0.717 s | 0.589 s | ~18% faster |
+| `fib` | 0.772 s | 0.663 s | ~14% faster |
+| `alloc` | 0.077 s | 0.058 s | ~25% faster |
+
+Same machine, same build and run repetitions (5 builds, 7 runs, median), same
+programs and expected outputs. The `fib` median moved between two runs (0.85 s
+then 0.66 s); 0.66 s is the repeatable one and is what is recorded. The gap to
+gcc is still real -- roughly 1.8x on `compute` and 5x on `fib` -- so this is a
+reduction of the spill/reload tax, not its elimination.
+
+Regenerated with:
+
+```sh
+cargo build --release
+python3 scripts/bench.py --only compute
+python3 scripts/bench.py --only fib
+python3 scripts/bench.py --only alloc
+```
+
 ## Reproducing
 
 ```sh

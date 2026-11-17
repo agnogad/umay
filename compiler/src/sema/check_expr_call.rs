@@ -233,6 +233,9 @@ impl FnChecker<'_, '_> {
         let type_name = path.segments[0].name.clone();
         let fn_name = path.segments[1].name.clone();
         let fn_id = *self.cx.methods.get(&(type_name.clone(), fn_name.clone()))?;
+        if !self.cx.check_method_visibility(&type_name, &fn_name, span) {
+            return Some(self.error_hir(span));
+        }
         // A method with a receiver is not callable through the type: it needs an
         // instance, and saying so is more useful than an unknown-name error.
         let info = self.cx.hir.fns.iter().find(|f| f.id == fn_id).cloned()?;
@@ -556,6 +559,10 @@ impl FnChecker<'_, '_> {
         // (`str`, arrays); once the standard library defines `String` in ordinary
         // UMAY source, its own methods must be the ones that run.
         let user_impl = self.cx.methods.get(&(type_name.clone(), method.to_string())).copied();
+
+        if user_impl.is_some() && !self.cx.check_method_visibility(&type_name, method, method_span) {
+            return self.error_hir(span);
+        }
 
         if user_impl.is_none() {
             if let Some(e) =
@@ -1019,6 +1026,7 @@ impl FnChecker<'_, '_> {
         // suggestion offered `print`, which is what a two-segment substitution
         // guess looks like when the real name is not in the table at all.
         let spelled = path.as_string();
+        self.cx.check_path_visibility(&spelled, path.span, "struct");
         let found = self
             .cx
             .def_by_name

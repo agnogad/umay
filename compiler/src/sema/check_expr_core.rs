@@ -14,16 +14,6 @@ impl FnChecker<'_, '_> {
         self.check_expr_hinted(e, None)
     }
 
-    /// Checks a statement's expression, which may be used at a type written on it.
-    ///
-    /// `f(x) as i64` at statement level discards its value, so nothing around it
-    /// asks for a type. The cast still names one, and the call beneath it needs
-    /// that name to resolve a generic receiver, so it is passed down as a hint
-    /// and otherwise ignored.
-    pub fn check_stmt_expr(&mut self, e: &ast::Expr) -> HirExpr {
-        self.check_expr_hinted(e, None)
-    }
-
     /// Checks an expression whose type the surrounding context already knows.
     ///
     /// The hint is only an aid to inference: a struct literal that cannot name
@@ -313,7 +303,14 @@ impl FnChecker<'_, '_> {
             let ty = entry.ty;
             return HirExpr { kind: HirExprKind::Local(entry.id), ty, span };
         }
-        if let Some(entry) = self.cx.items.lookup(name) {
+        // A private module item has no bare entry in the global item scope, so
+        // code inside the declaring module reaches it through the qualified
+        // spelling. Public items and top-level names still resolve directly.
+        let entry = self.cx.items.lookup(name).cloned().or_else(|| {
+            let module = self.cx.module_prefix.as_ref()?;
+            self.cx.items.lookup(&format!("{module}::{name}")).cloned()
+        });
+        if let Some(entry) = entry {
             match entry.res {
                 Res::Fn(id) if id.0 != u32::MAX => {
                     let ty = self.fn_type(id);
@@ -340,10 +337,6 @@ impl FnChecker<'_, '_> {
         self.error_hir(span)
     }
 
-    fn check_path_expr(&mut self, path: &ast::Path, span: crate::source::Span) -> HirExpr {
-        self.check_path_expr_hinted(path, span, None)
-    }
-
     /// `check_path_expr` with a hint for the case that needs one: a unit variant
     /// of a generic enum. `Option::None` carries no value, so the only thing that
     /// can name its `T` is the type the expression is being given.
@@ -365,6 +358,7 @@ impl FnChecker<'_, '_> {
                 .map(|s| s.name.clone())
                 .collect();
             let type_name = name_parts.join("::");
+            self.cx.check_path_visibility(&type_name, span, "enum");
             let first = &path.segments[path.segments.len() - 2];
             let _ = first;
             // `Type::method(...)` is handled by check_call; a bare path here is
@@ -427,6 +421,9 @@ impl FnChecker<'_, '_> {
                 }
             }
             if let Some(fn_id) = self.cx.methods.get(&(first.name.clone(), second.name.clone())).copied() {
+                if !self.cx.check_method_visibility(&first.name, &second.name, span) {
+                    return self.error_hir(span);
+                }
                 let ty = self.fn_type(fn_id);
                 return HirExpr { kind: HirExprKind::FnRef(fn_id), ty, span };
             }
@@ -437,6 +434,7 @@ impl FnChecker<'_, '_> {
         // length, because `a::b::name` is as valid as `a::name`.
         if path.segments.len() >= 2 {
             let spelled = path.as_string();
+            self.cx.check_path_visibility(&spelled, span, "item");
             if let Some(entry) = self.cx.items.lookup(&spelled).cloned() {
                 match entry.res {
                     crate::hir::Res::Fn(fn_id) => {
@@ -484,10 +482,6 @@ impl FnChecker<'_, '_> {
 
     pub(crate) fn const_type(&mut self, id: ConstId) -> TyId {
         self.cx.hir.consts.get(id.0 as usize).map(|c| c.ty).unwrap_or_else(|| self.cx.cx.error())
-    }
-
-    pub(crate) fn variant_type(&mut self, def: crate::types::DefId, _index: u32) -> TyId {
-        self.cx.cx.adt(def, Vec::new())
     }
 
     /// The type of a unit variant, taking its arguments from `hint` when that is

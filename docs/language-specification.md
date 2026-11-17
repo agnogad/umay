@@ -192,6 +192,12 @@ Items in a module are reachable by their bare name and by the module path:
 (`a::b::answer()`). Errors inside a module are reported against the module's own
 file and line.
 
+A function, struct, enum or constant declared without `pub` is private to its
+module. A qualified reference to such an item from outside that module reports
+`E1018`; a module may always name its own private items, including by their full
+path. Prelude and top-level names have no enclosing module and are always
+visible.
+
 ---
 
 ## 5. Statements
@@ -502,7 +508,7 @@ The full contract is in [build-system.md](build-system.md).
 | Ownership / borrow checking | Implemented (Phase 4). |
 | Code generation (x86_64) | Implemented (Phase 5). |
 | Runtime + standard library | Implemented (Phase 6). |
-| `pub` visibility | Parsed, and `pub fn` in an `impl` and at item level is accepted; there is no cross-module visibility enforcement yet. |
+| `pub` visibility | Enforced across module boundaries (`E1018`); a non-`pub` item is private to its module. |
 | `where` clauses | Not parsed: a `where` clause is a syntax error. Use an inline bound (`<T: Trait>`) instead. |
 | let-else (`let Some(x) = e else { ... }`) | Not implemented; it is a syntax error. Use `match`. |
 | Attributes with real semantics | Parsed but carry no semantics; an unused attribute is `W0010`. |

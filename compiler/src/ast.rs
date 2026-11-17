@@ -70,6 +70,9 @@ pub struct FnDecl {
     /// Whether this is an `extern fn` declaration, which is a promise that the
     /// symbol exists elsewhere and is written to the C calling convention.
     pub is_extern: bool,
+    /// Whether the declaration was written `pub`. A non-`pub` item is reachable
+    /// only inside the module that declares it.
+    pub is_pub: bool,
     pub span: Span,
 }
 
@@ -117,6 +120,7 @@ pub struct StructDecl {
     pub generics: Vec<GenericParam>,
     pub fields: Vec<FieldDecl>,
     pub attrs: Vec<Attribute>,
+    pub is_pub: bool,
     pub span: Span,
 }
 
@@ -136,6 +140,7 @@ pub struct EnumDecl {
     pub generics: Vec<GenericParam>,
     pub variants: Vec<EnumVariant>,
     pub attrs: Vec<Attribute>,
+    pub is_pub: bool,
     pub span: Span,
 }
 
@@ -179,6 +184,7 @@ pub struct ConstDecl {
     pub ty: Option<TypeExpr>,
     pub value: Expr,
     pub attrs: Vec<Attribute>,
+    pub is_pub: bool,
     pub span: Span,
 }
 

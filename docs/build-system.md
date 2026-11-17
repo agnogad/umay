@@ -136,7 +136,17 @@ Cache levels are separate so a change in one does not invalidate the other:
 Module-level. Changing module `m` invalidates `m` and every module that depends
 on `m` transitively. Independent modules keep their cache entries.
 
-### 5.4 Why content addressing works here
+### 5.4 Eviction
+
+Content addressing makes every source edit create new keys, so an unpruned cache
+grows for as long as the machine is used (1.3 GiB / 19,000 entries on one active
+workstation). After a write to a *new* key directory, the cache removes whole
+entry directories, oldest modification time first, until the total is at or
+below 512 MiB. `UMAY_CACHE_MAX_BYTES` overrides the ceiling in bytes; `0`
+disables eviction. `umay doctor` reports both the current size and the limit.
+A miss caused by eviction costs a rebuild, never a wrong artifact.
+
+### 5.5 Why content addressing works here
 
 UMAY has no macros and no include mechanism, so a module's token stream is a pure
 function of its bytes. That is the property that makes correct, fast, whole-file

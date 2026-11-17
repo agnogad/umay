@@ -128,10 +128,6 @@ impl LineIndex {
         }
     }
 
-    /// The offset of the start of a line, for commands that work on whole lines.
-    pub fn line_start(&self, line: u32) -> u32 {
-        self.line_starts.get(line as usize).copied().unwrap_or(self.len)
-    }
 }
 
 #[cfg(test)]

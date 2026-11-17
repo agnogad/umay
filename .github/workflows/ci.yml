@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test (locked)
+        run: cargo test --locked --manifest-path compiler/Cargo.toml
+      - name: Release build
+        run: cargo build --release --locked --manifest-path compiler/Cargo.toml
+
+  macos:
+    # A Linux host can only assert that the Mach-O object is well formed. This
+    # job links and runs a real program on an Intel Mac: the backend emits
+    # x86_64 objects, and an arm64 runner cannot link them against its own libc.
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the compiler
+        run: cargo build --release --locked --manifest-path compiler/Cargo.toml
+      - name: Link and run a macOS binary
+        run: |
+          mkdir -p "$RUNNER_TEMP/umay-smoke"
+          cd "$RUNNER_TEMP/umay-smoke"
+          printf 'fn main() -> i32 {\n    println("mac")\n    return 0\n}\n' > main.um
+          "$GITHUB_WORKSPACE/target/release/umay" build main.um
+          test "$(./dist/main)" = mac
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the checksummed artifact
+        run: scripts/release.sh
+      - name: Keep the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: umay-release
+          path: out/*

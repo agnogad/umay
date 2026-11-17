@@ -336,6 +336,46 @@ fn main() {
 }
 
 #[test]
+fn borrow_last_used_in_branch_does_not_conflict_with_sibling_block() {
+    // The `&mut g_s` borrow is created and last used inside the `else` arm.
+    // The shared borrow after the `if` sits on a sibling CFG path, so the two
+    // can never be live at the same point. A linear block-index range used to
+    // straddle the sibling block and report a false E0205.
+    ok_with_warnings_allowed(
+        r#"
+struct G_S0 { f0: i8, f1: i64, f2: u16 }
+impl G_S0 {
+    fn m0(&self, p0: usize) -> bool { self.f0 > 0i8 }
+    fn m1(&mut self, p0: bool) -> usize { 0usize }
+}
+struct G_S1 { f0: bool, f1: bool, f2: u8, f3: u32 }
+fn g_f0(p0: &mut G_S0, p1: u64, p2: bool, p3: u8, p4: i64, p5: u8, p6: u16, p7: i16) -> bool {
+    p0.m1(false)
+    if (p0.m0(1usize) && (p2 == p2)) { println_i64((0i64) as i64) } else { p0.f0 = 0i8 }
+    return true
+}
+fn main() -> i32 {
+    let mut g_s: G_S0 = G_S0 { f0: (16i8 & 125i8), f1: ((-1i64) ^ 3463981566876876157i64), f2: 6280u16 }
+    let mut g_a: [u64; 8] = [(2147483647u32 as u64); 8]
+    let v_29: i32 = ((0i32 + (-1698921085i32)) as i32)
+    let mut v_30: G_S1 = G_S1 { f0: (g_s.f1 <= 9223372036854775807i64), f1: (2275255072774531846u64 <= g_a[(15242313226860178803usize & 7usize)]), f2: (0u8 | 128u8), f3: 645243055u32 }
+    if (!g_s.m0(14203844084864877292usize)) {
+        v_30.f1 = g_f0(&mut g_s, g_a[(1usize & 7usize)], (v_30.f0 || v_30.f1), 255u8, (1u8 as i64), (v_29 as u8), (32768u16 + 0u16), ((-18811i16) ^ (-27352i16)))
+        let mut lc_34: i32 = 0i32
+        while (lc_34 < 5i32) && ((!false)) {
+        }
+    }
+    v_30.f0 = g_s.m0((11958203785178649128usize * 12429678466931099892usize))
+    let mut lc_38: i32 = 0i32
+    while (lc_38 < 4i32) && ((g_s.f0 >= g_s.f0)) {
+    }
+    return 0
+}
+"#,
+    );
+}
+
+#[test]
 fn borrowing_a_parameter_and_returning_it_is_fine() {
     // The caller owns the referent, so elision makes this sound.
     ok(

@@ -69,16 +69,6 @@ impl Value {
         }
     }
 
-    pub fn as_object(&self) -> Option<&BTreeMap<String, Value>> {
-        match self {
-            Value::Object(fields) => Some(fields),
-            _ => None,
-        }
-    }
-
-    pub fn is_null(&self) -> bool {
-        matches!(self, Value::Null)
-    }
 }
 
 /// Parses one JSON document.
