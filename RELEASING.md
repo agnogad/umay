@@ -50,9 +50,12 @@ Two versions move independently:
    git push origin v<version>
    ```
 
-8. **Attach the tarball and its checksum** to the tag's release page. A user
-   should be able to download both and run `sha256sum -c` before executing
-   anything.
+8. **The GitHub release publishes itself.** Pushing the tag runs the `release`
+   job, which builds the artifact, checks that the Linux binary is static, and
+   attaches the tarball and its checksum to the tag. A user should be able to
+   download both and run `sha256sum -c` before executing anything. If the job
+   could not publish, attach both files by hand rather than leaving the tag with
+   no download.
 
 ## What the artifact contains
 
@@ -62,7 +65,9 @@ Two versions move independently:
 - `LICENSE`, when the repository has one.
 
 It does **not** contain the Cargo build directory, the source tree, or any
-project's `dist/`. The compiler is a single static binary that links only libc.
+project's `dist/`. On Linux the compiler is built against musl and statically
+linked, so it does not depend on the host's glibc. On other systems it links the
+system runtime the way a native binary normally does.
 
 ## Installing
 
@@ -70,8 +75,8 @@ There is no installer yet, and that is honest rather than forgotten: unpack the
 tarball and put `umay` on the path.
 
 ```sh
-tar xzf umay-<version>-<host>.tar.gz
-install -m 0755 umay-<version>-<host>/umay ~/.local/bin/umay
+tar xzf umay-<version>-x86_64-linux-musl.tar.gz
+install -m 0755 umay-<version>-x86_64-linux-musl/umay ~/.local/bin/umay
 umay version
 ```
 

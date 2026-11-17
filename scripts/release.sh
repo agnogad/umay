@@ -25,6 +25,20 @@ tag="v${version}"
 out_dir="out"
 host="$(uname -m)-$(uname -s | tr '[:upper:]' '[:lower:]')"
 
+# A glibc build only runs on a host at least as new as the one that produced it.
+# Build the Linux release against musl instead, where the target is installed:
+# the result is static and runs on every Linux distribution. `UMAY_RELEASE_TARGET`
+# overrides the choice for a developer building for a different system.
+default_target=""
+if [ "$(uname -s)" = "Linux" ] && rustup target list --installed 2>/dev/null | grep -qx "x86_64-unknown-linux-musl"; then
+    default_target="x86_64-unknown-linux-musl"
+fi
+target="${UMAY_RELEASE_TARGET:-$default_target}"
+if [ "$target" = "x86_64-unknown-linux-musl" ]; then
+    host="x86_64-linux-musl"
+fi
+host="${UMAY_RELEASE_LABEL:-$host}"
+
 echo "==> releasing umay ${tag} for ${host}"
 
 # 1. A dirty tree cannot be released: the artifact would not match a commit.
@@ -46,8 +60,13 @@ cargo test --quiet
 
 # 4. Build the compiler at the release profile.
 echo "==> building"
-cargo build --release --quiet
-binary="target/release/umay"
+if [ -n "$target" ]; then
+    cargo build --release --quiet --target "$target"
+    binary="target/${target}/release/umay"
+else
+    cargo build --release --quiet
+    binary="target/release/umay"
+fi
 [ -x "$binary" ] || { echo "error: $binary was not produced" >&2; exit 1; }
 
 # 5. Assemble the package.

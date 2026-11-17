@@ -44,10 +44,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Add the static Linux target
+        run: rustup target add x86_64-unknown-linux-musl
       - name: Build the checksummed artifact
         run: scripts/release.sh
+      - name: Check the Linux artifact is static
+        run: |
+          binary="$(find out -maxdepth 2 -name umay -type f | head -n 1)"
+          test -n "$binary"
+          if ldd "$binary" 2>&1 | grep -q "libc\.so"; then
+            echo "error: the release binary still depends on the host glibc" >&2
+            ldd "$binary" >&2
+            exit 1
+          fi
       - name: Keep the artifact
         uses: actions/upload-artifact@v4
         with:
           name: umay-release
           path: out/*
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" out/*.tar.gz out/*.sha256 --clobber
+          else
+            gh release create "$tag" out/*.tar.gz out/*.sha256 \
+              --title "umay ${tag#v}" --generate-notes
+          fi

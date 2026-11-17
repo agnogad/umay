@@ -1,8 +1,8 @@
 # UMAY Build System
 
-Status: design specification. `umay new`, `clean`, `doctor` and the project
-layout rules are implemented in Phase 1; incremental compilation and caching
-land in Phase 8.
+Status: implemented. `umay new`, `clean`, `doctor`, the project layout rules,
+incremental compilation and the content-addressed cache are in place. `upm`
+fetching remains deliberately limited to a directory registry; see section 9.
 
 ## 1. Hard constraints
 

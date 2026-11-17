@@ -7,7 +7,7 @@ specification carries its own version (`v1.0`), which moves only when the
 language surface changes; the compiler's package version can move for
 implementation-only changes.
 
-## [Unreleased]
+## [0.3.0] — 2026-11-17
 
 ### Added
 
@@ -30,6 +30,19 @@ implementation-only changes.
     fork and close. Go 1.27.0's `net/http` on the same workload and machine:
     9,408 and 65,559. Method and caveats in `docs/measurements.md`.
 
+- **Thread detach, and a POSIX join fix.** `thread_detach` releases a started
+  thread's joinable reference without waiting: POSIX calls `pthread_detach`,
+  Windows closes the `CreateThread` handle, and the wrapper frees the handle slot
+  on the same path that marks the thread consumed. A join after a detach returns
+  `false` instead of waiting on a reference that is already gone.
+  - The new raw thread tests found that `thread_join` on POSIX passed the
+    handle *slot's address* to `pthread_join`, where the API expects the
+    `pthread_t` value stored in it. The first raw join crashed inside libc. The
+    POSIX layer now reads the value first, the same way the Windows layer does.
+  - `a_detached_thread_cannot_be_joined` pins the wrapper bookkeeping,
+    `a_raw_thread_starts_and_joins` covers the start/join pair it builds on, and
+    `thread_detach_assembles_on_every_system` checks both platform symbols.
+
 ### Changed
 
 - **A comparison against a literal no longer materialises the literal.** `n < 2`
@@ -41,6 +54,12 @@ implementation-only changes.
   two-argument function whose arguments are call results and whose return value
   must reach `%rax`. That shape returned 20 instead of 14 when a call-setup
   experiment treated the return register as dead.
+- **Linux releases are static and published by CI.** `scripts/release.sh`
+  builds against `x86_64-unknown-linux-musl` when that target is installed, so
+  the artifact no longer requires the host's glibc (the 0.2.0 binary needed
+  glibc 2.39). The tag workflow verifies the binary is not dynamically linked
+  and attaches the tarball and checksum to the GitHub release instead of
+  leaving both as manual steps.
 
 ## [0.2.0] — 2026-11-17
 
