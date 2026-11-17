@@ -359,16 +359,17 @@ impl Target {
     /// The linker arguments that produce a runnable executable.
     ///
     /// Kept as a method rather than data because the flags are not independent:
-    /// `-no-pie` is a Linux ELF concern, `-mconsole` is a PE concern, and both
-    /// would be wrong on the other. A table of flags with a `cfg` per row is
-    /// what this replaces.
+    /// `-no-pie` is a Linux ELF concern, `-arch x86_64` tells a Mach-O linker on
+    /// an arm64 host to accept this x86_64-only backend's objects, and
+    /// `-mconsole` is a PE concern. A table of flags with a `cfg` per row is what
+    /// this replaces.
     pub fn linker_flags(&self) -> &'static [&'static str] {
         match self.format {
             // Position-independent executables are the default and `-no-pie`
             // asks the linker for a fixed load address so that the runtime's
             // absolute addresses hold. It is only meaningful for ELF.
             ObjectFormat::Elf => &["-no-pie"],
-            ObjectFormat::MachO => &[],
+            ObjectFormat::MachO => &["-arch", "x86_64"],
             // A console subsystem, so that the process gets the standard handles
             // a program expects to write to, and Winsock's import library: the
             // standard library's socket bindings live in `ws2_32`, which is not
@@ -600,9 +601,11 @@ mod tests {
 
     #[test]
     fn linker_flags_match_the_object_format() {
-        // `-no-pie` is an ELF flag: passing it to a Mach-O or PE linker fails.
+        // `-no-pie` is an ELF flag; Mach-O needs the object architecture
+        // because `macos-latest` runners are arm64 while this backend emits
+        // x86_64 objects; `-mconsole` is a PE concern.
         assert_eq!(Target::LINUX.linker_flags(), &["-no-pie"]);
-        assert!(Target::MACOS.linker_flags().is_empty());
+        assert_eq!(Target::MACOS.linker_flags(), &["-arch", "x86_64"]);
         assert_eq!(Target::WINDOWS.linker_flags(), &["-mconsole", "-lws2_32"]);
     }
 

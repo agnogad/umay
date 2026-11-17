@@ -153,6 +153,11 @@ implementation-only changes.
   with `E0330`. It now tracks groups opened inside the argument list; a `)` or
   `]` that closes an outer group ends the scan. Differential seed 1573 found
   it, and `parenthesized_comparison_is_not_generic_args` pins the fix.
+- **macOS linking works on Apple Silicon runners.** The backend emits x86_64
+  objects, but the linker on an arm64 host defaults to arm64 and discarded them
+  as the wrong architecture. The Mach-O target now passes `-arch x86_64`, so
+  the `macos-latest` job links and runs the smoke binary instead of failing with
+  `_main` undefined.
 - **A `<` comparison could be parsed as generic arguments.** The lookahead that
   distinguishes `f<T>()` from `x < y` scanned up to 64 tokens and ignored
   boundaries, so a `>` in a *later* statement closed a phantom argument list:
