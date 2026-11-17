@@ -24,7 +24,7 @@ use crate::mir::{
     Terminator, UnOp,
 };
 use crate::target::Target;
-use crate::types::{TyCtxt, TyId, TyKind};
+use crate::types::{DefId, TyCtxt, TyId, TyKind};
 
 /// Emits an AArch64 assembly file for every reachable body in `program`.
 pub fn generate(
@@ -116,6 +116,7 @@ fn generate_one(
         frame,
         offsets,
         next_label: 0,
+        hir,
     };
 
     let _ = writeln!(emitter.out, ".p2align 2");
@@ -156,6 +157,7 @@ struct Emitter<'a> {
     frame: u32,
     offsets: Vec<u32>,
     next_label: usize,
+    hir: &'a Hir,
 }
 
 impl Emitter<'_> {
@@ -165,15 +167,15 @@ impl Emitter<'_> {
                 let place_ty = self.place_ty(place)?;
                 match value {
                     Rvalue::Use(operand) => {
-                        if is_array(self.types.kind(place_ty)) {
+                        if is_aggregate(self.types.kind(place_ty)) {
                             let source = match operand {
                                 Operand::Copy(place) | Operand::Move(place) => place,
                                 _ => {
-                                    return Err("the AArch64 backend cannot initialise an array from this value".into());
+                                    return Err("the AArch64 backend cannot initialise an aggregate from this value".into());
                                 }
                             };
                             let size = self.size_of(place_ty)?;
-                            self.copy_array(place, source, size)?;
+                            self.copy_aggregate(place, source, size)?;
                             return Ok(());
                         }
                         self.operand(operand, 0)?;
@@ -244,6 +246,9 @@ impl Emitter<'_> {
                     Rvalue::Aggregate { kind: AggregateKind::Array, operands } => {
                         self.array_literal(place, place_ty, operands)?;
                     }
+                    Rvalue::Aggregate { kind: AggregateKind::Struct(def), operands } => {
+                        self.struct_literal(place, place_ty, *def, operands)?;
+                    }
                     other => {
                         return Err(format!(
                             "the AArch64 backend does not support `{}` assignments yet",
@@ -251,7 +256,7 @@ impl Emitter<'_> {
                         ));
                     }
                 }
-                if !is_array(self.types.kind(place_ty)) {
+                if is_scalar(self.types.kind(place_ty)) {
                     self.store(place, 0)?;
                 }
                 Ok(())
@@ -307,7 +312,32 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    fn copy_array(&mut self, destination: &Place, source: &Place, size: u64) -> Result<(), String> {
+    fn struct_literal(
+        &mut self,
+        place: &Place,
+        ty: TyId,
+        def: DefId,
+        operands: &[Operand],
+    ) -> Result<(), String> {
+        let (_, args) = self.adt_parts(ty)?;
+        let offsets = self.field_offsets(def, &args)?;
+        let fields = self.field_types(def)?;
+        if operands.len() != fields.len() {
+            return Err("a struct literal and its definition disagree on field count".into());
+        }
+        self.address_of(place)?;
+        let _ = writeln!(self.out, "    mov x13, x11");
+        for ((operand, offset), field_ty) in operands.iter().zip(offsets).zip(fields) {
+            self.operand(operand, 0)?;
+            // Loading the operand may have used `x11` for a local's address.
+            let _ = writeln!(self.out, "    mov x11, x13");
+            self.add_to_address(offset)?;
+            self.store_at(field_ty, 0)?;
+        }
+        Ok(())
+    }
+
+    fn copy_aggregate(&mut self, destination: &Place, source: &Place, size: u64) -> Result<(), String> {
         self.address_of(source)?;
         let _ = writeln!(self.out, "    mov x13, x11");
         self.address_of(destination)?;
@@ -484,8 +514,17 @@ impl Emitter<'_> {
                     }
                     ty = element;
                 }
-                Projection::Field(_) | Projection::EnumField { .. } => {
-                    return Err("the AArch64 backend does not support struct fields yet".into());
+                Projection::Field(index) => {
+                    let (def, args) = self.adt_parts(ty)?;
+                    let offsets = self.field_offsets(def, &args)?;
+                    let offset = *offsets
+                        .get(*index as usize)
+                        .ok_or_else(|| "a struct field index is out of range".to_string())?;
+                    self.add_to_address(offset)?;
+                    ty = self.field_type(def, *index)?;
+                }
+                Projection::EnumField { .. } => {
+                    return Err("the AArch64 backend does not support enum fields yet".into());
                 }
             }
         }
@@ -617,7 +656,8 @@ impl Emitter<'_> {
             | TyKind::RawPtrMut(_)
             | TyKind::FnPtr { .. }
             | TyKind::IntVar(_)
-            | TyKind::Array { .. } => {}
+            | TyKind::Array { .. }
+            | TyKind::Adt { .. } => {}
             _ => {
                 return Err(format!(
                     "the AArch64 backend does not support values of type `{}` yet",
@@ -651,8 +691,12 @@ impl Emitter<'_> {
             ty = match projection {
                 Projection::Deref => self.pointee(ty)?,
                 Projection::Index(_) => self.element(ty)?,
-                Projection::Field(_) | Projection::EnumField { .. } => {
-                    return Err("the AArch64 backend does not support struct fields yet".into());
+                Projection::Field(index) => {
+                    let (def, _) = self.adt_parts(ty)?;
+                    self.field_type(def, *index)?
+                }
+                Projection::EnumField { .. } => {
+                    return Err("the AArch64 backend does not support enum fields yet".into());
                 }
             };
         }
@@ -682,28 +726,65 @@ impl Emitter<'_> {
         }
     }
 
-    fn size_of(&self, ty: TyId) -> Result<u64, String> {
+    fn size_of(&mut self, ty: TyId) -> Result<u64, String> {
+        let layout = {
+            let mut layouts = Layouts::new(self.types, self.hir);
+            layouts.layout(ty)
+        };
+        layout
+            .map(|layout| layout.size)
+            .map_err(|e| format!("the AArch64 backend cannot lay out `{}`: {e:?}", self.types.display(ty)))
+    }
+
+    fn adt_parts(&self, ty: TyId) -> Result<(DefId, Vec<TyId>), String> {
         match self.types.kind(ty) {
-            TyKind::Never | TyKind::Unit => Ok(0),
-            TyKind::Bool | TyKind::I8 | TyKind::U8 => Ok(1),
-            TyKind::I16 | TyKind::U16 => Ok(2),
-            TyKind::I32 | TyKind::U32 | TyKind::F32 | TyKind::Char => Ok(4),
-            TyKind::I64
-            | TyKind::U64
-            | TyKind::Isize
-            | TyKind::Usize
-            | TyKind::F64
-            | TyKind::Ref(_)
-            | TyKind::RefMut(_)
-            | TyKind::RawPtr(_)
-            | TyKind::RawPtrMut(_)
-            | TyKind::FnPtr { .. } => Ok(8),
-            TyKind::Array { elem, len } => Ok(self.size_of(*elem)? * *len),
-            other => Err(format!(
-                "the AArch64 backend does not know the size of `{:?}`",
-                other
+            TyKind::Adt { def, args } => Ok((*def, args.clone())),
+            _ => Err(format!(
+                "the AArch64 backend cannot take a field of `{}`",
+                self.types.display(ty)
             )),
         }
+    }
+
+    fn field_offsets(&mut self, def: DefId, args: &[TyId]) -> Result<Vec<u64>, String> {
+        let mut layouts = Layouts::new(self.types, self.hir);
+        layouts
+            .field_offsets(def, args)
+            .map_err(|e| format!("the AArch64 backend cannot lay out fields: {e:?}"))
+    }
+
+    fn field_types(&self, def: DefId) -> Result<Vec<TyId>, String> {
+        let info = self
+            .hir
+            .structs
+            .iter()
+            .find(|s| s.def_id == def)
+            .ok_or_else(|| "a struct has no definition in the HIR".to_string())?;
+        let types: Vec<TyId> = info.fields.iter().map(|f| f.ty).collect();
+        for ty in &types {
+            if matches!(self.types.kind(*ty), TyKind::Param { .. }) {
+                return Err("the AArch64 backend does not substitute generic struct fields yet".into());
+            }
+        }
+        Ok(types)
+    }
+
+    fn field_type(&self, def: DefId, index: u32) -> Result<TyId, String> {
+        self.field_types(def)?
+            .get(index as usize)
+            .copied()
+            .ok_or_else(|| "a struct field index is out of range".to_string())
+    }
+
+    /// Adds a compile-time offset to the address in `x11`.
+    fn add_to_address(&mut self, offset: u64) -> Result<(), String> {
+        if offset <= 4095 {
+            let _ = writeln!(self.out, "    add x11, x11, #{offset}");
+        } else {
+            let _ = writeln!(self.out, "    mov x12, #{offset}");
+            let _ = writeln!(self.out, "    add x11, x11, x12");
+        }
+        Ok(())
     }
 
     fn ret_local(&self) -> Option<crate::hir::LocalId> {
@@ -734,7 +815,11 @@ fn require_value(types: &TyCtxt, ty: TyId, what: &str) -> Result<(), String> {
 }
 
 fn is_value(kind: &TyKind) -> bool {
-    is_scalar(kind) || matches!(kind, TyKind::Array { .. })
+    is_scalar(kind) || matches!(kind, TyKind::Array { .. } | TyKind::Adt { .. })
+}
+
+fn is_aggregate(kind: &TyKind) -> bool {
+    matches!(kind, TyKind::Array { .. } | TyKind::Adt { .. })
 }
 
 fn is_array(kind: &TyKind) -> bool {

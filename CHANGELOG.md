@@ -18,9 +18,11 @@ implementation-only changes.
   produces assembly that clang assembles into an ELF object with
   `EM_AARCH64`. String literals, pointer offsets and dereferences, fixed arrays
   with repeat-initialisation and indexing, and indirect calls let the runtime
-  compile to a second AArch64 object, and a CI job links and runs a `println`
-  program under qemu. Struct fields, aggregate passing, floats and ARM64
-  macOS/Windows are refused by name until they are implemented. See
+  compile to a second AArch64 object. Struct literals use the shared `Layouts`
+  offsets, field access and aggregate copies work, and a CI job links and runs a
+  program under qemu that calls a function, loops, formats an integer and reads
+  struct fields. Enum fields, aggregate passing, floats and ARM64 macOS/Windows
+  are refused by name until they are implemented. See
   [ADR 0015](docs/adr/0015-aarch64-backend.md).
 - **Installer.** `install.sh` downloads the latest release for Linux x86_64 or
   Intel macOS, verifies its SHA-256, and installs `umay` to `~/.local/bin`

@@ -897,10 +897,11 @@ is breadth, packaging, and the two known quality gaps.
 
 - [~] **ARM64.** A second backend and a native Apple Silicon build. The first
       scalar slice is in `compiler/src/aarch64.rs`: `aarch64-unknown-linux-gnu`
-      parses, `umay asm` emits AArch64 for scalar programs and strings, clang
-      assembles the result into an `EM_AARCH64` object, and the runtime compiles
-      to a second object. A CI job links and runs a program under qemu. Struct
-      fields, aggregate passing and ARM64 macOS/Windows are next; see
+      parses, `umay asm` emits AArch64 for scalars, strings, arrays and struct
+      fields, clang assembles the result into an `EM_AARCH64` object, and the
+      runtime compiles to a second object. A CI job links and runs a program
+      under qemu. Aggregate passing, enum fields and ARM64 macOS/Windows are
+      next; see
       [ADR 0015](docs/adr/0015-aarch64-backend.md). Until then the support
       matrix is x86_64 only and the README says so.
 - [ ] **Hosted `upm` registry.** The fetcher, version choice and content hash

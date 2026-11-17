@@ -87,9 +87,9 @@ fn an_unsupported_construct_names_the_backend_instead_of_miscompiling() {
     let dir = scratch("unsupported");
     let error = asm_for(
         &dir,
-        "struct Pair { a: i64, b: i64 }\n\nfn main() -> i32 {\n    let p = Pair { a: 1i64, b: 2i64 }\n    return (p.a + p.b) as i32\n}\n",
+        "fn main() -> i32 {\n    let x = 1.5f64\n    return x as i32\n}\n",
     )
-    .expect_err("aggregate values are not supported yet");
+    .expect_err("floating-point values are not supported yet");
     assert!(
         error.contains("AArch64 backend"),
         "the error must name the backend: {error}"
@@ -148,5 +148,32 @@ fn the_runtime_compiles_for_aarch64() {
     assert!(
         dir.join("dist").join("umay_runtime.o").is_file(),
         "runtime object missing"
+    );
+}
+
+#[test]
+fn struct_fields_are_addressed_and_assembled() {
+    let dir = scratch("struct");
+    let source = "struct Pair {\n    a: i64,\n    b: i64,\n}\n\nfn main() -> i32 {\n    let p = Pair { a: 40i64, b: 2i64 }\n    return (p.a + p.b) as i32\n}\n";
+    let asm = asm_for(&dir, source).expect("struct assembly");
+    assert!(asm.contains("add x11, x11, #8"), "the second field is at offset 8:\n{asm}");
+    let probe = Command::new("clang")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !probe {
+        return;
+    }
+    std::fs::write(dir.join("main.s"), &asm).expect("write assembly");
+    let assembled = Command::new("clang")
+        .args(["-c", "--target=aarch64-unknown-linux-gnu", "main.s", "-o", "main.o"])
+        .current_dir(&dir)
+        .output()
+        .expect("run clang");
+    assert!(
+        assembled.status.success(),
+        "assembler rejected the struct program:\n{}",
+        String::from_utf8_lossy(&assembled.stderr)
     );
 }

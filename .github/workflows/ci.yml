@@ -76,9 +76,16 @@ jobs:
               return a + b
           }
 
+          struct Pair {
+              a: i64,
+              b: i64,
+          }
+
           fn main() -> i32 {
               println("arm64")
               println_i64(add(40i64, 2i64))
+              let pair = Pair { a: 1i64, b: 2i64 }
+              println_i64(pair.a + pair.b)
               let mut i = 0i64
               while i < 3i64 {
                   i = i + 1i64
@@ -89,7 +96,7 @@ jobs:
           EOF
           "$GITHUB_WORKSPACE/target/release/umay" build --target aarch64-unknown-linux-gnu main.um
           qemu-aarch64 -L /usr/aarch64-linux-gnu ./dist/main > output.txt
-          printf 'arm64\n42\n3\n' > expected.txt
+          printf 'arm64\n42\n3\n3\n' > expected.txt
           diff -u expected.txt output.txt
 
   windows:
