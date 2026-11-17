@@ -7,7 +7,7 @@ specification carries its own version (`v1.0`), which moves only when the
 language surface changes; the compiler's package version can move for
 implementation-only changes.
 
-## [Unreleased]
+## [0.3.1] — 2026-11-17
 
 ### Added
 
@@ -20,6 +20,12 @@ implementation-only changes.
   and linker skip on Windows; the native smoke covers that path.
 - `scripts/package.py` owns archive creation and checksums on every host, so
   Linux, macOS and Windows packages cannot drift in contents or layout.
+
+### Changed
+
+- The language surface and the generated code are unchanged from 0.3.0. This
+  release exists to publish the macOS and Windows artifacts and to put the
+  Windows build under CI.
 
 ## [0.3.0] — 2026-11-17
 
