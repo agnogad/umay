@@ -403,6 +403,22 @@ fn signed_stack_loads_extend_to_the_full_register() {
 }
 
 #[test]
+fn aggregate_copies_move_words_not_bytes() {
+    let dir = scratch("copy_words");
+    let source = "fn main() -> i32 { let a = [1i64; 100]; let b = a; return b[99] as i32 }\n";
+    let asm = asm_for(&dir, source).expect("aggregate copy assembly");
+    assert!(
+        asm.contains("ldr x12, [x13, x15]"),
+        "the copy loop must move eight bytes at a time:\n{asm}"
+    );
+    assert!(
+        !asm.contains("add x15, x15, #1"),
+        "the byte-at-a-time copy loop must be gone:\n{asm}"
+    );
+    assemble(&dir, &asm);
+}
+
+#[test]
 fn windows_assembly_is_a_coff_arm64_object() {
     let dir = scratch("winarm");
     let source = "fn main() -> i32 { println(\"win-arm\"); return 42 }\n";

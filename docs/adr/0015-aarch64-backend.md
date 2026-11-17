@@ -43,6 +43,9 @@ and `d0`/`d1`, but locals are now allocated:
   x20` replaces the old `mov`/`add`/`mov` sequence, and `fadd d8, d8, d9` does
   the same for floats. Constants and stack operands are staged in `x8`/`x9` or
   `d0`/`d1`, so the result still does not pass through `x0`/`x1`.
+- Aggregate copies move eight bytes at a time (`ldr`/`str` with a 4/2/1-byte
+  tail) instead of one byte at a time. Copies longer than 16 bytes run as a
+  word loop; short copies are unrolled.
 
 This keeps code generation local and testable while removing most stack traffic.
 Direct calls still follow AAPCS64.
@@ -104,16 +107,17 @@ needs no cross C library.
   aggregate that is not homogeneous (for example `{ i64, f64 }`) still travels
   through the integer-register path; UMAY's own calls agree on that, but it is
   not AAPCS64 C interop.
-- **Calls and aggregates still take the old path.** Scalar arithmetic, unary
-  operations and casts are direct even when a constant or stack operand must be
-  staged, but calls, aggregates and address-taken locals still move through
-  `x0`/`x1` or `d0`/`d1`. On a three-million iteration
+- **Calls and aggregates still use scratch registers.** Scalar arithmetic,
+  unary operations and casts are direct even when a constant or stack operand
+  must be staged. Aggregate copies are word-block copies, not scalar register
+  operations, and address-taken locals remain in stack slots. On a three-million iteration
   integer loop the allocator roughly halved qemu wall time (0.064 s to 0.030 s
   median) and reduced stack loads and stores from 21 to 2. A loop with twenty
   short-lived locals improved from 0.032 s to 0.011 s, with stack accesses
   falling from 36 to 1. Direct destination lowering cut that loop's `mov`
   instructions from 142 to 16. A 30-million iteration arithmetic loop improved
-  from 0.203 s to 0.198 s in qemu.
+  from 0.203 s to 0.198 s in qemu. A loop copying an 8 KB array 2000 times fell
+  from 0.097 s to 0.022 s when the byte loop became a word loop.
 - **Windows ARM64 C aggregate calls follow Microsoft's ABI, not AAPCS64's
   HFA rule.** UMAY-to-UMAY calls are internally consistent. The runtime's
   external calls pass scalars, so startup, file and console calls are not
@@ -129,10 +133,10 @@ needs no cross C library.
 1. **The rest of the corpus under qemu/native runners.** Run every executable
    program test against the AArch64 targets and compare output and exit status
    with x86_64.
-2. **Allocate call arguments and aggregates.** The scalar paths are direct;
-   the remaining scratch traffic is at call boundaries and in aggregate
-   copies. After that, a small machine IR can keep values in `x0`-`x17` and
-   `d0`-`d7` between operations.
+2. **Allocate call arguments and aggregate values.** Calls stage arguments in
+   ABI registers already; the remaining scratch traffic is in aggregate
+   construction and address-taken storage. After that, a small machine IR can
+   keep values in `x0`-`x17` and `d0`-`d7` between operations.
 3. **Windows aggregate C interop.** Match Microsoft's composite classification
    when a UMAY aggregate crosses into a C function on Windows ARM64.
 

@@ -48,8 +48,10 @@ implementation-only changes.
     staged in `x8`/`x9` or `d0`/`d1`; a twenty-local loop's `mov` count fell
     from 142 to 16. Signed i8/i16/i32 stack loads now sign-extend
     (`ldrsb`/`ldrsh`/`ldrsw`) so negative values compare and divide correctly.
-    Calls and aggregates still use fixed scratch registers; see
-    [ADR 0015](docs/adr/0015-aarch64-backend.md).
+    Aggregate copies now move eight bytes per iteration with a 4/2/1-byte
+    tail; a 2000-iteration 8 KB array copy fell from 0.097 s to 0.022 s in
+    qemu. Calls and aggregate construction still use fixed scratch registers;
+    see [ADR 0015](docs/adr/0015-aarch64-backend.md).
 - **HTTP(S) `upm` registry.** `UMAY_REGISTRY` now accepts `http://` and
   `https://` roots in a `;`-separated list alongside directories. The client
   reads `<base>/<name>/versions.txt`, downloads

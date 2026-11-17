@@ -972,35 +972,81 @@ impl Emitter<'_> {
         self.address_of(source)?;
         let _ = writeln!(self.out, "    mov x13, x11");
         self.address_of(destination)?;
+        self.copy_memory(size)
+    }
+
+    /// Copies `size` bytes from `[x13]` to `[x11]`.
+    ///
+    /// Eight bytes at a time with 4/2/1-byte tails, rather than the old
+    /// byte-at-a-time loop. Structs, arrays and returns are copied often enough
+    /// that the loop overhead was visible.
+    fn copy_memory(&mut self, size: u64) -> Result<(), String> {
+        if size == 0 {
+            return Ok(());
+        }
+        if size <= 16 {
+            let mut offset = 0u64;
+            while offset + 8 <= size {
+                let _ = writeln!(self.out, "    ldr x12, [x13, #{offset}]");
+                let _ = writeln!(self.out, "    str x12, [x11, #{offset}]");
+                offset += 8;
+            }
+            if offset + 4 <= size {
+                let _ = writeln!(self.out, "    ldr w12, [x13, #{offset}]");
+                let _ = writeln!(self.out, "    str w12, [x11, #{offset}]");
+                offset += 4;
+            }
+            if offset + 2 <= size {
+                let _ = writeln!(self.out, "    ldrh w12, [x13, #{offset}]");
+                let _ = writeln!(self.out, "    strh w12, [x11, #{offset}]");
+                offset += 2;
+            }
+            if offset < size {
+                let _ = writeln!(self.out, "    ldrb w12, [x13, #{offset}]");
+                let _ = writeln!(self.out, "    strb w12, [x11, #{offset}]");
+            }
+            return Ok(());
+        }
         let label = self.label();
+        self.emit_mov_u64(16, size)?;
         let _ = writeln!(self.out, "    mov x15, #0");
         let _ = writeln!(self.out, ".L{label}:");
-        self.cmp_immediate(15, size)?;
-        let _ = writeln!(self.out, "    b.hs .L{label}_done");
-        let _ = writeln!(self.out, "    ldrb w0, [x13, x15]");
-        let _ = writeln!(self.out, "    strb w0, [x11, x15]");
-        let _ = writeln!(self.out, "    add x15, x15, #1");
+        let _ = writeln!(self.out, "    add x17, x15, #8");
+        let _ = writeln!(self.out, "    cmp x17, x16");
+        let _ = writeln!(self.out, "    b.hi .L{label}_tail");
+        let _ = writeln!(self.out, "    ldr x12, [x13, x15]");
+        let _ = writeln!(self.out, "    str x12, [x11, x15]");
+        let _ = writeln!(self.out, "    add x15, x15, #8");
         let _ = writeln!(self.out, "    b .L{label}");
+        let _ = writeln!(self.out, ".L{label}_tail:");
+        let _ = writeln!(self.out, "    sub x17, x16, x15");
+        let _ = writeln!(self.out, "    cmp x17, #4");
+        let _ = writeln!(self.out, "    b.lo .L{label}_2");
+        let _ = writeln!(self.out, "    ldr w12, [x13, x15]");
+        let _ = writeln!(self.out, "    str w12, [x11, x15]");
+        let _ = writeln!(self.out, "    add x15, x15, #4");
+        let _ = writeln!(self.out, "    sub x17, x17, #4");
+        let _ = writeln!(self.out, ".L{label}_2:");
+        let _ = writeln!(self.out, "    cmp x17, #2");
+        let _ = writeln!(self.out, "    b.lo .L{label}_1");
+        let _ = writeln!(self.out, "    ldrh w12, [x13, x15]");
+        let _ = writeln!(self.out, "    strh w12, [x11, x15]");
+        let _ = writeln!(self.out, "    add x15, x15, #2");
+        let _ = writeln!(self.out, "    sub x17, x17, #2");
+        let _ = writeln!(self.out, ".L{label}_1:");
+        let _ = writeln!(self.out, "    cmp x17, #1");
+        let _ = writeln!(self.out, "    b.lo .L{label}_done");
+        let _ = writeln!(self.out, "    ldrb w12, [x13, x15]");
+        let _ = writeln!(self.out, "    strb w12, [x11, x15]");
         let _ = writeln!(self.out, ".L{label}_done:");
         Ok(())
     }
 
-    /// Copies `size` bytes from `[x13]` to `[x11]`.
     fn copy_bytes(&mut self, source_register: u8, size: u64) -> Result<(), String> {
-        let label = self.label();
         if source_register != 13 {
             let _ = writeln!(self.out, "    mov x13, x{source_register}");
         }
-        let _ = writeln!(self.out, "    mov x15, #0");
-        let _ = writeln!(self.out, ".L{label}:");
-        self.cmp_immediate(15, size)?;
-        let _ = writeln!(self.out, "    b.hs .L{label}_done");
-        let _ = writeln!(self.out, "    ldrb w12, [x13, x15]");
-        let _ = writeln!(self.out, "    strb w12, [x11, x15]");
-        let _ = writeln!(self.out, "    add x15, x15, #1");
-        let _ = writeln!(self.out, "    b .L{label}");
-        let _ = writeln!(self.out, ".L{label}_done:");
-        Ok(())
+        self.copy_memory(size)
     }
 
     fn terminator(&mut self, terminator: &Terminator) -> Result<(), String> {
@@ -1247,19 +1293,9 @@ impl Emitter<'_> {
         local: usize,
         size: u64,
     ) -> Result<(), String> {
-        let label = self.label();
         self.local_address(local, 11)?;
         let _ = writeln!(self.out, "    mov x13, x{pointer_register}");
-        let _ = writeln!(self.out, "    mov x15, #0");
-        let _ = writeln!(self.out, ".L{label}:");
-        self.cmp_immediate(15, size)?;
-        let _ = writeln!(self.out, "    b.hs .L{label}_done");
-        let _ = writeln!(self.out, "    ldrb w12, [x13, x15]");
-        let _ = writeln!(self.out, "    strb w12, [x11, x15]");
-        let _ = writeln!(self.out, "    add x15, x15, #1");
-        let _ = writeln!(self.out, "    b .L{label}");
-        let _ = writeln!(self.out, ".L{label}_done:");
-        Ok(())
+        self.copy_memory(size)
     }
 
     fn emit_call(

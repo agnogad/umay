@@ -929,8 +929,8 @@ is breadth, packaging, and the two known quality gaps.
       registers, sharing registers across disjoint lifetimes and spilling the
       rest. Scalar assignments lower directly into those registers, cutting a
       twenty-local loop's `mov` count from 142 to 16. Constants and stack
-      operands are staged in scratch registers; call arguments and aggregates
-      still take the old path.
+      operands are staged in scratch registers, and aggregate copies move eight
+      bytes per iteration (an 8 KB copy loop improved 4.3x).
 - [ ] **Reproducible release check.** Rebuild an artifact and compare bytes, so
       "the tarball matches the commit" is verified rather than assumed.
 
