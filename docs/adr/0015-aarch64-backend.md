@@ -100,7 +100,7 @@ needs no cross C library.
 - The compiler itself is built as a static `aarch64-unknown-linux-musl` binary
   with `rust-lld`, published as the `aarch64-linux-musl` archive and selected by
   `install.sh` on ARM64 Linux. CI builds it and runs `umay version` under qemu.
-- The macOS ARM64 compiler is built natively on a `macos-15` runner, emits
+- The macOS ARM64 compiler is built natively on a `macos-26` runner, emits
   Mach-O ARM64, links with the system `cc` and runs a program in CI. The
   `aarch64-darwin` archive is part of a tag release.
 

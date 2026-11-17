@@ -438,7 +438,7 @@ fn windows_assembly_is_a_coff_arm64_object() {
         String::from_utf8_lossy(&output.stderr)
     );
     let asm = String::from_utf8_lossy(&output.stdout);
-    assert!(asm.contains(".weak WinMain"), "{asm}");
+    assert!(asm.contains(".globl WinMain"), "{asm}");
     assert!(
         asm.contains("b _main"),
         "the startup shim must branch to _main:\n{asm}"

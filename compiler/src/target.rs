@@ -511,10 +511,10 @@ impl Target {
             // both carry this shim; a strong definition in each would collide.
             ObjectFormat::Coff => {
                 if self.arch == "aarch64" {
-                    "\n.section .text\n                 .weak WinMain\n                 .globl WinMain\n                 WinMain:\n\
+                    "\n.section .text\n                 .globl WinMain\n                 WinMain:\n\
                      \x20   b _main\n"
                 } else {
-                    "\n.section .text\n                 .weak WinMain\n                 .globl WinMain\n                 WinMain:\n\
+                    "\n.section .text\n                 .globl WinMain\n                 WinMain:\n\
                      \x20   jmp _main\n"
                 }
             }

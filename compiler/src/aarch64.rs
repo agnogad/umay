@@ -32,7 +32,7 @@ pub fn generate(
     types: &mut TyCtxt,
     hir: &Hir,
     target: Target,
-    _is_program: bool,
+    is_program: bool,
 ) -> Result<String, Vec<CodegenError>> {
     let symbols = function_symbols(hir, program);
     let foreign = foreign_symbols(hir);
@@ -74,7 +74,12 @@ pub fn generate(
             let _ = writeln!(out, "    .asciz \"{}\"", quote(text));
         }
     }
-    out.push_str(target.object_trailer());
+    // The COFF entry point belongs to the program object, not the runtime:
+    // both are linked into one executable, and a `WinMain` in each is a
+    // multiple-definition error. ELF still needs its stack note in both.
+    if is_program || target.format == crate::target::ObjectFormat::Elf {
+        out.push_str(target.object_trailer());
+    }
     Ok(peephole(&out))
 }
 

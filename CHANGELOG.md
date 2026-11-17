@@ -29,7 +29,7 @@ implementation-only changes.
   floats, nine arguments and runtime integer formatting.
   - Homogeneous float aggregates use the AAPCS64 `v` registers; a C helper
     returning and taking a two-double struct is exercised in CI.
-  - The macOS target emits Mach-O ARM64 with `@PAGE`/`@PAGEOFF`; a `macos-15`
+  - The macOS target emits Mach-O ARM64 with `@PAGE`/`@PAGEOFF`; a `macos-26`
     job builds, links and runs a program natively on Apple Silicon. The
     `aarch64-darwin` archive is part of a tag release.
   - `aarch64-w64-mingw32` emits COFF ARM64, links with llvm-mingw and produces

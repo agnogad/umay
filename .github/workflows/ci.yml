@@ -152,8 +152,9 @@ jobs:
 
   macos-arm:
     # The native Apple Silicon job: the compiler is built for arm64, emits
-    # Mach-O ARM64, links with the system cc and runs the result.
-    runs-on: macos-15
+    # Mach-O ARM64, links with the system cc and runs the result. macOS 26 has
+    # no Intel image, so this label cannot fall back to x86_64.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
