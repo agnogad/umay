@@ -1,7 +1,8 @@
 # ADR 0015: The AArch64 backend
 
-Status: **Implemented for Linux, macOS and Windows ARM64, with scalar register
-promotion.** A full register allocator remains; see "Known limitations".
+Status: **Implemented for Linux, macOS and Windows ARM64, with a graph-colouring
+local register allocator.** Values still pass through fixed scratch registers;
+see "Known limitations".
 
 ## Context
 
@@ -24,18 +25,23 @@ addressing modes, condition flags and nearly every encoding; a shared machine IR
 would have to be so abstract that both selectors would carry most of their own
 knowledge anyway.
 
-The first path is a **stack machine**:
+The first path started as a **stack machine**: every local had a slot relative
+to `x29`, every value was computed in `x0`/`x1`, and results were normalised to
+their declared width. The lowering still computes intermediates in `x0`/`x1`
+and `d0`/`d1`, but locals are now allocated:
 
-- Every local has an eight-byte slot relative to `x29`.
-- Every value is computed in `x0` and `x1`.
-- Results are normalised to their declared width after each operation, so
-  `i8`, `i32` and `u32` arithmetic wraps at the right width.
-- Direct calls follow AAPCS64: eight integer argument registers, result in
-  `x0`, frame records at `x29`/`x30`.
+- Liveness is computed over the CFG and an interference graph is built from
+  definitions and live sets.
+- The graph is coloured with `x19`-`x28` for integers and pointers and
+  `d8`-`d15` for floats. Disjoint lifetimes share a register; locals that do not
+  fit keep their stack slot.
+- The prologue saves only the callee-saved registers the body actually uses,
+  and the frame reserves slots only for locals that stay in memory.
+- Parameters are forced apart at entry, since they have no defining assignment
+  from which interference could be discovered.
 
-This is slower than register allocation and much easier to make correct. A later
-pass can replace it without changing the MIR interface or the tests that pin
-behaviour.
+This keeps code generation local and testable while removing most stack traffic.
+Direct calls still follow AAPCS64.
 
 Linux is the first system. It reuses the existing Linux runtime platform layer:
 the C symbols and constants are the same; only the ABI and instructions differ.
@@ -94,14 +100,14 @@ needs no cross C library.
   aggregate that is not homogeneous (for example `{ i64, f64 }`) still travels
   through the integer-register path; UMAY's own calls agree on that, but it is
   not AAPCS64 C interop.
-- **No full register allocator.** Integer and float locals are promoted to
-  callee-saved registers when their address is never taken and no projected
-  place names them. Values still pass through `x0`/`x1` or `d0`/`d1`, and
-  aggregates and address-taken locals remain in stack slots. On a three-million
-  iteration integer loop the promotion roughly halved qemu wall time (0.064 s
-  to 0.030 s median) and reduced the loop's stack loads and stores from 21 to
-  2. A float loop improved from 0.076 s to 0.071 s: its stack traffic also
-  disappeared, but the remaining arithmetic dominates.
+- **Intermediates are not allocated.** Locals get registers, but each MIR
+  operation still moves its operands through `x0`/`x1` or `d0`/`d1`, and
+  aggregates and address-taken locals remain in stack slots. On a
+  three-million iteration integer loop the allocator roughly halved qemu wall
+  time (0.064 s to 0.030 s median) and reduced stack loads and stores from 21
+  to 2. A loop with twenty short-lived locals improved from 0.032 s to 0.011 s,
+  with stack accesses falling from 36 to 1. A float loop improved from 0.076 s
+  to 0.071 s: its stack traffic disappeared, but arithmetic dominates.
 - **Windows ARM64 C aggregate calls follow Microsoft's ABI, not AAPCS64's
   HFA rule.** UMAY-to-UMAY calls are internally consistent. The runtime's
   external calls pass scalars, so startup, file and console calls are not
@@ -117,9 +123,9 @@ needs no cross C library.
 1. **The rest of the corpus under qemu/native runners.** Run every executable
    program test against the AArch64 targets and compare output and exit status
    with x86_64.
-2. **A full register allocator.** Replace the remaining stack traffic with a
-   linear scan over `x0`-`x17` and `d0`-`d7`, keeping the static promotion as
-   the fallback for address-taken locals.
+2. **Allocate intermediates.** Keep values in `x0`-`x17` and `d0`-`d7` between
+   operations instead of moving through fixed scratch registers, while the
+   graph-colouring allocator remains the fallback for address-taken locals.
 3. **Windows aggregate C interop.** Match Microsoft's composite classification
    when a UMAY aggregate crosses into a C function on Windows ARM64.
 

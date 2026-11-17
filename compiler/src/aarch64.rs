@@ -108,8 +108,15 @@ fn generate_one(
             .map_err(|e| format!("layout failed for the return type: {e:?}"))?
     };
     let needs_sret = is_aggregate(types.kind(body.ret_ty)) && ret_size > 16;
-    let (offsets, frame, sret_offset) = frame_layout(body, types, hir, needs_sret)?;
-    let (local_reg, local_freg) = promote_locals(body, types);
+    let (local_reg, local_freg) = allocate_locals(body, types);
+    let (offsets, frame, sret_offset) =
+        frame_layout(body, types, hir, needs_sret, &local_reg, &local_freg)?;
+    let mut saved_regs: Vec<u8> = local_reg.iter().flatten().copied().collect();
+    saved_regs.sort_unstable();
+    saved_regs.dedup();
+    let mut saved_fregs: Vec<u8> = local_freg.iter().flatten().copied().collect();
+    saved_fregs.sort_unstable();
+    saved_fregs.dedup();
 
     let mut emitter = Emitter {
         out: String::new(),
@@ -124,8 +131,8 @@ fn generate_one(
         next_label: 0,
         hir,
         sret_offset,
-        saved_regs: local_reg.iter().flatten().copied().collect(),
-        saved_fregs: local_freg.iter().flatten().copied().collect(),
+        saved_regs,
+        saved_fregs,
         local_reg,
         local_freg,
     };
@@ -2019,6 +2026,11 @@ impl Emitter<'_> {
     }
 
     fn local_address(&mut self, local: usize, dest: u8) -> Result<(), String> {
+        if self.local_reg[local].is_some() || self.local_freg[local].is_some() {
+            return Err(format!(
+                "the AArch64 backend tried to address register-allocated local {local}"
+            ));
+        }
         let offset = self.offsets[local];
         if offset <= 4095 {
             let _ = writeln!(self.out, "    sub x{dest}, x29, #{offset}");
@@ -2084,12 +2096,37 @@ impl Emitter<'_> {
 /// never taken and no projected place names it. That covers counters, indices
 /// and scalar temporaries, which are the values that otherwise pay two stack
 /// accesses each. Aggregates, floats and address-taken values stay in memory.
-fn promote_locals(
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RegClass {
+    Int,
+    Float,
+}
+
+fn class_of(kind: &TyKind) -> Option<RegClass> {
+    if is_promotable_int(kind) {
+        Some(RegClass::Int)
+    } else if is_promotable_float(kind) {
+        Some(RegClass::Float)
+    } else {
+        None
+    }
+}
+
+/// Assigns scalar locals to registers using liveness and graph colouring.
+///
+/// Every MIR local is a candidate unless its address is taken or a projected
+/// place names it. Liveness is computed over the CFG, an interference graph is
+/// built from definitions and live sets, and each class is coloured with its
+/// callee-saved registers: `x19`-`x28` for integers and pointers, `d8`-`d15`
+/// for floats. Locals that do not fit keep their stack slot, so spilling needs
+/// no extra machinery.
+fn allocate_locals(
     body: &Body,
     types: &TyCtxt,
 ) -> (Vec<Option<u8>>, Vec<Option<u8>>) {
-    let mut address_taken = vec![false; body.locals.len()];
-    let mut projected = vec![false; body.locals.len()];
+    let count = body.locals.len();
+    let mut address_taken = vec![false; count];
+    let mut projected = vec![false; count];
     for block in &body.blocks {
         for statement in &block.statements {
             if let Statement::Assign { place, value, .. } = statement {
@@ -2099,24 +2136,168 @@ fn promote_locals(
         }
         scan_terminator(&block.terminator, &mut address_taken, &mut projected);
     }
-    let mut next_int = 19u8;
-    let mut next_float = 8u8;
-    let mut promoted = vec![None; body.locals.len()];
-    let mut promoted_float = vec![None; body.locals.len()];
+
+    let mut class: Vec<Option<RegClass>> = vec![None; count];
     for (index, local) in body.locals.iter().enumerate() {
         if address_taken[index] || projected[index] {
             continue;
         }
-        let kind = types.kind(local.ty);
-        if is_promotable_int(kind) && next_int <= 28 {
-            promoted[index] = Some(next_int);
-            next_int += 1;
-        } else if is_promotable_float(kind) && next_float <= 15 {
-            promoted_float[index] = Some(next_float);
-            next_float += 1;
+        class[index] = class_of(types.kind(local.ty));
+    }
+    if class.iter().all(Option::is_none) {
+        return (vec![None; count], vec![None; count]);
+    }
+
+    let blocks = body.blocks.len();
+    let mut block_use = vec![HashSet::new(); blocks];
+    let mut block_def = vec![HashSet::new(); blocks];
+    for (index, block) in body.blocks.iter().enumerate() {
+        let mut uses = HashSet::new();
+        let mut defs = HashSet::new();
+        for statement in &block.statements {
+            let (statement_uses, statement_defs) = statement_access(statement);
+            uses.extend(statement_uses.difference(&defs).copied());
+            defs.extend(statement_defs);
+        }
+        let (terminator_uses, terminator_defs) = terminator_access(body, &block.terminator);
+        uses.extend(terminator_uses.difference(&defs).copied());
+        defs.extend(terminator_defs);
+        block_use[index] = uses;
+        block_def[index] = defs;
+    }
+
+    let mut live_in = block_use.clone();
+    let mut live_out = vec![HashSet::new(); blocks];
+    loop {
+        let mut changed = false;
+        for index in (0..blocks).rev() {
+            let mut out = HashSet::new();
+            for successor in body.blocks[index].terminator.successors() {
+                out.extend(live_in[successor.0 as usize].iter().copied());
+            }
+            let mut input = block_use[index].clone();
+            input.extend(out.difference(&block_def[index]).copied());
+            if input != live_in[index] || out != live_out[index] {
+                live_in[index] = input;
+                live_out[index] = out;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
         }
     }
-    (promoted, promoted_float)
+
+    let mut graph = vec![HashSet::new(); count];
+    for (index, out) in live_out.iter().enumerate() {
+        let mut live = out.clone();
+        let (_, terminator_defs) = terminator_access(body, &body.blocks[index].terminator);
+        interfere(&mut graph, &terminator_defs, &live, &class);
+        let (terminator_uses, _) = terminator_access(body, &body.blocks[index].terminator);
+        live.retain(|local| !terminator_defs.contains(local));
+        live.extend(terminator_uses);
+        for statement in body.blocks[index].statements.iter().rev() {
+            let (uses, defs) = statement_access(statement);
+            interfere(&mut graph, &defs, &live, &class);
+            live.retain(|local| !defs.contains(local));
+            live.extend(uses);
+        }
+    }
+    // Parameters are all live at entry and have no defining assignment, so
+    // their interference cannot be discovered from a definition.
+    let entry_live: Vec<usize> = live_in[body.entry.0 as usize].iter().copied().collect();
+    for (position, &a) in entry_live.iter().enumerate() {
+        for &b in &entry_live[position + 1..] {
+            add_edge(&mut graph, a, b, &class);
+        }
+    }
+
+    let mut int_regs = Vec::new();
+    let mut float_regs = Vec::new();
+    let int_candidates: Vec<usize> = (0..count)
+        .filter(|index| class[*index] == Some(RegClass::Int))
+        .collect();
+    let float_candidates: Vec<usize> = (0..count)
+        .filter(|index| class[*index] == Some(RegClass::Float))
+        .collect();
+    colour(&int_candidates, &graph, &(19u8..=28).collect::<Vec<_>>(), &mut int_regs);
+    colour(&float_candidates, &graph, &(8u8..=15).collect::<Vec<_>>(), &mut float_regs);
+
+    let mut integer = vec![None; count];
+    let mut floating = vec![None; count];
+    for (local, register) in int_regs {
+        integer[local] = Some(register);
+    }
+    for (local, register) in float_regs {
+        floating[local] = Some(register);
+    }
+    (integer, floating)
+}
+
+fn add_edge(graph: &mut [HashSet<usize>], a: usize, b: usize, class: &[Option<RegClass>]) {
+    if a == b || class[a].is_none() || class[a] != class[b] {
+        return;
+    }
+    graph[a].insert(b);
+    graph[b].insert(a);
+}
+
+fn interfere(
+    graph: &mut [HashSet<usize>],
+    defs: &HashSet<usize>,
+    live: &HashSet<usize>,
+    class: &[Option<RegClass>],
+) {
+    for &defined in defs {
+        if class[defined].is_none() {
+            continue;
+        }
+        for &value in live {
+            add_edge(graph, defined, value, class);
+        }
+    }
+}
+
+/// A greedy colouring with saturation-degree ordering. A local that finds no
+/// free colour stays spilled and keeps its stack slot.
+fn colour(
+    candidates: &[usize],
+    graph: &[HashSet<usize>],
+    registers: &[u8],
+    assigned: &mut Vec<(usize, u8)>,
+) {
+    let mut remaining: Vec<usize> = candidates.to_vec();
+    let mut colours: Vec<Option<u8>> = vec![None; graph.len()];
+    while !remaining.is_empty() {
+        // Keep the tie-break on the local index so the emitted assembly is
+        // reproducible; a hash-set iteration order would not be.
+        let mut best = 0;
+        let mut best_key = (0usize, 0usize);
+        for (position, node) in remaining.iter().enumerate() {
+            let mut seen = HashSet::new();
+            for neighbour in &graph[*node] {
+                if let Some(colour) = colours[*neighbour] {
+                    seen.insert(colour);
+                }
+            }
+            let key = (seen.len(), graph[*node].len());
+            if key > best_key {
+                best = position;
+                best_key = key;
+            }
+        }
+        let node = remaining.remove(best);
+        let mut taken = HashSet::new();
+        for neighbour in &graph[node] {
+            if let Some(colour) = colours[*neighbour] {
+                taken.insert(colour);
+            }
+        }
+        if let Some(register) = registers.iter().find(|register| !taken.contains(register)) {
+            colours[node] = Some(*register);
+            assigned.push((node, *register));
+        }
+    }
 }
 
 fn is_promotable_int(kind: &TyKind) -> bool {
@@ -2145,6 +2326,99 @@ fn is_promotable_int(kind: &TyKind) -> bool {
 
 fn is_promotable_float(kind: &TyKind) -> bool {
     matches!(kind, TyKind::F32 | TyKind::F64)
+}
+
+fn statement_access(statement: &Statement) -> (HashSet<usize>, HashSet<usize>) {
+    let mut uses = HashSet::new();
+    let mut defs = HashSet::new();
+    match statement {
+        Statement::Assign { place, value, .. } => {
+            if place.projection.is_empty() {
+                defs.insert(place.local.0 as usize);
+            } else {
+                place_address_use(place, &mut uses);
+                defs.insert(place.local.0 as usize);
+            }
+            rvalue_use(value, &mut uses);
+        }
+        Statement::StorageLive(_)
+        | Statement::StorageDead(_)
+        | Statement::SetDropFlag { .. }
+        | Statement::Nop => {}
+    }
+    (uses, defs)
+}
+
+fn terminator_access(body: &Body, terminator: &Terminator) -> (HashSet<usize>, HashSet<usize>) {
+    let mut uses = HashSet::new();
+    let mut defs = HashSet::new();
+    match terminator {
+        Terminator::Goto(_) | Terminator::Unreachable => {}
+        Terminator::SwitchInt { discr, .. } => operand_use(discr, &mut uses),
+        Terminator::Call { callee, args, destination, .. } => {
+            operand_use(callee, &mut uses);
+            for arg in args {
+                operand_use(arg, &mut uses);
+            }
+            if let Some(destination) = destination {
+                if destination.projection.is_empty() {
+                    defs.insert(destination.local.0 as usize);
+                } else {
+                    place_address_use(destination, &mut uses);
+                    defs.insert(destination.local.0 as usize);
+                }
+            }
+        }
+        Terminator::Drop { place, .. } => place_address_use(place, &mut uses),
+        Terminator::Return => {
+            if let Some(local) = body.locals.iter().position(|local| local.name == "_ret") {
+                uses.insert(local);
+            }
+        }
+    }
+    (uses, defs)
+}
+
+fn operand_use(operand: &Operand, uses: &mut HashSet<usize>) {
+    if let Operand::Copy(place) | Operand::Move(place) = operand {
+        place_address_use(place, uses);
+    }
+}
+
+fn place_address_use(place: &Place, uses: &mut HashSet<usize>) {
+    uses.insert(place.local.0 as usize);
+    for projection in &place.projection {
+        if let Projection::Index(index) = projection {
+            operand_use(index, uses);
+        }
+    }
+}
+
+fn rvalue_use(value: &Rvalue, uses: &mut HashSet<usize>) {
+    match value {
+        Rvalue::Use(operand) => operand_use(operand, uses),
+        Rvalue::Binary { lhs, rhs, .. } => {
+            operand_use(lhs, uses);
+            operand_use(rhs, uses);
+        }
+        Rvalue::Unary { operand, .. }
+        | Rvalue::Cast { operand, .. }
+        | Rvalue::PtrToInt(operand) => operand_use(operand, uses),
+        Rvalue::Ref { place, .. } | Rvalue::Reborrow { place, .. } => {
+            place_address_use(place, uses);
+        }
+        Rvalue::Aggregate { operands, .. } => {
+            for operand in operands {
+                operand_use(operand, uses);
+            }
+        }
+        Rvalue::Repeat { operand, .. } => operand_use(operand, uses),
+        Rvalue::Discriminant(place) | Rvalue::Len(place) => place_address_use(place, uses),
+        Rvalue::PtrOffset { ptr, count } => {
+            operand_use(ptr, uses);
+            operand_use(count, uses);
+        }
+    }
 }
 
 fn scan_place(place: &Place, _address_taken: &mut [bool], projected: &mut [bool]) {
@@ -2272,11 +2546,17 @@ fn frame_layout(
     types: &mut TyCtxt,
     hir: &Hir,
     needs_sret: bool,
+    local_reg: &[Option<u8>],
+    local_freg: &[Option<u8>],
 ) -> Result<(Vec<u32>, u32, Option<u32>), String> {
     let mut layouts = Layouts::new(types, hir);
     let mut cursor = 0u64;
     let mut offsets = Vec::with_capacity(body.locals.len());
-    for local in &body.locals {
+    for (index, local) in body.locals.iter().enumerate() {
+        if local_reg[index].is_some() || local_freg[index].is_some() {
+            offsets.push(0);
+            continue;
+        }
         let layout = layouts
             .layout(local.ty)
             .map_err(|e| format!("layout failed for `{}`: {e:?}", local.name))?;

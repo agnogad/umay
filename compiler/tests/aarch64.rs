@@ -279,7 +279,10 @@ fn float_locals_are_promoted_to_callee_saved_registers() {
     let dir = scratch("float_promote");
     let source = "fn main() -> i32 { let mut x: f64 = 0.0; let mut i: i64 = 0; while i < 3 { x = x + 0.5; i = i + 1 }; return x as i32 }\n";
     let asm = asm_for(&dir, source).expect("float loop assembly");
-    assert!(asm.contains("stp d8, d9"), "the prologue must save d8:\n{asm}");
+    assert!(
+        asm.contains("stp d8, d9") || asm.contains("str d8, [sp, #-16]"),
+        "the prologue must save d8:\n{asm}"
+    );
     assert!(
         asm.contains("fmov d0, d8") && asm.contains("fmov d8, d0"),
         "the float local must stay in d8 instead of a stack slot:\n{asm}"
@@ -293,7 +296,7 @@ fn a_ninth_float_argument_does_not_clobber_a_promoted_parameter() {
     let source = "fn sum(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64) -> f64 { return a+b+c+d+e+f+g+h+i }\nfn main() -> i32 { return sum(1.0f64,2.0f64,3.0f64,4.0f64,5.0f64,6.0f64,7.0f64,8.0f64,6.0f64) as i32 }\n";
     let asm = asm_for(&dir, source).expect("nine-float assembly");
     assert!(
-        asm.contains("ldr d0, [x29, #16]") && asm.contains("str d0, [x11]"),
+        asm.contains("ldr d0, [x29, #16]"),
         "the stack argument must use d0, not a promoted parameter register:\n{asm}"
     );
     assert!(
@@ -311,6 +314,51 @@ fn float_values_reach_aggregate_fields_from_v_registers() {
     assert!(
         asm.contains("str d0, [x11]"),
         "float fields must be stored from a `v` register:\n{asm}"
+    );
+    assemble(&dir, &asm);
+}
+
+#[test]
+fn disjoint_scalar_locals_share_a_register() {
+    let dir = scratch("allocator_reuse");
+    let mut source = String::from("fn main() -> i32 {\n    let mut sum: i64 = 0\n");
+    for index in 0..20 {
+        source.push_str(&format!("    let v{index}: i64 = {index}\n    sum = sum + v{index}\n"));
+    }
+    source.push_str("    return sum as i32\n}\n");
+    let asm = asm_for(&dir, &source).expect("register reuse assembly");
+    assert!(asm.contains("stp x19"), "the allocator must use x19:\n{asm}");
+    assert!(
+        !asm.contains("stp x20"),
+        "disjoint locals must share x19 instead of consuming more registers:\n{asm}"
+    );
+    assert!(
+        !asm.contains("sub x11, x29"),
+        "no local in this body needs a stack slot:\n{asm}"
+    );
+    assemble(&dir, &asm);
+}
+
+#[test]
+fn more_than_ten_live_values_spill_to_the_stack() {
+    let dir = scratch("allocator_spill");
+    let mut source = String::from("fn main() -> i32 {\n");
+    for index in 0..12 {
+        source.push_str(&format!("    let v{index}: i64 = {index}\n"));
+    }
+    let sum = (0..12)
+        .map(|index| format!("v{index}"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    source.push_str(&format!("    return ({sum}) as i32\n}}\n"));
+    let asm = asm_for(&dir, &source).expect("spill assembly");
+    assert!(
+        asm.contains("stp x27, x28"),
+        "ten integer locals can live in x19-x28:\n{asm}"
+    );
+    assert!(
+        asm.contains("sub x11, x29"),
+        "the two locals that do not fit must stay in stack slots:\n{asm}"
     );
     assemble(&dir, &asm);
 }
