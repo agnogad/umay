@@ -154,7 +154,7 @@ reported as `E3001` rather than miscompiled; see
 
 Linux is verified end to end. Windows objects link with MinGW-w64 and run under
 Wine, including the larger `http-router` example. macOS objects are assembled
-and their symbols checked on any host, and a `macos-latest` CI job links and
+and their symbols checked on any host, and a `macos-15-intel` CI job links and
 runs a small binary. See `ROADMAP.md` Phase 10 for the exact status.
 
 See [ROADMAP.md](ROADMAP.md) for the detailed milestone plan and

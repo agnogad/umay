@@ -19,9 +19,9 @@ jobs:
 
   macos:
     # A Linux host can only assert that the Mach-O object is well formed. This
-    # job links and runs a real program on a Mac, which is the check the
-    # ROADMAP still lists as unverified.
-    runs-on: macos-latest
+    # job links and runs a real program on an Intel Mac: the backend emits
+    # x86_64 objects, and an arm64 runner cannot link them against its own libc.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

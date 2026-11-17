@@ -809,7 +809,7 @@ touch the frontend at all.
       struct-return pointer from `%rdi` (SysV) instead of `%rcx` (Win64).
       `win64_struct_return_through_hidden_pointer_runs` pins the fix.
 - [ ] **macOS: a linked, running binary is not yet verified on this host.**
-      Linux has no Apple SDK. CI has a `macos-latest` job that links and runs a
+      Linux has no Apple SDK. CI has a `macos-15-intel` job that links and runs a
       small program on a real Mac; its result is the remaining check. As of
       2026-11-17 no run exists for the pushed branch: `ci.yml` triggers only on
       pushes to `main`, tags and pull requests, and a PR to `main` has not been
