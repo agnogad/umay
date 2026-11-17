@@ -79,13 +79,14 @@ non-Linux targets use `clang`'s integrated assembler, which is why a `--target`
 build assembles on a Linux host. **Linking** a non-host target additionally
 needs that system's SDK and CRT: a Linux machine produces a correct Mach-O or
 COFF object but cannot link it without an Apple SDK or a MinGW-w64 runtime.
-Only x86_64 has a backend, so an ARM triple is refused with an explanation
-rather than emitting a binary nothing can load.
+Both x86_64 and AArch64 have backends. An unknown architecture or system is
+refused with an explanation rather than emitting a binary nothing can load.
 
-**Host support.** Prebuilt binaries are static Linux and Windows on x86_64,
-static AArch64 Linux, and Intel macOS. The AArch64 compiler is a native ARM64
-binary; it targets `aarch64-unknown-linux-gnu`. On Apple Silicon the macOS
-binary runs under Rosetta, and ARM64 macOS and Windows are not supported yet.
+**Host support.** Prebuilt binaries are static Linux on x86_64 and AArch64,
+static Windows on x86_64 and ARM64, and macOS on Intel and Apple Silicon. The
+AArch64 compiler targets `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`
+and `aarch64-w64-mingw32`; the Apple Silicon binary is native and emits Mach-O
+ARM64, and the Windows ARM64 binary links PE/COFF with llvm-mingw.
 
 Every program is linked against a runtime written in UMAY itself, and the prelude
 and the first library types are UMAY source too, so a program can print, allocate
@@ -167,7 +168,7 @@ See [ROADMAP.md](ROADMAP.md) for the detailed milestone plan and
 
 ## Installing
 
-Linux x86_64, Linux ARM64 and Intel macOS:
+Linux x86_64, Linux ARM64, Intel macOS and Apple Silicon:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/agnogad/umay/main/install.sh | sh
@@ -176,8 +177,9 @@ curl -fsSL https://raw.githubusercontent.com/agnogad/umay/main/install.sh | sh
 The installer reads the latest release, verifies the archive's SHA-256, and
 installs `umay` into `~/.local/bin`. Set `UMAY_VERSION` to pin a release or
 `UMAY_INSTALL_DIR` to choose another destination. On Windows, download the
-`x86_64-windows` zip from the [releases page](https://github.com/agnogad/umay/releases)
-and put `umay.exe` on `PATH`. Each archive has a sibling `.sha256` file.
+`x86_64-windows` or `aarch64-windows` zip from the
+[releases page](https://github.com/agnogad/umay/releases) and put `umay.exe` on
+`PATH`. Each archive has a sibling `.sha256` file.
 
 ## What works today
 

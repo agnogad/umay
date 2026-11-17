@@ -116,6 +116,32 @@ jobs:
           qemu-aarch64 -L /usr/aarch64-linux-gnu ./dist/main > output.txt
           printf 'arm64\n42\n42\n42\n42\n2\n42\n' > expected.txt
           diff -u expected.txt output.txt
+      - name: Check HFA calls against C
+        run: |
+          dir="$RUNNER_TEMP/umay-hfa"
+          mkdir -p "$dir"
+          cd "$dir"
+          cat > main.um <<'EOF'
+          struct Pair { a: f64, b: f64 }
+          extern fn "make_pair" make_pair() -> Pair
+          extern fn "sum_pair" sum_pair(p: Pair) -> f64
+          fn main() -> i32 {
+              let p = make_pair()
+              println_i64(sum_pair(p) as i64)
+              return 0
+          }
+          EOF
+          cat > helper.c <<'EOF'
+          struct Pair { double a; double b; };
+          struct Pair make_pair(void) { struct Pair p = { 40.0, 2.0 }; return p; }
+          double sum_pair(struct Pair p) { return p.a + p.b; }
+          EOF
+          "$GITHUB_WORKSPACE/target/release/umay" build --target aarch64-unknown-linux-gnu --emit-object-only main.um
+          aarch64-linux-gnu-gcc -c -O2 helper.c -o helper.o
+          aarch64-linux-gnu-gcc -static -o hfa dist/main.o dist/umay_runtime.o helper.o
+          output="$(qemu-aarch64 -L /usr/aarch64-linux-gnu ./hfa)"
+          test "$output" = 42
+
       - name: Build and run the AArch64 compiler
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
@@ -123,6 +149,50 @@ jobs:
           rustup target add aarch64-unknown-linux-musl
           cargo build --release --locked --target aarch64-unknown-linux-musl
           qemu-aarch64 target/aarch64-unknown-linux-musl/release/umay version
+
+  macos-arm:
+    # The native Apple Silicon job: the compiler is built for arm64, emits
+    # Mach-O ARM64, links with the system cc and runs the result.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the compiler
+        run: cargo build --release --locked --manifest-path compiler/Cargo.toml
+      - name: Link and run an ARM64 macOS binary
+        run: |
+          dir="$RUNNER_TEMP/umay-mac-arm"
+          mkdir -p "$dir"
+          cd "$dir"
+          cat > main.um <<'EOF'
+          struct Pair { a: i64, b: i64 }
+
+          fn main() -> i32 {
+              println("mac-arm")
+              let p = Pair { a: 40i64, b: 2i64 }
+              println_i64(p.a + p.b)
+              return 0
+          }
+          EOF
+          "$GITHUB_WORKSPACE/target/release/umay" build --target aarch64-apple-darwin main.um
+          ./dist/main > output.txt
+          printf 'mac-arm\n42\n' > expected.txt
+          diff -u expected.txt output.txt
+      - name: Package the ARM64 macOS artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python3 scripts/package.py \
+            --version "${GITHUB_REF_NAME#v}" \
+            --label aarch64-darwin \
+            --binary target/release/umay \
+            --out out \
+            --strip
+      - name: Keep the ARM64 macOS artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: umay-release-macos-arm
+          path: out/*
 
   windows:
     runs-on: windows-latest
@@ -174,6 +244,62 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: umay-release-windows
+          path: out/*
+
+  windows-arm:
+    # Native Windows on ARM: build the compiler on an ARM64 runner, assemble
+    # and link with llvm-mingw's aarch64 toolchain, then run the PE. A cross
+    # link on x86_64 proves the object and import table; this proves the
+    # program's calls and startup actually execute.
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install llvm-mingw for AArch64
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "llvm-mingw.zip"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/llvm-mingw-20261104-ucrt-aarch64.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP -Force
+          $bin = Join-Path $env:RUNNER_TEMP "llvm-mingw-20261104-ucrt-aarch64/bin"
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Build the compiler
+        run: cargo build --release --locked --manifest-path compiler/Cargo.toml
+      - name: Link and run an ARM64 Windows binary
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "umay-win-arm"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Set-Location $dir
+          @(
+            'fn main() -> i32 {'
+            '    println("win-arm")'
+            '    println_i64(40i64 + 2i64)'
+            '    return 0'
+            '}'
+          ) | Set-Content -Encoding utf8 main.um
+          & "$env:GITHUB_WORKSPACE\target\release\umay.exe" build --target aarch64-w64-mingw32 main.um
+          $out = (& ".\dist\main.exe") -join "`n"
+          if ($out -ne "win-arm`n42") {
+            Write-Error "unexpected output: $out"
+            exit 1
+          }
+      - name: Package the ARM64 Windows artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          python scripts/package.py `
+            --version $version `
+            --label aarch64-windows `
+            --binary target/release/umay.exe `
+            --out out
+      - name: Keep the ARM64 Windows artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: umay-release-windows-arm
           path: out/*
 
   release:
@@ -231,7 +357,7 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [release, release-aarch64, macos, windows]
+    needs: [release, release-aarch64, macos, macos-arm, windows, windows-arm]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -16,7 +16,8 @@ implementation-only changes.
   `aarch64-linux-musl` archive next to the x86_64 ones. `install.sh` selects it
   on `aarch64`/`arm64` Linux, so the compiler runs natively on ARM servers. A CI
   step builds the ARM64 compiler and runs it under qemu.
-- **AArch64 Linux backend.** `aarch64-unknown-linux-gnu` (and `arm64-linux`)
+- **AArch64 backend.** `aarch64-unknown-linux-gnu` (and
+  `arm64-linux`) and `aarch64-apple-darwin` (and `arm64-macos`)
   parse to a target with the AAPCS64 ABI. The backend lowers the full MIR
   surface: scalars, strings, pointers, arrays, structs, tuples, enums, generics,
   function pointers, floats, indirect calls, casts, branches and returns.
@@ -25,12 +26,31 @@ implementation-only changes.
   use `x0`/`x1`, `d0`/`s0`, or the hidden `x8` pointer. The program and runtime
   compile for the target, and a qemu CI job links and runs a program covering
   strings, functions, structs, aggregate arguments and returns, enums, tuples,
-  floats, nine arguments and runtime integer formatting. HFA C interop, register
-  allocation and ARM64 macOS/Windows remain. See
-  [ADR 0015](docs/adr/0015-aarch64-backend.md).
-- **Installer.** `install.sh` downloads the latest release for Linux x86_64 or
-  Intel macOS, verifies its SHA-256, and installs `umay` to `~/.local/bin`
-  (overridable with `UMAY_INSTALL_DIR`). Windows users install from the zip.
+  floats, nine arguments and runtime integer formatting.
+  - Homogeneous float aggregates use the AAPCS64 `v` registers; a C helper
+    returning and taking a two-double struct is exercised in CI.
+  - The macOS target emits Mach-O ARM64 with `@PAGE`/`@PAGEOFF`; a `macos-15`
+    job builds, links and runs a program natively on Apple Silicon. The
+    `aarch64-darwin` archive is part of a tag release.
+  - `aarch64-w64-mingw32` emits COFF ARM64, links with llvm-mingw and produces
+    a console PE. A native `windows-11-arm` CI job runs the result, and the
+    `aarch64-windows` archive is published on tags.
+  - Scalar locals whose address is not taken are promoted to `x19`-`x28` with a
+    save/restore prologue. A three-million iteration loop halved under qemu
+    (0.064 s to 0.030 s median), with stack loads and stores falling from 21 to
+    2. A full allocator is still future work; see
+    [ADR 0015](docs/adr/0015-aarch64-backend.md).
+- **HTTP(S) `upm` registry.** `UMAY_REGISTRY` now accepts `http://` and
+  `https://` roots in a `;`-separated list alongside directories. The client
+  reads `<base>/<name>/versions.txt`, downloads
+  `<base>/<name>/<version>.tar` with `curl`, and extracts it with a guarded
+  USTAR reader that rejects absolute paths and `..`. `scripts/registry-server.py`
+  serves a directory in that shape; run it behind a TLS proxy for a public
+  registry. An integration test drives a real HTTP listener.
+- **Installer.** `install.sh` downloads the latest release for Linux x86_64,
+  Linux ARM64, Intel macOS or Apple Silicon, verifies its SHA-256, and installs
+  `umay` to `~/.local/bin` (overridable with `UMAY_INSTALL_DIR`). Windows users
+  install from the zip.
 - **Project policies.** `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue forms for
   bugs and feature requests, and a pull-request checklist.
 - **Clippy is clean and gated.** `cargo clippy --all-targets -- -D warnings`
@@ -38,9 +58,9 @@ implementation-only changes.
 
 ### Changed
 
-- **Support matrix is explicit.** README and the roadmap say x86_64 only:
-  static Linux, Intel macOS, and Windows. ARM64 and native Apple Silicon are a
-  planned follow-up, not a current target.
+- **Support matrix is explicit.** README, the roadmap and the ADR now name
+  Linux x86_64/AArch64, Intel macOS, Apple Silicon, Windows x86_64 and Windows
+  ARM64, including which archives the installer and release job publish.
 
 ## [0.3.1] — 2026-11-17
 

@@ -175,8 +175,14 @@ impl Target {
             });
         };
         if arch == "aarch64" {
+            if lower.contains("darwin") || lower.contains("macos") || lower.contains("apple") {
+                return Ok(Target::AARCH64_MACOS);
+            }
             if lower.contains("linux") {
                 return Ok(Target::AARCH64_LINUX);
+            }
+            if lower.contains("windows") || lower.contains("win32") || lower.contains("mingw") {
+                return Ok(Target::AARCH64_WINDOWS);
             }
             return Err(TargetError::UnsupportedOs {
                 target: normalised.to_string(),
@@ -206,9 +212,17 @@ impl Target {
     /// a target that cannot work is worse than reporting the one that can.
     pub fn host() -> Target {
         if cfg!(target_os = "macos") {
-            Target::MACOS
+            if cfg!(target_arch = "aarch64") {
+                Target::AARCH64_MACOS
+            } else {
+                Target::MACOS
+            }
         } else if cfg!(target_os = "windows") {
-            Target::WINDOWS
+            if cfg!(target_arch = "aarch64") {
+                Target::AARCH64_WINDOWS
+            } else {
+                Target::WINDOWS
+            }
         } else if cfg!(target_arch = "aarch64") {
             Target::AARCH64_LINUX
         } else {
@@ -306,8 +320,46 @@ impl Target {
         linker: "aarch64-linux-gnu-gcc",
     };
 
+    /// macOS on AArch64, the native Apple Silicon target.
+    pub const AARCH64_MACOS: Target = Target {
+        triple: "aarch64-apple-darwin",
+        os: "macos",
+        arch: "aarch64",
+        abi: Abi::Aapcs64,
+        format: ObjectFormat::MachO,
+        assembler: "clang",
+        assembler_args: &["-c", "--target=arm64-apple-darwin"],
+        object_extension: ".o",
+        linker: "cc",
+    };
+
+    /// Windows on AArch64, using the MinGW-w64 GNU environment.
+    ///
+    /// The compiler emits AAPCS64 code, which is also what Windows ARM64 uses
+    /// for scalar arguments and returns. Aggregates that cross into C follow
+    /// Microsoft's variant, not AAPCS64's HFA rule; UMAY's own calls are
+    /// internally consistent, and the runtime's C calls pass scalars.
+    pub const AARCH64_WINDOWS: Target = Target {
+        triple: "aarch64-w64-mingw32",
+        os: "windows",
+        arch: "aarch64",
+        abi: Abi::Aapcs64,
+        format: ObjectFormat::Coff,
+        assembler: "clang",
+        assembler_args: &["-c", "--target=aarch64-w64-mingw32"],
+        object_extension: ".o",
+        linker: "aarch64-w64-mingw32-gcc",
+    };
+
     /// Every target with a complete backend.
-    pub const ALL: &'static [Target] = &[Target::LINUX, Target::MACOS, Target::WINDOWS];
+    pub const ALL: &'static [Target] = &[
+        Target::LINUX,
+        Target::MACOS,
+        Target::WINDOWS,
+        Target::AARCH64_LINUX,
+        Target::AARCH64_MACOS,
+        Target::AARCH64_WINDOWS,
+    ];
 
     /// The name a symbol has in the object file.
     ///
@@ -329,7 +381,7 @@ impl Target {
     /// there writes `dist/main` (an extensionless PE file) that neither
     /// `CreateProcess` nor the shell will execute by its bare name.
     pub fn executable_name(&self, stem: &str) -> String {
-        if self.abi == Abi::Win64 {
+        if self.format == ObjectFormat::Coff {
             format!("{stem}.exe")
         } else {
             stem.to_string()
@@ -346,7 +398,8 @@ impl Target {
         BY_PREFIX
             .iter()
             .filter(|(prefix, _)| {
-                assembly.contains(&format!("call {prefix}")) || assembly.contains(&format!("call _{prefix}"))
+                assembly.contains(&format!("call {prefix}"))
+                    || assembly.contains(&format!("call _{prefix}"))
             })
             .map(|(_, lib)| *lib)
             .collect()
@@ -359,7 +412,12 @@ impl Target {
     /// per system (`-no-pie`, `-mconsole`, `-lws2_32`) and getting one wrong is a
     /// link error with a message about the wrong thing. The compiler already knows
     /// them, so it says them.
-    pub fn link_command(&self, program: &std::path::Path, runtime: &std::path::Path, exe: &str) -> String {
+    pub fn link_command(
+        &self,
+        program: &std::path::Path,
+        runtime: &std::path::Path,
+        exe: &str,
+    ) -> String {
         let mut parts = vec![
             self.linker.to_string(),
             "-o".to_string(),
@@ -448,10 +506,17 @@ impl Target {
             //
             // `WinMain` is spelled without the target's prefix here. Every
             // other symbol in a COFF object takes one, but this name has to
-            // match the startup object, which spells it bare.
+            // match the startup object, which spells it bare. The symbol is
+            // weak because the program and the runtime are separate objects and
+            // both carry this shim; a strong definition in each would collide.
             ObjectFormat::Coff => {
-                "\n.section .text\n                 .globl WinMain\n                 WinMain:\n\
-                 \x20   jmp _main\n"
+                if self.arch == "aarch64" {
+                    "\n.section .text\n                 .weak WinMain\n                 .globl WinMain\n                 WinMain:\n\
+                     \x20   b _main\n"
+                } else {
+                    "\n.section .text\n                 .weak WinMain\n                 .globl WinMain\n                 WinMain:\n\
+                     \x20   jmp _main\n"
+                }
             }
         }
     }
@@ -549,15 +614,13 @@ impl std::fmt::Display for TargetError {
             TargetError::UnsupportedArch { target } => write!(
                 f,
                 "`{target}` is not a supported architecture\n  \
-                 x86_64 has the complete backend; aarch64-unknown-linux-gnu has an \
-                 assembly-only backend. Complete targets: {}",
+                 complete targets: {}",
                 target_list()
             ),
             TargetError::UnsupportedOs { target } => write!(
                 f,
                 "`{target}` is not a supported target\n  \
-                 complete targets: {}\n  \
-                 assembly-only: aarch64-unknown-linux-gnu",
+                 complete targets: {}",
                 target_list()
             ),
         }
@@ -581,9 +644,15 @@ mod tests {
 
     #[test]
     fn parses_full_triples() {
-        assert_eq!(Target::parse("x86_64-unknown-linux-gnu").unwrap().os, "linux");
+        assert_eq!(
+            Target::parse("x86_64-unknown-linux-gnu").unwrap().os,
+            "linux"
+        );
         assert_eq!(Target::parse("x86_64-apple-darwin").unwrap().os, "macos");
-        assert_eq!(Target::parse("x86_64-pc-windows-gnu").unwrap().os, "windows");
+        assert_eq!(
+            Target::parse("x86_64-pc-windows-gnu").unwrap().os,
+            "windows"
+        );
     }
 
     #[test]
@@ -604,7 +673,7 @@ mod tests {
         // x86_64: that produces a binary the kernel will not load.
         let err = Target::parse("riscv64-unknown-linux-gnu").unwrap_err();
         assert!(matches!(err, TargetError::UnsupportedArch { .. }));
-        assert!(err.to_string().contains("x86_64 has the complete backend"));
+        assert!(err.to_string().contains("complete targets"));
     }
 
     #[test]
@@ -614,6 +683,13 @@ mod tests {
         assert_eq!(target.arch, "aarch64");
         assert_eq!(target.abi, Abi::Aapcs64);
         assert_eq!(Target::parse("arm64-linux").unwrap(), target);
+        let mac = Target::parse("aarch64-apple-darwin").unwrap();
+        assert_eq!(mac, Target::AARCH64_MACOS);
+        assert_eq!(Target::parse("arm64-macos").unwrap(), mac);
+        let windows = Target::parse("aarch64-w64-mingw32").unwrap();
+        assert_eq!(windows, Target::AARCH64_WINDOWS);
+        assert_eq!(Target::parse("arm64-windows").unwrap(), windows);
+        assert_eq!(Target::parse("aarch64-pc-windows-gnu").unwrap(), windows);
     }
 
     #[test]
@@ -634,12 +710,19 @@ mod tests {
         assert_eq!(Target::LINUX.executable_name("main"), "main");
         assert_eq!(Target::MACOS.executable_name("main"), "main");
         assert_eq!(Target::WINDOWS.executable_name("main"), "main.exe");
+        assert_eq!(Target::AARCH64_WINDOWS.executable_name("main"), "main.exe");
     }
 
     #[test]
     fn sqlite_is_linked_only_when_called() {
-        assert_eq!(Target::system_libraries("    call sqlite3_open_v2\n"), vec!["-lsqlite3"]);
-        assert_eq!(Target::system_libraries("    call _sqlite3_step\n"), vec!["-lsqlite3"]);
+        assert_eq!(
+            Target::system_libraries("    call sqlite3_open_v2\n"),
+            vec!["-lsqlite3"]
+        );
+        assert_eq!(
+            Target::system_libraries("    call _sqlite3_step\n"),
+            vec!["-lsqlite3"]
+        );
         assert!(Target::system_libraries("    call umay_println\n").is_empty());
     }
 
@@ -670,7 +753,10 @@ mod tests {
         assert_ne!(macos, windows);
         // Each layer must define the switch point the portable runtime calls.
         for src in [linux, macos, windows] {
-            assert!(src.contains("umay_platform_errno"), "layer lacks the errno accessor");
+            assert!(
+                src.contains("umay_platform_errno"),
+                "layer lacks the errno accessor"
+            );
         }
     }
 }

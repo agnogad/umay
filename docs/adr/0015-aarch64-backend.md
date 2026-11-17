@@ -1,7 +1,7 @@
 # ADR 0015: The AArch64 backend
 
-Status: **Linux backend implemented; performance and other systems remain**. See
-"What exists today" and "Known limitations".
+Status: **Implemented for Linux, macOS and Windows ARM64, with scalar register
+promotion.** A full register allocator remains; see "Known limitations".
 
 ## Context
 
@@ -44,8 +44,11 @@ needs no cross C library.
 
 ## What exists today
 
-- `aarch64-unknown-linux-gnu` (and `arm64-linux`) parse to a target with
-  `Abi::Aapcs64`.
+- `aarch64-unknown-linux-gnu` (and `arm64-linux`) and
+  `aarch64-apple-darwin` (and `arm64-macos`) parse to targets with
+  `Abi::Aapcs64`. The macOS target emits Mach-O with `@PAGE`/`@PAGEOFF`
+  relocations, ELF-only `.type`/`.size` directives omitted, and the system
+  `cc` as linker.
 - The full MIR surface the reference backend supports is lowered: constants,
   locals, integer, bitwise and floating-point operations, comparisons, casts,
   branches, direct and indirect calls, returns, `Drop` (a no-op until
@@ -79,31 +82,44 @@ needs no cross C library.
 - The compiler itself is built as a static `aarch64-unknown-linux-musl` binary
   with `rust-lld`, published as the `aarch64-linux-musl` archive and selected by
   `install.sh` on ARM64 Linux. CI builds it and runs `umay version` under qemu.
+- The macOS ARM64 compiler is built natively on a `macos-15` runner, emits
+  Mach-O ARM64, links with the system `cc` and runs a program in CI. The
+  `aarch64-darwin` archive is part of a tag release.
 
 ## Known limitations
 
-- **HFA arguments and returns are not AAPCS64.** An aggregate made only of
-  floats travels through the general-register path instead of `v` registers.
-  Calls between UMAY functions are consistent because both sides use the same
-  rule; a C function with an HFA parameter or return would not be.
-- **No register allocation.** Every local lives in a stack slot and every value
-  is computed in `x0`/`x1` or `d0`/`d1`. Correctness first; speed is a later
-  pass.
-- **Linux only.** Mach-O, COFF, the Darwin and Windows ARM64 ABIs, and the
-  per-system runtime layers are the next systems, not current targets.
+- **HFA aggregates use the `v` registers and are checked against C.** A
+  composite of one to four floats of one width is classified as an HFA, passed
+  and returned in `v0`-`v3`, and a C helper exercises both directions. A float
+  aggregate that is not homogeneous (for example `{ i64, f64 }`) still travels
+  through the integer-register path; UMAY's own calls agree on that, but it is
+  not AAPCS64 C interop.
+- **No full register allocator.** Scalar locals are promoted to callee-saved
+  registers when their address is never taken and no projected place names
+  them. Values still pass through `x0`/`x1` or `d0`/`d1`, and floats,
+  aggregates and address-taken locals remain in stack slots. On a three-million
+  iteration loop the promotion roughly halved qemu wall time (0.064 s to
+  0.030 s median) and reduced the loop's stack loads and stores from 21 to 2.
+- **Windows ARM64 C aggregate calls follow Microsoft's ABI, not AAPCS64's
+  HFA rule.** UMAY-to-UMAY calls are internally consistent. The runtime's
+  external calls pass scalars, so startup, file and console calls are not
+  affected.
+- Windows ARM64 is cross-linked with llvm-mingw and the PE header is checked
+  (`COFF-ARM64`, console subsystem). The native CI job runs the executable on a
+  Windows ARM64 runner.
 - Slices and `i128` are not in the reference backend either, so they are not
   AArch64-specific gaps.
 
 ## Next steps, in order
 
-1. **The rest of the corpus under qemu.** Run every executable program test
-   against the AArch64 target and compare output and exit status with x86_64.
-2. **HFA and C interop.** Classify homogeneous float aggregates and use the
-   `v` registers where AAPCS64 requires; then a C struct of floats can cross.
-3. **Register allocation.** Replace the stack machine with a linear scan over
-   AArch64 registers once correctness is pinned by the corpus.
-4. **macOS and Windows.** Mach-O and COFF dressing, the `@PAGE`/`@PAGEOFF`
-   relocations, the Darwin and Windows ARM64 ABIs, and artifacts for each.
+1. **The rest of the corpus under qemu/native runners.** Run every executable
+   program test against the AArch64 targets and compare output and exit status
+   with x86_64.
+2. **A full register allocator.** Replace the remaining stack traffic with a
+   linear scan over `x0`-`x17` and `d0`-`d7`, keeping the static promotion as
+   the fallback for address-taken locals.
+3. **Windows aggregate C interop.** Match Microsoft's composite classification
+   when a UMAY aggregate crosses into a C function on Windows ARM64.
 
 ## Consequences
 

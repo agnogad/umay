@@ -30,7 +30,8 @@
 //! later `build` verifies the content it actually built and not the version
 //! someone typed.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use crate::lock::source_hash;
 
@@ -42,34 +43,68 @@ pub struct FetchError {
 
 impl FetchError {
     fn new(message: impl Into<String>) -> FetchError {
-        FetchError { message: message.into() }
+        FetchError {
+            message: message.into(),
+        }
     }
 }
 
-/// The registry roots named by `UMAY_REGISTRY`, in order.
+/// One entry of `UMAY_REGISTRY`: a local directory or an HTTP(S) base URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryRoot {
+    Local(PathBuf),
+    Url(String),
+}
+
+impl RegistryRoot {
+    fn label(&self) -> String {
+        match self {
+            RegistryRoot::Local(path) => path.display().to_string(),
+            RegistryRoot::Url(url) => url.clone(),
+        }
+    }
+}
+
+/// Every registry entry, in order.
 ///
-/// A root prefixed with `file:` is a URL form of a local directory; anything
-/// else is read as a plain path. When the variable is unset this is empty, which
-/// is what tells a caller there is nowhere to fetch from.
-pub fn registry_roots() -> Vec<PathBuf> {
+/// A value containing `://` is split on `;` so a URL keeps its colon; without a
+/// scheme the platform path separator is used, preserving the historical
+/// directory form. Local and URL entries may be mixed in the `;` form.
+pub fn registry_entries() -> Vec<RegistryRoot> {
     match std::env::var("UMAY_REGISTRY") {
-        Ok(value) => split_roots(&value),
+        Ok(value) => parse_registry(&value),
         Err(_) => Vec::new(),
     }
 }
 
-/// Splits the registry variable on the platform path separator.
-///
-/// Each entry is a directory path. A `file:` URL is not accepted: the registry
-/// variable is split on `:`, so a scheme would be torn from its path and the
-/// result would be two nonsense roots -- a fetch that silently finds nothing is
-/// the failure this module exists to remove, so the format is kept to plain
-/// directories a reader can recognise.
-fn split_roots(value: &str) -> Vec<PathBuf> {
-    std::env::split_paths(value)
-        .map(|part| PathBuf::from(part.to_string_lossy().trim()))
-        .filter(|p| !p.as_os_str().is_empty())
-        .collect()
+fn parse_registry(value: &str) -> Vec<RegistryRoot> {
+    if value.contains("://") {
+        value
+            .split(';')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                if part.starts_with("http://") || part.starts_with("https://") {
+                    RegistryRoot::Url(part.trim_end_matches('/').to_string())
+                } else {
+                    RegistryRoot::Local(PathBuf::from(part))
+                }
+            })
+            .collect()
+    } else {
+        std::env::split_paths(value)
+            .map(|part| RegistryRoot::Local(PathBuf::from(part.to_string_lossy().trim())))
+            .filter(|root| match root {
+                RegistryRoot::Local(path) => !path.as_os_str().is_empty(),
+                RegistryRoot::Url(_) => true,
+            })
+            .collect()
+    }
+}
+
+/// Labels for `umay doctor`.
+pub fn registry_labels() -> Vec<String> {
+    registry_entries().iter().map(RegistryRoot::label).collect()
 }
 
 /// Fetches `name` at `version` into `project_dir/deps/<name>`.
@@ -91,53 +126,73 @@ pub fn fetch(project_dir: &Path, name: &str, version: &str) -> Result<PathBuf, F
         )));
     }
 
-    let roots = registry_roots();
+    let roots = registry_entries();
     if roots.is_empty() {
         return Err(FetchError::new(format!(
             "cannot fetch `{name}`: `UMAY_REGISTRY` names no registry to fetch from"
         )));
     }
-
-    // Look for the package in each root, in order. The first one that has it
-    // wins, so a project can put a private registry ahead of a shared one.
-    let mut found: Option<PathBuf> = None;
-    let mut tried: Vec<String> = Vec::new();
-    for root in &roots {
-        let candidate = root.join(name).join(version);
-        if candidate.is_dir() {
-            found = Some(candidate);
-            break;
-        }
-        tried.push(candidate.display().to_string());
-    }
-
-    let Some(source) = found else {
+    if version.is_empty() || !is_safe_version(version) {
         return Err(FetchError::new(format!(
-            "`{name}` version `{version}` is in no registry (looked in: {})",
-            tried.join(", ")
-        )));
-    };
-
-    // A package without a manifest is not a package. Catching it here names the
-    // registry entry rather than failing later inside the compiler with a path
-    // the user may never have written.
-    if !source.join("umay.toml").is_file() {
-        return Err(FetchError::new(format!(
-            "`{}` has no `umay.toml`",
-            source.display()
+            "`{version}` is not a usable version"
         )));
     }
 
     let dest = crate::lock::dependency_dir(project_dir, name);
-    if dest.exists() {
-        std::fs::remove_dir_all(&dest).map_err(|e| {
-            FetchError::new(format!("cannot replace `{}`: {e}", dest.display()))
-        })?;
+    let mut tried = Vec::new();
+    for root in &roots {
+        match root {
+            RegistryRoot::Local(path) => {
+                let candidate = path.join(name).join(version);
+                tried.push(candidate.display().to_string());
+                if !candidate.is_dir() {
+                    continue;
+                }
+                if !candidate.join("umay.toml").is_file() {
+                    return Err(FetchError::new(format!(
+                        "`{}` has no `umay.toml`",
+                        candidate.display()
+                    )));
+                }
+                if dest.exists() {
+                    std::fs::remove_dir_all(&dest).map_err(|e| {
+                        FetchError::new(format!("cannot replace `{}`: {e}", dest.display()))
+                    })?;
+                }
+                copy_tree(&candidate, &dest).map_err(|e| {
+                    FetchError::new(format!("cannot copy `{}`: {e}", candidate.display()))
+                })?;
+                return Ok(dest);
+            }
+            RegistryRoot::Url(base) => {
+                let url = format!("{base}/{name}/{version}.tar");
+                tried.push(url.clone());
+                let Some(tar) = fetch_bytes(&url)? else {
+                    continue;
+                };
+                let dest = crate::lock::dependency_dir(project_dir, name);
+                if dest.exists() {
+                    std::fs::remove_dir_all(&dest).map_err(|e| {
+                        FetchError::new(format!("cannot replace `{}`: {e}", dest.display()))
+                    })?;
+                }
+                extract_tar(&tar, &dest).map_err(|e| {
+                    FetchError::new(format!("cannot unpack `{name}` {version}: {e}"))
+                })?;
+                if !dest.join("umay.toml").is_file() {
+                    return Err(FetchError::new(format!(
+                        "`{name}` version `{version}` from {base} has no `umay.toml`"
+                    )));
+                }
+                return Ok(dest);
+            }
+        }
     }
-    copy_tree(&source, &dest)
-        .map_err(|e| FetchError::new(format!("cannot copy `{}`: {e}", source.display())))?;
 
-    Ok(dest)
+    Err(FetchError::new(format!(
+        "`{name}` version `{version}` is in no registry (looked in: {})",
+        tried.join(", ")
+    )))
 }
 
 /// Fetches `name` at any version the registry holds, newest first by the
@@ -152,7 +207,7 @@ pub fn fetch_latest(project_dir: &Path, name: &str) -> Result<(PathBuf, String),
             "`{name}` is not a usable package name: letters, digits, `-` and `_` only"
         )));
     }
-    let roots = registry_roots();
+    let roots = registry_entries();
     if roots.is_empty() {
         return Err(FetchError::new(format!(
             "cannot fetch `{name}`: `UMAY_REGISTRY` names no registry to fetch from"
@@ -161,13 +216,30 @@ pub fn fetch_latest(project_dir: &Path, name: &str) -> Result<(PathBuf, String),
 
     let mut versions: Vec<String> = Vec::new();
     for root in &roots {
-        let package_dir = root.join(name);
-        let Ok(entries) = std::fs::read_dir(&package_dir) else { continue };
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if !versions.iter().any(|v| v == name) {
-                        versions.push(name.to_string());
+        match root {
+            RegistryRoot::Local(path) => {
+                let package_dir = path.join(name);
+                let Ok(entries) = std::fs::read_dir(&package_dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if !versions.iter().any(|v| v == name) {
+                                versions.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            RegistryRoot::Url(base) => {
+                let url = format!("{base}/{name}/versions.txt");
+                if let Some(text) = fetch_text(&url)? {
+                    for line in text.lines() {
+                        let version = line.trim();
+                        if is_safe_version(version) && !versions.iter().any(|v| v == version) {
+                            versions.push(version.to_string());
+                        }
                     }
                 }
             }
@@ -217,6 +289,117 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn is_safe_version(version: &str) -> bool {
+    !version.is_empty()
+        && version != ".."
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+}
+
+fn fetch_bytes(url: &str) -> Result<Option<Vec<u8>>, FetchError> {
+    let output = Command::new("curl")
+        .args(["-sSL", "--max-time", "60", "-w", "\n%{http_code}", url])
+        .output()
+        .map_err(|error| FetchError::new(format!("cannot run `curl` to fetch {url}: {error}")))?;
+    if !output.status.success() {
+        return Err(FetchError::new(format!(
+            "cannot fetch {url}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let mut body = output.stdout;
+    let split = body.iter().rposition(|byte| *byte == b'\n').unwrap_or(0);
+    let status = String::from_utf8_lossy(&body[split + 1..])
+        .trim()
+        .to_string();
+    body.truncate(split);
+    match status.as_str() {
+        "200" => Ok(Some(body)),
+        // A package missing from one root lets the next root answer.
+        "404" => Ok(None),
+        other => Err(FetchError::new(format!("cannot fetch {url}: HTTP {other}"))),
+    }
+}
+
+fn fetch_text(url: &str) -> Result<Option<String>, FetchError> {
+    fetch_bytes(url).map(|bytes| bytes.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+fn tar_string(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+fn tar_size(bytes: &[u8]) -> Result<u64, String> {
+    let text = tar_string(bytes).trim().to_string();
+    if text.is_empty() {
+        return Ok(0);
+    }
+    u64::from_str_radix(&text, 8).map_err(|_| format!("bad tar size `{text}`"))
+}
+
+fn safe_tar_path(name: &str) -> Result<PathBuf, String> {
+    let path = Path::new(name);
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            _ => return Err(format!("tar entry escapes the package: `{name}`")),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        return Err("tar entry has an empty path".into());
+    }
+    Ok(out)
+}
+
+/// Extracts an uncompressed USTAR archive.
+///
+/// The registry server emits USTAR, whose names fit the header's fields. Other
+/// entry types are skipped rather than followed: a package is data, not a set
+/// of links or devices.
+fn extract_tar(bytes: &[u8], dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let mut offset = 0usize;
+    while offset + 512 <= bytes.len() {
+        let header = &bytes[offset..offset + 512];
+        if header.iter().all(|b| *b == 0) {
+            break;
+        }
+        let name = tar_string(&header[0..100]);
+        let prefix = tar_string(&header[345..500]);
+        let full = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let size = tar_size(&header[124..136])?;
+        let kind = header[156];
+        let data_start = offset + 512;
+        let data_end = data_start
+            .checked_add(size as usize)
+            .ok_or_else(|| "tar entry size overflows".to_string())?;
+        if data_end > bytes.len() {
+            return Err("tar entry is truncated".into());
+        }
+        if kind == b'5' || full.ends_with('/') {
+            std::fs::create_dir_all(dest.join(safe_tar_path(full.trim_end_matches('/'))?))
+                .map_err(|e| e.to_string())?;
+        } else if kind == b'0' || kind == 0 {
+            let path = dest.join(safe_tar_path(&full)?);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&path, &bytes[data_start..data_end]).map_err(|e| e.to_string())?;
+        }
+        let padded = (size as usize + 511) & !511;
+        offset = data_start + padded;
+    }
+    Ok(())
+}
+
 /// Compares two dotted version strings.
 ///
 /// Numeric components compare as numbers (`1.10.0` above `1.9.0`); anything that
@@ -250,9 +433,18 @@ mod tests {
 
     #[test]
     fn a_version_compares_by_number_not_string() {
-        assert_eq!(compare_versions("1.10.0", "1.9.0"), std::cmp::Ordering::Greater);
-        assert_eq!(compare_versions("1.0.0", "1.0.0"), std::cmp::Ordering::Equal);
-        assert_eq!(compare_versions("2.0.0", "1.99.0"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            compare_versions("1.10.0", "1.9.0"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("1.0.0", "1.0.0"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_versions("2.0.0", "1.99.0"),
+            std::cmp::Ordering::Greater
+        );
     }
 
     #[test]
@@ -268,9 +460,38 @@ mod tests {
         // `split_paths` uses `;` on Windows and `:` elsewhere, so the joined
         // form comes from the same API the reader uses.
         let joined = std::env::join_paths([Path::new("/a"), Path::new("/b")]).expect("join roots");
-        let roots = split_roots(joined.to_str().expect("roots are UTF-8"));
-        assert_eq!(roots, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
-        assert_eq!(split_roots("/only"), vec![PathBuf::from("/only")]);
+        let roots = parse_registry(joined.to_str().expect("roots are UTF-8"));
+        assert_eq!(
+            roots,
+            vec![
+                RegistryRoot::Local(PathBuf::from("/a")),
+                RegistryRoot::Local(PathBuf::from("/b"))
+            ]
+        );
+        assert_eq!(
+            parse_registry("/only"),
+            vec![RegistryRoot::Local(PathBuf::from("/only"))]
+        );
+    }
+
+    #[test]
+    fn urls_and_directories_can_share_a_registry_list() {
+        let entries = parse_registry("http://example.test/reg;https://secure.test/reg;/tmp/local");
+        assert_eq!(
+            entries,
+            vec![
+                RegistryRoot::Url("http://example.test/reg".into()),
+                RegistryRoot::Url("https://secure.test/reg".into()),
+                RegistryRoot::Local(PathBuf::from("/tmp/local")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_version_that_could_escape_the_path_is_refused() {
+        assert!(!is_safe_version("../x"));
+        assert!(!is_safe_version("a/b"));
+        assert!(is_safe_version("1.10.0-rc1"));
     }
 
     #[test]

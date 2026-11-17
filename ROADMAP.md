@@ -641,10 +641,12 @@ and navigation; `umay fmt` is idempotent on the full test corpus.
   so what a build verified is what it built. The graph is walked, so a fetched
   dependency's own dependencies are fetched too; an empty version asks for the
   newest, compared by number; a name that could escape `deps/` is refused. The
-  registry is a directory of packages rather than a network service -- the fetch,
-  version selection and hashing are exercised in full against a throwaway
-  registry (`compiler/tests/phase8_upm.rs`), and a hosted registry is the same
-  code behind one more transport.
+  registry can be a directory or an HTTP(S) service. A URL root serves
+  `<name>/versions.txt` and `<name>/<version>.tar`; the client downloads with
+  `curl` and extracts a guarded USTAR archive. `scripts/registry-server.py`
+  serves a directory in that shape. Directory and HTTP transports share the
+  version choice and content hash, and both are tested
+  (`compiler/tests/phase8_upm.rs`, `compiler/tests/upm_http.rs`).
 
 Exit criteria: incremental rebuild after a one-module edit does not recompile
 independent modules (met for module granularity: the cache key covers the whole
@@ -895,28 +897,35 @@ compiler passes the same test corpus.
 The compiler and the three x86_64 release artifacts are in place. What remains
 is breadth, packaging, and the two known quality gaps.
 
-- [~] **ARM64.** The Linux AArch64 backend in `compiler/src/aarch64.rs` lowers
+- [x] **ARM64.** The AArch64 backend in `compiler/src/aarch64.rs` lowers
       the full MIR surface: scalars, strings, pointers, arrays, structs,
       tuples, enums, generics, function pointers, floats and indirect calls.
       AAPCS64 calls pass integer arguments in `x0`-`x7`, floats in `v0`-`v7`,
       composites in registers or by reference, and extra arguments on the
       stack; returns use `x0`/`x1`, `d0`/`s0`, or the hidden `x8` pointer. The
       program and runtime compile for `aarch64-unknown-linux-gnu`, and a CI job
-      links and runs a feature-covering program under qemu. The release
-      workflow builds a static `aarch64-linux-musl` compiler artifact, and the
-      installer selects it on ARM64 Linux. HFA C interop, register allocation
-      and ARM64 macOS/Windows remain; see
+      links and runs a feature-covering program under qemu. Homogeneous float
+      aggregates use the AAPCS64 `v` registers. `aarch64-apple-darwin` emits
+      Mach-O ARM64 and runs natively on an Apple Silicon CI runner.
+      `aarch64-w64-mingw32` emits COFF ARM64, links with llvm-mingw, and a
+      native Windows ARM64 CI job runs the PE. The release workflow builds
+      `aarch64-linux-musl`, `aarch64-darwin` and `aarch64-windows` artifacts.
+      Scalar locals are promoted to `x19`-`x28`, cutting a tight loop's qemu
+      time roughly in half; a full register allocator remains. See
       [ADR 0015](docs/adr/0015-aarch64-backend.md).
-- [ ] **Hosted `upm` registry.** The fetcher, version choice and content hash
-      already work against a directory. A network registry is a transport layer
-      over the same code, not a second resolver.
+- [x] **Hosted `upm` registry.** `UMAY_REGISTRY` accepts `;`-separated HTTP(S)
+      base URLs alongside directories. The client reads `versions.txt`,
+      downloads a package tar with `curl`, and extracts it safely. A runnable
+      registry server ships in `scripts/registry-server.py`; public deployments
+      put it behind TLS.
 - [ ] **Package-manager distribution.** Homebrew, Scoop, and an AUR package on
       top of the existing archives, with the same checksum gate.
 - [ ] **Close E0208.** Field-wise borrow liveness rejects some generated
       programs that are sound. The long fuzz run stays manual until it does not.
-- [ ] **Register-allocation quality.** The runtime-speed comparison is the
-      measurable score; the named work is keeping intermediates in registers
-      instead of storing and reloading them.
+- [~] **Register-allocation quality.** Scalar locals are promoted to
+      callee-saved registers when their address is never taken, which halves a
+      tight loop's qemu time. A full allocator for intermediates, floats and
+      aggregates is still open.
 - [ ] **Reproducible release check.** Rebuild an artifact and compare bytes, so
       "the tarball matches the commit" is verified rather than assumed.
 

@@ -109,6 +109,7 @@ fn generate_one(
     };
     let needs_sret = is_aggregate(types.kind(body.ret_ty)) && ret_size > 16;
     let (offsets, frame, sret_offset) = frame_layout(body, types, hir, needs_sret)?;
+    let local_reg = promote_locals(body, types);
 
     let mut emitter = Emitter {
         out: String::new(),
@@ -123,11 +124,15 @@ fn generate_one(
         next_label: 0,
         hir,
         sret_offset,
+        saved_regs: local_reg.iter().flatten().copied().collect(),
+        local_reg,
     };
 
     let _ = writeln!(emitter.out, ".p2align 2");
     let _ = writeln!(emitter.out, ".globl {symbol}");
-    let _ = writeln!(emitter.out, ".type {symbol}, %function");
+    if target.format == crate::target::ObjectFormat::Elf {
+        let _ = writeln!(emitter.out, ".type {symbol}, %function");
+    }
     let _ = writeln!(emitter.out, "{symbol}:");
     let _ = writeln!(emitter.out, "    stp x29, x30, [sp, #-16]!");
     let _ = writeln!(emitter.out, "    mov x29, sp");
@@ -137,6 +142,18 @@ fn generate_one(
         } else {
             let _ = writeln!(emitter.out, "    mov x12, #{frame}");
             let _ = writeln!(emitter.out, "    sub sp, sp, x12");
+        }
+    }
+    let saved = emitter.saved_regs.clone();
+    for chunk in saved.chunks(2) {
+        match chunk {
+            [a, b] => {
+                let _ = writeln!(emitter.out, "    stp x{a}, x{b}, [sp, #-16]!");
+            }
+            [a] => {
+                let _ = writeln!(emitter.out, "    stp x{a}, xzr, [sp, #-16]!");
+            }
+            _ => {}
         }
     }
     if emitter.sret_offset.is_some() {
@@ -153,7 +170,9 @@ fn generate_one(
         emitter.terminator(&block.terminator)?;
     }
 
-    let _ = writeln!(emitter.out, ".size {symbol}, .-{symbol}");
+    if target.format == crate::target::ObjectFormat::Elf {
+        let _ = writeln!(emitter.out, ".size {symbol}, .-{symbol}");
+    }
     Ok(emitter.out)
 }
 
@@ -162,6 +181,8 @@ enum ArgKind {
     Scalar,
     /// A scalar float, passed in an FP/SIMD register.
     Float,
+    /// A homogeneous floating-point aggregate: 1-4 floats of one width.
+    Hfa,
     /// A composite of at most 16 bytes, passed in one or two general registers.
     Small,
     /// A composite larger than 16 bytes, passed by reference.
@@ -169,9 +190,16 @@ enum ArgKind {
 }
 
 #[derive(Debug, Clone)]
+struct Hfa {
+    offsets: Vec<u64>,
+    float64: bool,
+}
+
 struct ArgLoc {
     regs: Vec<u8>,
     freg: Option<u8>,
+    fregs: Vec<u8>,
+    hfa: Option<Hfa>,
     stack: Option<u64>,
     kind: ArgKind,
     size: u64,
@@ -191,6 +219,8 @@ struct Emitter<'a> {
     next_label: usize,
     hir: &'a Hir,
     sret_offset: Option<u32>,
+    local_reg: Vec<Option<u8>>,
+    saved_regs: Vec<u8>,
 }
 
 impl Emitter<'_> {
@@ -202,7 +232,8 @@ impl Emitter<'_> {
                 match value {
                     Rvalue::Use(operand) => {
                         if is_aggregate(self.types.kind(place_ty)) {
-                            if let Operand::Constant(Constant::UnitVariant { def, index }) = operand {
+                            if let Operand::Constant(Constant::UnitVariant { def, index }) = operand
+                            {
                                 self.unit_variant(place, *def, *index)?;
                                 return Ok(());
                             }
@@ -231,7 +262,12 @@ impl Emitter<'_> {
                             self.float_binary(*op, lhs, rhs, lhs_ty.unwrap_or(place_ty))?;
                             float_result = !matches!(
                                 op,
-                                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                                BinOp::Eq
+                                    | BinOp::Ne
+                                    | BinOp::Lt
+                                    | BinOp::Le
+                                    | BinOp::Gt
+                                    | BinOp::Ge
                             );
                         } else {
                             self.operand(lhs, 0)?;
@@ -244,7 +280,11 @@ impl Emitter<'_> {
                         self.operand(operand, 0)?;
                         match op {
                             UnOp::Neg => {
-                                if self.operand_ty(operand).map(|ty| self.is_float(ty)).unwrap_or(false) {
+                                if self
+                                    .operand_ty(operand)
+                                    .map(|ty| self.is_float(ty))
+                                    .unwrap_or(false)
+                                {
                                     let float64 = self
                                         .operand_ty(operand)
                                         .map(|ty| matches!(self.types.kind(ty), TyKind::F64))
@@ -258,7 +298,10 @@ impl Emitter<'_> {
                                 }
                             }
                             UnOp::Not => {
-                                if matches!(self.operand_ty(operand).map(|t| self.types.kind(t)), Some(TyKind::Bool)) {
+                                if matches!(
+                                    self.operand_ty(operand).map(|t| self.types.kind(t)),
+                                    Some(TyKind::Bool)
+                                ) {
                                     let _ = writeln!(self.out, "    eor x0, x0, #1");
                                 } else {
                                     let _ = writeln!(self.out, "    mvn x0, x0");
@@ -281,7 +324,12 @@ impl Emitter<'_> {
                         }
                         self.normalize(place_ty)?;
                     }
-                    Rvalue::Ref { place: borrowed, .. } | Rvalue::Reborrow { place: borrowed, .. } => {
+                    Rvalue::Ref {
+                        place: borrowed, ..
+                    }
+                    | Rvalue::Reborrow {
+                        place: borrowed, ..
+                    } => {
                         self.address_of(borrowed)?;
                         let _ = writeln!(self.out, "    mov x0, x11");
                         self.normalize(place_ty)?;
@@ -306,26 +354,42 @@ impl Emitter<'_> {
                     }
                     Rvalue::Len(len_place) => {
                         let ty = self.place_ty(len_place)?;
-                        let length = match self.types.kind(ty) {
-                            TyKind::Array { len, .. } => *len,
-                            _ => return Err("the AArch64 backend supports `len` only on fixed arrays yet".into()),
-                        };
+                        let length =
+                            match self.types.kind(ty) {
+                                TyKind::Array { len, .. } => *len,
+                                _ => return Err(
+                                    "the AArch64 backend supports `len` only on fixed arrays yet"
+                                        .into(),
+                                ),
+                            };
                         let _ = writeln!(self.out, "    mov x0, #{length}");
                         self.normalize(place_ty)?;
                     }
                     Rvalue::Repeat { operand, count } => {
                         self.repeat(place, place_ty, operand, *count)?;
                     }
-                    Rvalue::Aggregate { kind: AggregateKind::Array, operands } => {
+                    Rvalue::Aggregate {
+                        kind: AggregateKind::Array,
+                        operands,
+                    } => {
                         self.array_literal(place, place_ty, operands)?;
                     }
-                    Rvalue::Aggregate { kind: AggregateKind::Struct(def), operands } => {
+                    Rvalue::Aggregate {
+                        kind: AggregateKind::Struct(def),
+                        operands,
+                    } => {
                         self.struct_literal(place, place_ty, *def, operands)?;
                     }
-                    Rvalue::Aggregate { kind: AggregateKind::Variant { def, index }, operands } => {
+                    Rvalue::Aggregate {
+                        kind: AggregateKind::Variant { def, index },
+                        operands,
+                    } => {
                         self.variant_literal(place, place_ty, *def, *index, operands)?;
                     }
-                    Rvalue::Aggregate { kind: AggregateKind::Tuple, operands } => {
+                    Rvalue::Aggregate {
+                        kind: AggregateKind::Tuple,
+                        operands,
+                    } => {
                         self.tuple_literal(place, place_ty, operands)?;
                     }
                     Rvalue::Discriminant(discriminant_place) => {
@@ -358,7 +422,13 @@ impl Emitter<'_> {
         }
     }
 
-    fn repeat(&mut self, place: &Place, ty: TyId, operand: &Operand, count: u64) -> Result<(), String> {
+    fn repeat(
+        &mut self,
+        place: &Place,
+        ty: TyId,
+        operand: &Operand,
+        count: u64,
+    ) -> Result<(), String> {
         let element = self.element(ty)?;
         let size = self.size_of(element)?;
         let aggregate = is_aggregate(self.types.kind(element));
@@ -394,7 +464,12 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    fn array_literal(&mut self, place: &Place, ty: TyId, operands: &[Operand]) -> Result<(), String> {
+    fn array_literal(
+        &mut self,
+        place: &Place,
+        ty: TyId,
+        operands: &[Operand],
+    ) -> Result<(), String> {
         let element = self.element(ty)?;
         let size = self.size_of(element)?;
         self.address_of(place)?;
@@ -451,7 +526,12 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    fn tuple_literal(&mut self, place: &Place, ty: TyId, operands: &[Operand]) -> Result<(), String> {
+    fn tuple_literal(
+        &mut self,
+        place: &Place,
+        ty: TyId,
+        operands: &[Operand],
+    ) -> Result<(), String> {
         let (offsets, fields) = self.tuple_fields(ty)?;
         if operands.len() != fields.len() {
             return Err("a tuple literal and its type disagree on element count".into());
@@ -488,7 +568,9 @@ impl Emitter<'_> {
         let offsets = self.variant_offsets(def, index, &args)?;
         let fields = self.variant_types(def, index, &args)?;
         if operands.len() != fields.len() {
-            return Err("an enum variant literal and its definition disagree on field count".into());
+            return Err(
+                "an enum variant literal and its definition disagree on field count".into(),
+            );
         }
         self.address_of(place)?;
         let _ = writeln!(self.out, "    mov x14, x11");
@@ -504,7 +586,12 @@ impl Emitter<'_> {
         self.store_tag(11, def, index)
     }
 
-    fn copy_aggregate(&mut self, destination: &Place, source: &Place, size: u64) -> Result<(), String> {
+    fn copy_aggregate(
+        &mut self,
+        destination: &Place,
+        source: &Place,
+        size: u64,
+    ) -> Result<(), String> {
         self.address_of(source)?;
         let _ = writeln!(self.out, "    mov x13, x11");
         self.address_of(destination)?;
@@ -545,7 +632,11 @@ impl Emitter<'_> {
                 let _ = writeln!(self.out, "    b .L{}_bb{}", self.tag, target.0);
                 Ok(())
             }
-            Terminator::SwitchInt { discr, targets, otherwise } => {
+            Terminator::SwitchInt {
+                discr,
+                targets,
+                otherwise,
+            } => {
                 self.operand(discr, 0)?;
                 for (value, target) in targets {
                     let _ = writeln!(self.out, "    mov x1, #{value}");
@@ -555,7 +646,13 @@ impl Emitter<'_> {
                 let _ = writeln!(self.out, "    b .L{}_bb{}", self.tag, otherwise.0);
                 Ok(())
             }
-            Terminator::Call { callee, args, destination, target, .. } => {
+            Terminator::Call {
+                callee,
+                args,
+                destination,
+                target,
+                ..
+            } => {
                 self.emit_call(callee, args, destination.as_ref())?;
                 let _ = writeln!(self.out, "    b .L{}_bb{}", self.tag, target.0);
                 Ok(())
@@ -570,18 +667,29 @@ impl Emitter<'_> {
                     let place = Place::local(local);
                     let ty = self.place_ty(&place)?;
                     if is_aggregate(self.types.kind(ty)) {
-                        let size = self.size_of(ty)?;
-                        if size > 16 {
+                        if let Some(hfa) = self.hfa_of(ty)? {
                             self.address_of(&place)?;
                             let _ = writeln!(self.out, "    mov x13, x11");
-                            self.sret_address(11)?;
-                            let _ = writeln!(self.out, "    ldr x11, [x11]");
-                            self.copy_bytes(13, size)?;
+                            for (index, offset) in hfa.offsets.iter().enumerate() {
+                                let _ = writeln!(self.out, "    mov x11, x13");
+                                self.add_to_address(*offset)?;
+                                let kind = if hfa.float64 { "d" } else { "s" };
+                                let _ = writeln!(self.out, "    ldr {kind}{index}, [x11]");
+                            }
                         } else {
-                            self.address_of(&place)?;
-                            let _ = writeln!(self.out, "    ldr x0, [x11]");
-                            if size > 8 {
-                                let _ = writeln!(self.out, "    ldr x1, [x11, #8]");
+                            let size = self.size_of(ty)?;
+                            if size > 16 {
+                                self.address_of(&place)?;
+                                let _ = writeln!(self.out, "    mov x13, x11");
+                                self.sret_address(11)?;
+                                let _ = writeln!(self.out, "    ldr x11, [x11]");
+                                self.copy_bytes(13, size)?;
+                            } else {
+                                self.address_of(&place)?;
+                                let _ = writeln!(self.out, "    ldr x0, [x11]");
+                                if size > 8 {
+                                    let _ = writeln!(self.out, "    ldr x1, [x11, #8]");
+                                }
                             }
                         }
                     } else if self.is_float(ty) {
@@ -592,6 +700,17 @@ impl Emitter<'_> {
                     }
                 } else {
                     let _ = writeln!(self.out, "    mov x0, #0");
+                }
+                for chunk in self.saved_regs.chunks(2).rev() {
+                    match chunk {
+                        [a, b] => {
+                            let _ = writeln!(self.out, "    ldp x{a}, x{b}, [sp], #16");
+                        }
+                        [a] => {
+                            let _ = writeln!(self.out, "    ldp x{a}, xzr, [sp], #16");
+                        }
+                        _ => {}
+                    }
                 }
                 if self.frame > 0 {
                     if self.frame <= 4095 {
@@ -625,23 +744,23 @@ impl Emitter<'_> {
         // copying a large aggregate must use scratch registers that are not
         // argument registers.
         for (index, location) in locations.iter().enumerate() {
-            if location.regs.is_empty() && location.freg.is_none() {
+            if location.regs.is_empty() && location.freg.is_none() && location.fregs.is_empty() {
                 continue;
             }
             match location.kind {
                 ArgKind::Scalar => {
-                    self.local_address(index, 11)?;
-                    let _ = writeln!(self.out, "    str x{}, [x11]", location.regs[0]);
+                    if let Some(local) = self.local_reg[index] {
+                        let _ = writeln!(self.out, "    mov x{local}, x{}", location.regs[0]);
+                    } else {
+                        self.local_address(index, 11)?;
+                        let _ = writeln!(self.out, "    str x{}, [x11]", location.regs[0]);
+                    }
                 }
                 ArgKind::Small => {
                     self.local_address(index, 11)?;
                     let _ = writeln!(self.out, "    str x{}, [x11]", location.regs[0]);
                     if location.size > 8 {
-                        let _ = writeln!(
-                            self.out,
-                            "    str x{}, [x11, #8]",
-                            location.regs[1]
-                        );
+                        let _ = writeln!(self.out, "    str x{}, [x11, #8]", location.regs[1]);
                     }
                 }
                 ArgKind::Large => {
@@ -653,6 +772,15 @@ impl Emitter<'_> {
                     let kind = if location.float64 { "d" } else { "s" };
                     let _ = writeln!(self.out, "    str {kind}{reg}, [x11]");
                 }
+                ArgKind::Hfa => {
+                    let hfa = location.hfa.as_ref().unwrap();
+                    for (freg, offset) in location.fregs.iter().zip(&hfa.offsets) {
+                        self.local_address(index, 11)?;
+                        self.add_to_address(*offset)?;
+                        let kind = if location.float64 { "d" } else { "s" };
+                        let _ = writeln!(self.out, "    str {kind}{freg}, [x11]");
+                    }
+                }
             }
         }
         // Then the stack arguments, read from the caller's outgoing area at
@@ -663,11 +791,20 @@ impl Emitter<'_> {
             };
             let from = 16 + stack;
             match location.kind {
-                ArgKind::Scalar | ArgKind::Small => {
+                ArgKind::Scalar => {
+                    let _ = writeln!(self.out, "    ldr x12, [x29, #{from}]");
+                    if let Some(local) = self.local_reg[index] {
+                        let _ = writeln!(self.out, "    mov x{local}, x12");
+                    } else {
+                        self.local_address(index, 11)?;
+                        let _ = writeln!(self.out, "    str x12, [x11]");
+                    }
+                }
+                ArgKind::Small => {
                     self.local_address(index, 11)?;
                     let _ = writeln!(self.out, "    ldr x12, [x29, #{from}]");
                     let _ = writeln!(self.out, "    str x12, [x11]");
-                    if location.kind == ArgKind::Small && location.size > 8 {
+                    if location.size > 8 {
                         let _ = writeln!(self.out, "    ldr x12, [x29, #{}]", from + 8);
                         let _ = writeln!(self.out, "    str x12, [x11, #8]");
                     }
@@ -681,6 +818,19 @@ impl Emitter<'_> {
                     self.local_address(index, 11)?;
                     let _ = writeln!(self.out, "    ldr {kind}12, [x29, #{from}]");
                     let _ = writeln!(self.out, "    str {kind}12, [x11]");
+                }
+                ArgKind::Hfa => {
+                    let hfa = location.hfa.as_ref().unwrap();
+                    let _ = writeln!(self.out, "    add x13, x29, #{from}");
+                    for offset in &hfa.offsets {
+                        let _ = writeln!(self.out, "    mov x11, x13");
+                        self.add_to_address(*offset)?;
+                        let kind = if location.float64 { "d" } else { "s" };
+                        let _ = writeln!(self.out, "    ldr {kind}12, [x11]");
+                        self.local_address(index, 11)?;
+                        self.add_to_address(*offset)?;
+                        let _ = writeln!(self.out, "    str {kind}12, [x11]");
+                    }
                 }
             }
         }
@@ -719,7 +869,10 @@ impl Emitter<'_> {
         args: &[Operand],
         destination: Option<&Place>,
     ) -> Result<(), String> {
-        let types: Vec<Option<TyId>> = args.iter().map(|arg| self.call_arg_ty(arg)).collect::<Result<_, _>>()?;
+        let types: Vec<Option<TyId>> = args
+            .iter()
+            .map(|arg| self.call_arg_ty(arg))
+            .collect::<Result<_, _>>()?;
         let (locations, stack_bytes) = self.assign_args(&types)?;
         let symbol = self.callee(callee)?;
 
@@ -760,6 +913,25 @@ impl Emitter<'_> {
                     let kind = if location.float64 { "d" } else { "s" };
                     let _ = writeln!(self.out, "    str {kind}12, [sp, #{stack}]");
                 }
+                ArgKind::Hfa => {
+                    let hfa = location.hfa.as_ref().unwrap();
+                    self.operand_address(arg)?;
+                    let _ = writeln!(self.out, "    mov x13, x11");
+                    for offset in &hfa.offsets {
+                        let _ = writeln!(self.out, "    mov x11, x13");
+                        self.add_to_address(*offset)?;
+                        let kind = if location.float64 { "d" } else { "s" };
+                        let _ = writeln!(self.out, "    ldr {kind}12, [x11]");
+                        if stack + offset <= 4095 {
+                            let _ =
+                                writeln!(self.out, "    str {kind}12, [sp, #{}]", stack + offset);
+                        } else {
+                            self.emit_mov_u64(12, stack + offset)?;
+                            let _ = writeln!(self.out, "    add x12, sp, x12");
+                            let _ = writeln!(self.out, "    str {kind}12, [x12]");
+                        }
+                    }
+                }
             }
         }
         // A large return goes through x8, which the callee reads before any
@@ -782,7 +954,10 @@ impl Emitter<'_> {
                 {
                     let mut projection = place.projection.clone();
                     projection.pop();
-                    Operand::Copy(Place { local: place.local, projection })
+                    Operand::Copy(Place {
+                        local: place.local,
+                        projection,
+                    })
                 }
                 other => other.clone(),
             };
@@ -790,7 +965,7 @@ impl Emitter<'_> {
         }
         // Register arguments last, so nothing clobbers them.
         for (arg, location) in args.iter().zip(&locations) {
-            if location.regs.is_empty() && location.freg.is_none() {
+            if location.regs.is_empty() && location.freg.is_none() && location.fregs.is_empty() {
                 continue;
             }
             match location.kind {
@@ -801,11 +976,7 @@ impl Emitter<'_> {
                     self.operand_address(arg)?;
                     let _ = writeln!(self.out, "    ldr x{}, [x11]", location.regs[0]);
                     if location.size > 8 {
-                        let _ = writeln!(
-                            self.out,
-                            "    ldr x{}, [x11, #8]",
-                            location.regs[1]
-                        );
+                        let _ = writeln!(self.out, "    ldr x{}, [x11, #8]", location.regs[1]);
                     }
                 }
                 ArgKind::Large => {
@@ -814,6 +985,17 @@ impl Emitter<'_> {
                 }
                 ArgKind::Float => {
                     self.operand_float(arg, location.freg.unwrap(), location.float64)?;
+                }
+                ArgKind::Hfa => {
+                    let hfa = location.hfa.as_ref().unwrap();
+                    self.operand_address(arg)?;
+                    let _ = writeln!(self.out, "    mov x13, x11");
+                    for (freg, offset) in location.fregs.iter().zip(&hfa.offsets) {
+                        let _ = writeln!(self.out, "    mov x11, x13");
+                        self.add_to_address(*offset)?;
+                        let kind = if location.float64 { "d" } else { "s" };
+                        let _ = writeln!(self.out, "    ldr {kind}{freg}, [x11]");
+                    }
                 }
             }
         }
@@ -835,7 +1017,14 @@ impl Emitter<'_> {
         }
         if let Some(destination) = destination {
             let ty = self.place_ty(destination)?;
-            if is_aggregate(self.types.kind(ty)) {
+            let hfa = if is_aggregate(self.types.kind(ty)) {
+                self.hfa_of(ty)?
+            } else {
+                None
+            };
+            if let Some(hfa) = hfa {
+                self.store_hfa_result(destination, &hfa)?;
+            } else if is_aggregate(self.types.kind(ty)) {
                 let size = self.size_of(ty)?;
                 if size <= 16 {
                     self.address_of(destination)?;
@@ -879,29 +1068,48 @@ impl Emitter<'_> {
         let mut fpr_stack = false;
         let mut locations = Vec::with_capacity(types.len());
         for ty in types {
-            let (kind, size, float64) = self.arg_kind(*ty)?;
-            if kind == ArgKind::Float {
-                if !fpr_stack && fregs < 8 {
+            let (kind, size, float64, hfa) = self.arg_kind(*ty)?;
+            if matches!(kind, ArgKind::Float | ArgKind::Hfa) {
+                let needed = if kind == ArgKind::Hfa {
+                    hfa.as_ref().map(|h| h.offsets.len()).unwrap_or(0) as u8
+                } else {
+                    1
+                };
+                if !fpr_stack && fregs + needed <= 8 {
+                    let assigned: Vec<u8> = (fregs..fregs + needed).collect();
+                    fregs += needed;
                     locations.push(ArgLoc {
                         regs: Vec::new(),
-                        freg: Some(fregs),
+                        freg: if kind == ArgKind::Float {
+                            Some(assigned[0])
+                        } else {
+                            None
+                        },
+                        fregs: if kind == ArgKind::Hfa {
+                            assigned
+                        } else {
+                            Vec::new()
+                        },
+                        hfa,
                         stack: None,
                         kind,
                         size,
                         float64,
                     });
-                    fregs += 1;
                 } else {
                     fpr_stack = true;
+                    let slot = (size + 7) & !7;
                     locations.push(ArgLoc {
                         regs: Vec::new(),
                         freg: None,
+                        fregs: Vec::new(),
+                        hfa,
                         stack: Some(stack),
                         kind,
                         size,
                         float64,
                     });
-                    stack += 8;
+                    stack += slot.max(8);
                 }
                 continue;
             }
@@ -909,18 +1117,19 @@ impl Emitter<'_> {
                 ArgKind::Scalar => 1,
                 ArgKind::Small => size.div_ceil(8) as u8,
                 ArgKind::Large => 1,
-                ArgKind::Float => unreachable!(),
+                ArgKind::Float | ArgKind::Hfa => unreachable!(),
             };
-            // AAPCS64 keeps a two-register composite on an even register.
             if kind == ArgKind::Small && needed == 2 && regs % 2 == 1 {
                 regs += 1;
             }
             if !gpr_stack && regs + needed <= 8 {
-                let assigned = (regs..regs + needed).collect();
+                let assigned: Vec<u8> = (regs..regs + needed).collect();
                 regs += needed;
                 locations.push(ArgLoc {
                     regs: assigned,
                     freg: None,
+                    fregs: Vec::new(),
+                    hfa: None,
                     stack: None,
                     kind,
                     size,
@@ -929,12 +1138,15 @@ impl Emitter<'_> {
             } else {
                 gpr_stack = true;
                 let slot = match kind {
-                    ArgKind::Scalar | ArgKind::Large | ArgKind::Float => 8,
+                    ArgKind::Scalar | ArgKind::Large => 8,
                     ArgKind::Small => (size + 7) & !7,
+                    ArgKind::Float | ArgKind::Hfa => unreachable!(),
                 };
                 locations.push(ArgLoc {
                     regs: Vec::new(),
                     freg: None,
+                    fregs: Vec::new(),
+                    hfa: None,
                     stack: Some(stack),
                     kind,
                     size,
@@ -947,22 +1159,106 @@ impl Emitter<'_> {
         Ok((locations, stack_bytes))
     }
 
-    fn arg_kind(&mut self, ty: Option<TyId>) -> Result<(ArgKind, u64, bool), String> {
+    fn hfa_of(&mut self, ty: TyId) -> Result<Option<Hfa>, String> {
+        let mut offsets = Vec::new();
+        let mut float64 = None;
+        let pure = self.collect_hfa(ty, 0, &mut offsets, &mut float64)?;
+        if !pure || offsets.is_empty() || offsets.len() > 4 {
+            return Ok(None);
+        }
+        let Some(float64) = float64 else {
+            return Ok(None);
+        };
+        Ok(Some(Hfa { offsets, float64 }))
+    }
+
+    fn collect_hfa(
+        &mut self,
+        ty: TyId,
+        base: u64,
+        offsets: &mut Vec<u64>,
+        float64: &mut Option<bool>,
+    ) -> Result<bool, String> {
+        match self.types.kind(ty).clone() {
+            TyKind::F32 => {
+                if *float64 == Some(true) {
+                    return Ok(false);
+                }
+                *float64 = Some(false);
+                offsets.push(base);
+                Ok(true)
+            }
+            TyKind::F64 => {
+                if *float64 == Some(false) {
+                    return Ok(false);
+                }
+                *float64 = Some(true);
+                offsets.push(base);
+                Ok(true)
+            }
+            TyKind::Array { elem, len } => {
+                if len == 0 {
+                    return Ok(false);
+                }
+                let size = self.size_of(elem)?;
+                for index in 0..len {
+                    if !self.collect_hfa(elem, base + index * size, offsets, float64)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            TyKind::Tuple(_) => {
+                let (field_offsets, elems) = self.tuple_fields(ty)?;
+                for (offset, elem) in field_offsets.iter().zip(elems) {
+                    if !self.collect_hfa(elem, base + offset, offsets, float64)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            TyKind::Adt { def, args } => {
+                if self.hir.enums.iter().any(|e| e.def_id == def) {
+                    return Ok(false);
+                }
+                let field_offsets = self.field_offsets(def, &args)?;
+                let field_types = self.field_types(def, &args)?;
+                if field_types.is_empty() {
+                    return Ok(false);
+                }
+                for (offset, field_ty) in field_offsets.iter().zip(field_types) {
+                    if !self.collect_hfa(field_ty, base + offset, offsets, float64)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn arg_kind(&mut self, ty: Option<TyId>) -> Result<(ArgKind, u64, bool, Option<Hfa>), String> {
         let Some(ty) = ty else {
-            return Ok((ArgKind::Scalar, 8, false));
+            return Ok((ArgKind::Scalar, 8, false, None));
         };
         match self.types.kind(ty) {
-            TyKind::F32 => Ok((ArgKind::Float, 4, false)),
-            TyKind::F64 => Ok((ArgKind::Float, 8, true)),
+            TyKind::F32 => Ok((ArgKind::Float, 4, false, None)),
+            TyKind::F64 => Ok((ArgKind::Float, 8, true, None)),
             _ if is_aggregate(self.types.kind(ty)) => {
-                let size = self.size_of(ty)?;
-                if size > 16 {
-                    Ok((ArgKind::Large, size, false))
+                if let Some(hfa) = self.hfa_of(ty)? {
+                    let size = self.size_of(ty)?;
+                    let float64 = hfa.float64;
+                    Ok((ArgKind::Hfa, size, float64, Some(hfa)))
                 } else {
-                    Ok((ArgKind::Small, size, false))
+                    let size = self.size_of(ty)?;
+                    if size > 16 {
+                        Ok((ArgKind::Large, size, false, None))
+                    } else {
+                        Ok((ArgKind::Small, size, false, None))
+                    }
                 }
             }
-            _ => Ok((ArgKind::Scalar, 8, false)),
+            _ => Ok((ArgKind::Scalar, 8, false, None)),
         }
     }
 
@@ -987,6 +1283,19 @@ impl Emitter<'_> {
         }
     }
 
+    fn emit_symbol_address(&mut self, register: u8, symbol: &str) {
+        if self.target.format == crate::target::ObjectFormat::MachO {
+            let _ = writeln!(self.out, "    adrp x{register}, {symbol}@PAGE");
+            let _ = writeln!(
+                self.out,
+                "    add x{register}, x{register}, {symbol}@PAGEOFF"
+            );
+        } else {
+            let _ = writeln!(self.out, "    adrp x{register}, {symbol}");
+            let _ = writeln!(self.out, "    add x{register}, x{register}, :lo12:{symbol}");
+        }
+    }
+
     fn load_float(&mut self, place: &Place, freg: u8, float64: bool) -> Result<(), String> {
         self.address_of(place)?;
         let kind = if float64 { "d" } else { "s" };
@@ -1003,7 +1312,11 @@ impl Emitter<'_> {
 
     fn emit_mov_u64(&mut self, register: u8, value: u64) -> Result<(), String> {
         let _ = writeln!(self.out, "    movz x{register}, #{}", value & 0xffff);
-        for (shift, chunk) in [(16, (value >> 16) & 0xffff), (32, (value >> 32) & 0xffff), (48, (value >> 48) & 0xffff)] {
+        for (shift, chunk) in [
+            (16, (value >> 16) & 0xffff),
+            (32, (value >> 32) & 0xffff),
+            (48, (value >> 48) & 0xffff),
+        ] {
             if chunk != 0 {
                 let _ = writeln!(self.out, "    movk x{register}, #{chunk}, lsl #{shift}");
             }
@@ -1011,7 +1324,13 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    fn float_binary(&mut self, op: BinOp, lhs: &Operand, rhs: &Operand, lhs_ty: TyId) -> Result<(), String> {
+    fn float_binary(
+        &mut self,
+        op: BinOp,
+        lhs: &Operand,
+        rhs: &Operand,
+        lhs_ty: TyId,
+    ) -> Result<(), String> {
         let float64 = matches!(self.types.kind(lhs_ty), TyKind::F64);
         let prefix = if float64 { "d" } else { "s" };
         self.operand_float(lhs, 0, float64)?;
@@ -1042,7 +1361,9 @@ impl Emitter<'_> {
                 let _ = writeln!(self.out, "    cset x0, {condition}");
             }
             _ => {
-                return Err("the AArch64 backend supports only arithmetic and comparison on floats".into());
+                return Err(
+                    "the AArch64 backend supports only arithmetic and comparison on floats".into(),
+                );
             }
         }
         Ok(())
@@ -1086,6 +1407,18 @@ impl Emitter<'_> {
                 }
             }
             (false, false) => {}
+        }
+        Ok(())
+    }
+
+    fn store_hfa_result(&mut self, destination: &Place, hfa: &Hfa) -> Result<(), String> {
+        self.address_of(destination)?;
+        let _ = writeln!(self.out, "    mov x13, x11");
+        for (index, offset) in hfa.offsets.iter().enumerate() {
+            let _ = writeln!(self.out, "    mov x11, x13");
+            self.add_to_address(*offset)?;
+            let kind = if hfa.float64 { "d" } else { "s" };
+            let _ = writeln!(self.out, "    str {kind}{index}, [x11]");
         }
         Ok(())
     }
@@ -1139,8 +1472,8 @@ impl Emitter<'_> {
                 self.emit_mov_u64(reg, bits)?;
             }
             Constant::Str(id) => {
-                let _ = writeln!(self.out, "    adrp x{reg}, .Lstr_{}", id.0);
-                let _ = writeln!(self.out, "    add x{reg}, x{reg}, :lo12:.Lstr_{}", id.0);
+                let symbol = format!(".Lstr_{}", id.0);
+                self.emit_symbol_address(reg, &symbol);
             }
             Constant::Fn(id) => {
                 let name = self
@@ -1148,12 +1481,10 @@ impl Emitter<'_> {
                     .get(id)
                     .map(|name| mangle(name, self.foreign, self.target))
                     .ok_or_else(|| "a function pointer names no symbol".to_string())?;
-                let _ = writeln!(self.out, "    adrp x{reg}, {name}");
-                let _ = writeln!(self.out, "    add x{reg}, x{reg}, :lo12:{name}");
+                self.emit_symbol_address(reg, &name);
             }
             Constant::NamedFn(name) => {
-                let _ = writeln!(self.out, "    adrp x{reg}, {name}");
-                let _ = writeln!(self.out, "    add x{reg}, x{reg}, :lo12:{name}");
+                self.emit_symbol_address(reg, name);
             }
             other => {
                 return Err(format!(
@@ -1167,6 +1498,11 @@ impl Emitter<'_> {
 
     /// Computes the address of `place` into `x11`.
     fn address_of(&mut self, place: &Place) -> Result<(), String> {
+        if place.projection.is_empty() && self.local_reg[place.local.0 as usize].is_some() {
+            return Err(
+                "the AArch64 backend tried to take the address of a register-promoted local".into(),
+            );
+        }
         let mut ty = self.body.local(place.local).ty;
         self.local_address(place.local.0 as usize, 11)?;
         for projection in &place.projection {
@@ -1186,7 +1522,11 @@ impl Emitter<'_> {
                     if size == 1 {
                         let _ = writeln!(self.out, "    add x11, x11, x10");
                     } else if size.is_power_of_two() {
-                        let _ = writeln!(self.out, "    add x11, x11, x10, lsl #{}", size.trailing_zeros());
+                        let _ = writeln!(
+                            self.out,
+                            "    add x11, x11, x10, lsl #{}",
+                            size.trailing_zeros()
+                        );
                     } else {
                         let _ = writeln!(self.out, "    mov x12, #{size}");
                         let _ = writeln!(self.out, "    mul x10, x10, x12");
@@ -1210,6 +1550,12 @@ impl Emitter<'_> {
     }
 
     fn load(&mut self, place: &Place, reg: u8) -> Result<(), String> {
+        if place.projection.is_empty() {
+            if let Some(local) = self.local_reg[place.local.0 as usize] {
+                let _ = writeln!(self.out, "    mov x{reg}, x{local}");
+                return Ok(());
+            }
+        }
         let ty = self.place_ty(place)?;
         self.address_of(place)?;
         self.load_at(ty, reg)
@@ -1234,6 +1580,14 @@ impl Emitter<'_> {
     }
 
     fn store(&mut self, place: &Place, reg: u8) -> Result<(), String> {
+        if place.projection.is_empty() {
+            if let Some(local) = self.local_reg[place.local.0 as usize] {
+                if local != reg {
+                    let _ = writeln!(self.out, "    mov x{local}, x{reg}");
+                }
+                return Ok(());
+            }
+        }
         let ty = self.place_ty(place)?;
         self.address_of(place)?;
         self.store_at(ty, reg)
@@ -1418,9 +1772,12 @@ impl Emitter<'_> {
             let mut layouts = Layouts::new(self.types, self.hir);
             layouts.layout(ty)
         };
-        layout
-            .map(|layout| layout.size)
-            .map_err(|e| format!("the AArch64 backend cannot lay out `{}`: {e:?}", self.types.display(ty)))
+        layout.map(|layout| layout.size).map_err(|e| {
+            format!(
+                "the AArch64 backend cannot lay out `{}`: {e:?}",
+                self.types.display(ty)
+            )
+        })
     }
 
     fn adt_parts(&self, ty: TyId) -> Result<(DefId, Vec<TyId>), String> {
@@ -1501,7 +1858,12 @@ impl Emitter<'_> {
         }
     }
 
-    fn enum_field_access(&mut self, ty: TyId, variant: u32, index: u32) -> Result<(u64, TyId), String> {
+    fn enum_field_access(
+        &mut self,
+        ty: TyId,
+        variant: u32,
+        index: u32,
+    ) -> Result<(u64, TyId), String> {
         let (def, args) = self.enum_parts(ty)?;
         let payload = self.enum_payload_offset(def, &args)?;
         let offsets = self.variant_offsets(def, variant, &args)?;
@@ -1533,7 +1895,11 @@ impl Emitter<'_> {
     }
 
     fn tag_size(&self, def: DefId) -> Result<u64, String> {
-        Ok(if self.enum_variant_count(def)? <= 256 { 1 } else { 4 })
+        Ok(if self.enum_variant_count(def)? <= 256 {
+            1
+        } else {
+            4
+        })
     }
 
     fn enum_payload_offset(&mut self, def: DefId, args: &[TyId]) -> Result<u64, String> {
@@ -1543,14 +1909,24 @@ impl Emitter<'_> {
             .map_err(|e| format!("the AArch64 backend cannot lay out an enum: {e:?}"))
     }
 
-    fn variant_offsets(&mut self, def: DefId, index: u32, args: &[TyId]) -> Result<Vec<u64>, String> {
+    fn variant_offsets(
+        &mut self,
+        def: DefId,
+        index: u32,
+        args: &[TyId],
+    ) -> Result<Vec<u64>, String> {
         let mut layouts = Layouts::new(self.types, self.hir);
         layouts
             .variant_field_offsets(def, index, args)
             .map_err(|e| format!("the AArch64 backend cannot lay out an enum variant: {e:?}"))
     }
 
-    fn variant_types(&mut self, def: DefId, index: u32, args: &[TyId]) -> Result<Vec<TyId>, String> {
+    fn variant_types(
+        &mut self,
+        def: DefId,
+        index: u32,
+        args: &[TyId],
+    ) -> Result<Vec<TyId>, String> {
         let mut layouts = Layouts::new(self.types, self.hir);
         layouts
             .variant_field_tys_pub(def, index, args)
@@ -1615,7 +1991,131 @@ impl Emitter<'_> {
         self.next_label += 1;
         label
     }
+}
 
+/// Assigns up to ten scalar locals to callee-saved `x19`-`x28`.
+///
+/// This is not a full allocator: a local is promoted only when its address is
+/// never taken and no projected place names it. That covers counters, indices
+/// and scalar temporaries, which are the values that otherwise pay two stack
+/// accesses each. Aggregates, floats and address-taken values stay in memory.
+fn promote_locals(body: &Body, types: &TyCtxt) -> Vec<Option<u8>> {
+    let mut address_taken = vec![false; body.locals.len()];
+    let mut projected = vec![false; body.locals.len()];
+    for block in &body.blocks {
+        for statement in &block.statements {
+            if let Statement::Assign { place, value, .. } = statement {
+                scan_place(place, &mut address_taken, &mut projected);
+                scan_rvalue(value, &mut address_taken, &mut projected);
+            }
+        }
+        scan_terminator(&block.terminator, &mut address_taken, &mut projected);
+    }
+    let mut next = 19u8;
+    let mut promoted = vec![None; body.locals.len()];
+    for (index, local) in body.locals.iter().enumerate() {
+        if next > 28 {
+            break;
+        }
+        if address_taken[index] || projected[index] {
+            continue;
+        }
+        if is_promotable(types.kind(local.ty)) {
+            promoted[index] = Some(next);
+            next += 1;
+        }
+    }
+    promoted
+}
+
+fn is_promotable(kind: &TyKind) -> bool {
+    matches!(
+        kind,
+        TyKind::Bool
+            | TyKind::I8
+            | TyKind::I16
+            | TyKind::I32
+            | TyKind::I64
+            | TyKind::Isize
+            | TyKind::U8
+            | TyKind::U16
+            | TyKind::U32
+            | TyKind::U64
+            | TyKind::Usize
+            | TyKind::Char
+            | TyKind::Ref(_)
+            | TyKind::RefMut(_)
+            | TyKind::RawPtr(_)
+            | TyKind::RawPtrMut(_)
+            | TyKind::FnPtr { .. }
+            | TyKind::IntVar(_)
+    )
+}
+
+fn scan_place(place: &Place, _address_taken: &mut [bool], projected: &mut [bool]) {
+    if !place.projection.is_empty() {
+        projected[place.local.0 as usize] = true;
+    }
+}
+
+fn scan_operand(operand: &Operand, address_taken: &mut [bool], projected: &mut [bool]) {
+    if let Operand::Copy(place) | Operand::Move(place) = operand {
+        scan_place(place, address_taken, projected);
+    }
+}
+
+fn scan_rvalue(value: &Rvalue, address_taken: &mut [bool], projected: &mut [bool]) {
+    match value {
+        Rvalue::Use(operand) => scan_operand(operand, address_taken, projected),
+        Rvalue::Binary { lhs, rhs, .. } => {
+            scan_operand(lhs, address_taken, projected);
+            scan_operand(rhs, address_taken, projected);
+        }
+        Rvalue::Unary { operand, .. }
+        | Rvalue::Cast { operand, .. }
+        | Rvalue::PtrToInt(operand) => {
+            scan_operand(operand, address_taken, projected);
+        }
+        Rvalue::Ref { place, .. } | Rvalue::Reborrow { place, .. } => {
+            address_taken[place.local.0 as usize] = true;
+            scan_place(place, address_taken, projected);
+        }
+        Rvalue::Aggregate { operands, .. } => {
+            for operand in operands {
+                scan_operand(operand, address_taken, projected);
+            }
+        }
+        Rvalue::Repeat { operand, .. } => scan_operand(operand, address_taken, projected),
+        Rvalue::Discriminant(place) | Rvalue::Len(place) => {
+            scan_place(place, address_taken, projected);
+        }
+        Rvalue::PtrOffset { ptr, count } => {
+            scan_operand(ptr, address_taken, projected);
+            scan_operand(count, address_taken, projected);
+        }
+    }
+}
+
+fn scan_terminator(terminator: &Terminator, address_taken: &mut [bool], projected: &mut [bool]) {
+    match terminator {
+        Terminator::SwitchInt { discr, .. } => scan_operand(discr, address_taken, projected),
+        Terminator::Call {
+            callee,
+            args,
+            destination,
+            ..
+        } => {
+            scan_operand(callee, address_taken, projected);
+            for arg in args {
+                scan_operand(arg, address_taken, projected);
+            }
+            if let Some(destination) = destination {
+                scan_place(destination, address_taken, projected);
+            }
+        }
+        Terminator::Drop { place, .. } => scan_place(place, address_taken, projected),
+        Terminator::Goto(_) | Terminator::Return | Terminator::Unreachable => {}
+    }
 }
 
 fn require_value(types: &TyCtxt, ty: TyId, what: &str) -> Result<(), String> {
@@ -1631,11 +2131,17 @@ fn require_value(types: &TyCtxt, ty: TyId, what: &str) -> Result<(), String> {
 
 fn is_value(kind: &TyKind) -> bool {
     is_scalar(kind)
-        || matches!(kind, TyKind::Array { .. } | TyKind::Adt { .. } | TyKind::Tuple(_))
+        || matches!(
+            kind,
+            TyKind::Array { .. } | TyKind::Adt { .. } | TyKind::Tuple(_)
+        )
 }
 
 fn is_aggregate(kind: &TyKind) -> bool {
-    matches!(kind, TyKind::Array { .. } | TyKind::Adt { .. } | TyKind::Tuple(_))
+    matches!(
+        kind,
+        TyKind::Array { .. } | TyKind::Adt { .. } | TyKind::Tuple(_)
+    )
 }
 
 fn is_scalar(kind: &TyKind) -> bool {
@@ -1679,8 +2185,16 @@ fn frame_layout(
         let layout = layouts
             .layout(local.ty)
             .map_err(|e| format!("layout failed for `{}`: {e:?}", local.name))?;
-        let size = if layout.size == 0 { 8 } else { (layout.size + 7) & !7 };
-        let align = if layout.size == 0 { 8 } else { layout.align().max(8) };
+        let size = if layout.size == 0 {
+            8
+        } else {
+            (layout.size + 7) & !7
+        };
+        let align = if layout.size == 0 {
+            8
+        } else {
+            layout.align().max(8)
+        };
         cursor = (cursor + align - 1) & !(align - 1);
         cursor += size;
         offsets.push(cursor as u32);

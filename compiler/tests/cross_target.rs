@@ -1273,7 +1273,7 @@ fn an_unsupported_target_is_refused_before_building() {
     assert!(!out.status.success(), "an ARM target must be refused");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("x86_64 has the complete backend"),
+        stderr.contains("complete targets"),
         "the error must say why:\n{stderr}"
     );
 }
@@ -1285,7 +1285,14 @@ fn the_runtime_compiles_for_every_target() {
     // mistake in one is a compile error in the runtime that every program pays
     // for. Building the runtime is enough to catch that without a toolchain for
     // the target.
-    for target in ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-pc-windows-gnu"] {
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-gnu",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "aarch64-w64-mingw32",
+    ] {
         let dir = scratch(&target.replace(['.', '-'], "_"));
         let out = Command::new(compiler())
             .current_dir(&dir)

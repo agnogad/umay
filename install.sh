@@ -1,11 +1,11 @@
 #!/bin/sh
-# Installs a prebuilt UMAY compiler on Linux or Intel macOS.
+# Installs a prebuilt UMAY compiler on Linux or macOS.
 #
 #   curl -fsSL https://raw.githubusercontent.com/agnogad/umay/main/install.sh | sh
 #
 # Set UMAY_VERSION to install a specific release, UMAY_INSTALL_DIR to choose the
 # destination (default: ~/.local/bin), or UMAY_BASE_URL to download from a mirror.
-# Windows users should download the x86_64-windows zip from the release page.
+# Windows users should download the x86_64-windows or aarch64-windows zip.
 
 set -eu
 
@@ -32,8 +32,7 @@ case "${os_name}-${arch_name}" in
     Linux-x86_64 | Linux-amd64) label="x86_64-linux-musl" ;;
     Linux-aarch64 | Linux-arm64) label="aarch64-linux-musl" ;;
     Darwin-x86_64 | Darwin-amd64) label="x86_64-darwin" ;;
-    Darwin-aarch64 | Darwin-arm64)
-        fail "ARM64 macOS artifacts are not published yet; build from source" ;;
+    Darwin-aarch64 | Darwin-arm64) label="aarch64-darwin" ;;
     *)
         fail "unsupported system: ${os_name} ${arch_name}; use the release archive for your system"
         ;;

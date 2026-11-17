@@ -2,7 +2,7 @@
 
 Status: implemented. `umay new`, `clean`, `doctor`, the project layout rules,
 incremental compilation and the content-addressed cache are in place. `upm`
-fetching remains deliberately limited to a directory registry; see section 9.
+fetching accepts a directory or an HTTP(S) registry; see section 9.
 
 ## 1. Hard constraints
 
@@ -242,7 +242,8 @@ Partially implemented in Phase 8. What exists:
 - `output-dir` naming `target`, in any spelling, is refused.
 - **Fetching from a registry** (`compiler/src/upm.rs`). A dependency with no
   `path` is fetched from a registry named by `UMAY_REGISTRY` -- one or more
-  directories separated by the platform path separator. Each registry holds
+  directories separated by the platform path separator, or HTTP(S) base URLs
+  separated by `;` (directories may be mixed into that list). Each registry holds
   packages as `<name>/<version>/` with a `umay.toml` and a `src/`; a fetch copies
   the chosen version into the project's `deps/<name>/` and records its SHA-256
   in the lockfile. `umay lock` walks the whole graph, so a fetched dependency's
@@ -252,12 +253,25 @@ Partially implemented in Phase 8. What exists:
   no manifest, a missing version, or no registry named is an error that says
   which, never a silent no-op.
 
-The registry is a directory of packages, not a network service. That is a
-choice, not a limitation to hide: the fetch, the version selection and the
-content hash are the parts that must be right, and they are exercised in full
-against a directory on disk (`compiler/tests/phase8_upm.rs` builds a throwaway
-registry and drives the fetcher against it). A hosted registry is the same code
-behind one more layer of transport, and is deliberately not built yet.
+The registry can be a directory of packages or an HTTP(S) service. Both paths
+share the same version selection, safety rules and content hash, and both are
+exercised against a real transport: `compiler/tests/phase8_upm.rs` drives a
+directory registry, and `compiler/tests/upm_http.rs` drives a local HTTP
+listener.
+
+An HTTP root serves:
+
+```
+GET <base>/<name>/versions.txt     newline-separated versions
+GET <base>/<name>/<version>.tar    the package tree as an uncompressed USTAR
+```
+
+The client downloads with `curl`, which also carries HTTPS; `curl` must be on
+`PATH` when a URL root is used. Extraction rejects absolute paths and `..`, and
+only writes regular files and directories. `scripts/registry-server.py --root
+<dir>` serves a directory in this shape. It speaks plain HTTP; run it behind a
+TLS reverse proxy for a public registry. No script from a package runs on
+install.
 
 Design position for the rest:
 

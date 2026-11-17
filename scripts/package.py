@@ -22,6 +22,7 @@ DOCUMENTS = [
     "CHANGELOG.md",
     "docs/language-specification.md",
     "docs/build-system.md",
+    "scripts/registry-server.py",
     "LICENSE",
 ]
 

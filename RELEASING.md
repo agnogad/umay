@@ -51,8 +51,8 @@ Two versions move independently:
    ```
 
 8. **The GitHub release publishes itself.** Pushing the tag builds the
-   x86_64 Linux, AArch64 Linux, macOS and Windows artifacts. The Linux jobs
-   check that their binaries are static. A final job attaches every archive and
+   x86_64 Linux, AArch64 Linux, Intel macOS, Apple Silicon macOS, Windows
+   x86_64 and Windows ARM64 artifacts. The Linux jobs check that their binaries are static. A final job attaches every archive and
    checksum to the tag. A user should be able to download a pair and run
    `sha256sum -c` before executing anything. If the jobs could not publish,
    attach the files by hand rather than leaving the tag with no download.
@@ -63,10 +63,11 @@ Two versions move independently:
   AArch64 Linux and macOS builds are stripped.
 - `README.md`, `CHANGELOG.md` — what it is and what changed.
 - `language-specification.md`, `build-system.md` — the normative documents.
+- `registry-server.py` — the HTTP registry server described by the build docs.
 - `LICENSE`.
 
-Linux (x86_64 and AArch64) and macOS use a `tar.gz`; Windows uses a `zip`. Each
-archive has a sibling `.sha256` file.
+Linux (x86_64 and AArch64), Intel macOS and Apple Silicon use a `tar.gz`;
+Windows x86_64 and ARM64 use a `zip`. Each archive has a sibling `.sha256` file.
 
 It does **not** contain the Cargo build directory, the source tree, or any
 project's `dist/`. On Linux the compiler is built against musl and statically
@@ -84,7 +85,8 @@ install -m 0755 umay-<version>-x86_64-linux-musl/umay ~/.local/bin/umay
 umay version
 ```
 
-On Windows, unpack the `x86_64-windows` zip and put `umay.exe` on `PATH`.
+On Windows, unpack the `x86_64-windows` or `aarch64-windows` zip and put
+`umay.exe` on `PATH`.
 
 ## After the release
 
