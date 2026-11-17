@@ -15,6 +15,13 @@
 //!
 //! Each test is skipped, not failed, when the assembler is missing.
 
+// The cross-target suite drives the host's assembler and linker: it checks the
+// command a Linux host prints for a Mach-O or COFF object and the object it
+// leaves behind. On a Windows host the linker is MinGW and the printed paths use
+// backslashes, so those assertions describe a different host. Windows's own
+// build-and-run behaviour is checked by the native smoke test in CI instead.
+#![cfg(unix)]
+
 use std::process::Command;
 
 fn compiler() -> std::path::PathBuf {
