@@ -6,6 +6,11 @@ use std::path::Path;
 use std::process::Command;
 
 fn available() -> bool {
+    // The host execution harness uses the Unix assembler/linker and /dev/null.
+    // Windows coverage is the native smoke step in CI.
+    if cfg!(windows) {
+        return false;
+    }
     let ok = |name: &str| Command::new(name).arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
     // The link needs the library; a machine without it skips these tests.
     let has_sqlite = Command::new("cc")

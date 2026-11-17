@@ -65,7 +65,7 @@ fn run_program_opt(name: &str, src: &str, opt: &str) -> Option<i32> {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let exe = dir.join("dist").join("main");
+    let exe = dir.join("dist").join(if cfg!(windows) { "main.exe" } else { "main" });
     assert!(exe.exists(), "no executable produced for {name}");
     let status = Command::new(&exe).status().expect("run program");
     let code = status.code().expect("exit code");
@@ -324,7 +324,7 @@ fn optimisation_levels_agree_on_the_result() {
             .output()
             .expect("run umay");
         assert!(output.status.success(), "build failed at {level}:\n{}", String::from_utf8_lossy(&output.stderr));
-        let status = Command::new(dir.join("dist").join("main")).status().expect("run");
+        let status = Command::new(dir.join("dist").join(if cfg!(windows) { "main.exe" } else { "main" })).status().expect("run");
         assert_eq!(status.code(), Some(10), "wrong result at {level}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -360,7 +360,7 @@ fn a_function_value_is_called_through_its_pointer() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "should have built:\n{stderr}");
     assert!(!stderr.contains("panicked"), "the compiler must not panic:\n{stderr}");
-    let program = dir.join("dist").join("main");
+    let program = dir.join("dist").join(if cfg!(windows) { "main.exe" } else { "main" });
     let ran = Command::new(&program).output().expect("run program");
     assert_eq!(ran.status.code(), Some(6), "`apply(twice, 3)` must return 6");
     let _ = std::fs::remove_dir_all(&dir);
@@ -390,7 +390,7 @@ fn constant_folding_keeps_the_operand_width_of_bitwise_not() {
         .output()
         .expect("run umay");
     assert!(build.status.success(), "build failed:\n{}", String::from_utf8_lossy(&build.stderr));
-    let ran = Command::new(dir.join("dist").join("main")).output().expect("run program");
+    let ran = Command::new(dir.join("dist").join(if cfg!(windows) { "main.exe" } else { "main" })).output().expect("run program");
     let out = String::from_utf8_lossy(&ran.stdout);
     assert_eq!(out.trim(), "0", "`!255u8` folded at the wrong width: {out:?}");
     let _ = std::fs::remove_dir_all(&dir);

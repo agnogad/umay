@@ -8,6 +8,11 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 fn available() -> bool {
+    // The host execution harness uses the Unix assembler/linker and /dev/null.
+    // Windows coverage is the native smoke step in CI.
+    if cfg!(windows) {
+        return false;
+    }
     let ok = |name: &str| {
         Command::new(name)
             .arg("--version")

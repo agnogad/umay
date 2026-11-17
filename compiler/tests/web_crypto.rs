@@ -6,6 +6,11 @@ use std::path::Path;
 use std::process::Command;
 
 fn toolchain_available() -> bool {
+    // The host execution harness uses the Unix assembler/linker and executable
+    // names. Windows coverage is the native smoke step in CI.
+    if cfg!(windows) {
+        return false;
+    }
     let ok = |name: &str| Command::new(name).arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
     ok("as") && ok("cc")
 }

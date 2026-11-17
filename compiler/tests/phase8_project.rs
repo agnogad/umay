@@ -12,6 +12,11 @@ fn compiler() -> PathBuf {
 }
 
 fn have_toolchain() -> bool {
+    // The host execution harness uses the Unix assembler/linker and executable
+    // names. Windows coverage is the native smoke step in CI.
+    if cfg!(windows) {
+        return false;
+    }
     Command::new("cc")
         .arg("--version")
         .stdout(std::process::Stdio::null())

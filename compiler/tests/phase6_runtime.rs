@@ -18,6 +18,11 @@ fn compiler() -> &'static str {
 
 /// Whether the assembler and linker this backend shells out to are present.
 fn toolchain_available() -> bool {
+    // The host execution harness uses the Unix assembler/linker and executable
+    // names. Windows coverage is the native smoke step in CI.
+    if cfg!(windows) {
+        return false;
+    }
     let ok = |name: &str| {
         Command::new(name)
             .arg("--version")

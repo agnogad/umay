@@ -58,7 +58,7 @@ fn build_and_run(dir: &Path, src: &str, opt: &str) -> ExecOutcome {
         ));
     }
 
-    let exe = dir.join("dist").join("main");
+    let exe = dir.join("dist").join(if cfg!(windows) { "main.exe" } else { "main" });
     let out = match Command::new(&exe).current_dir(dir).output() {
         Ok(o) => o,
         Err(e) => return ExecOutcome::ExecFailed(format!("spawn failed: {e}")),
