@@ -262,11 +262,18 @@ impl<'a, 't> Isel<'a, 't> {
         // Comparisons produce a bool and are handled separately.
         if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
             let left = self.operand_to_reg(lhs)?;
-            let right = self.operand_to_reg(rhs)?;
+            // A literal becomes `cmpq $2, %rbx` instead of being materialised in
+            // a register first: one instruction instead of two, and no register
+            // pressure. `operand` already keeps a value that does not fit a
+            // sign-extended 32-bit immediate in a register.
+            let right = match rhs {
+                Operand::Constant(_) => self.operand(rhs)?,
+                _ => MOperand::Reg(self.operand_to_reg(rhs)?),
+            };
             self.emit(Inst::Cmp {
                 width,
                 lhs: MOperand::Reg(left),
-                rhs: MOperand::Reg(right),
+                rhs: right,
             });
             let cond = match op {
                 BinOp::Eq => Cond::Eq,

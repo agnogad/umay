@@ -9,6 +9,18 @@ implementation-only changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **A comparison against a literal no longer materialises the literal.** `n < 2`
+  selects `cmpq $2, %rbx` instead of `movq $2, %rax` followed by a register
+  compare: one instruction and one virtual register fewer per comparison, and a
+  smaller binary. A value that does not fit a sign-extended 32-bit immediate
+  still goes through a register, because x86 cannot encode it in `cmp`.
+- Regression test `call_arguments_move_in_parallel_and_returns_survive` pins a
+  two-argument function whose arguments are call results and whose return value
+  must reach `%rax`. That shape returned 20 instead of 14 when a call-setup
+  experiment treated the return register as dead.
+
 ## [0.2.0] — 2026-11-17
 
 ### Added

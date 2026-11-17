@@ -596,3 +596,22 @@ fn computed_pointer_deref_assignment_works() {
     }";
     expect_exit("computed_ptr_assign", src, 42);
 }
+
+#[test]
+fn call_arguments_move_in_parallel_and_returns_survive() {
+    // Two-argument calls whose arguments are themselves call results, and a
+    // return value that must reach `%rax` before `ret`. This program returned 20
+    // instead of 14 when a copy-fold experiment treated the return register as
+    // dead, so it pins the shape rather than trusting the register analysis.
+    let src = "fn sub(a: i64, b: i64) -> i64 {\n\
+        return a - b\n\
+    }\n\
+    fn two(a: i64, b: i64) -> i64 {\n\
+        let x = sub(a, b)\n\
+        return sub(x, b) + a\n\
+    }\n\
+    fn main() -> i32 {\n\
+        return two(10i64, 3i64) as i32\n\
+    }";
+    expect_exit("parallel_call_args", src, 14);
+}
