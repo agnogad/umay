@@ -55,3 +55,18 @@ pub fn umay_c_pthread_join(thread: *mut u8, _result: *mut *mut u8) -> i32 {
     }
     return 0
 }
+
+pub fn umay_c_pthread_detach(thread: *mut u8) -> i32 {
+    let stored = umay_read_i64(thread)
+    let handle = unsafe { stored as usize as *mut u8 }
+    if unsafe { handle as usize } == 0usize {
+        return -1
+    }
+    // Closing the handle releases the joinable reference; the thread keeps
+    // running until it returns, which is what detach means on POSIX.
+    let closed = umay_win_thread_close(handle)
+    if closed == 0 {
+        return -1
+    }
+    return 0
+}

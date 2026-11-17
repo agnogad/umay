@@ -3,10 +3,36 @@
 // `stdlib/thread.um` keeps the handle type and the join bookkeeping; this file
 // names the two POSIX calls that do the work.
 
-extern fn "pthread_create" umay_c_pthread_create(
+extern fn "pthread_create" umay_posix_pthread_create(
     thread: *mut u8,
     attr: *const u8,
     start: *const u8,
     arg: *mut u8,
 ) -> i32
-extern fn "pthread_join" umay_c_pthread_join(thread: *mut u8, result: *mut *mut u8) -> i32
+extern fn "pthread_join" umay_posix_pthread_join(thread: usize, result: *mut *mut u8) -> i32
+extern fn "pthread_detach" umay_posix_pthread_detach(thread: usize) -> i32
+
+// The portable half keeps a thread handle in an eight-byte slot, because a
+// Windows handle is a pointer and a POSIX `pthread_t` is a word. `pthread_create`
+// writes the *value* into that slot; `pthread_join` and `pthread_detach` take
+// the value, not the slot's address. Passing the address was a real fault: the
+// first raw join handed libc a pointer where it expected a thread id and
+// crashed inside `pthread_join`.
+pub fn umay_c_pthread_create(
+    thread: *mut u8,
+    attr: *const u8,
+    start: *const u8,
+    arg: *mut u8,
+) -> i32 {
+    return umay_posix_pthread_create(thread, attr, start, arg)
+}
+
+pub fn umay_c_pthread_join(thread: *mut u8, result: *mut *mut u8) -> i32 {
+    let stored = umay_read_i64(thread) as usize
+    return umay_posix_pthread_join(stored, result)
+}
+
+pub fn umay_c_pthread_detach(thread: *mut u8) -> i32 {
+    let stored = umay_read_i64(thread) as usize
+    return umay_posix_pthread_detach(stored)
+}

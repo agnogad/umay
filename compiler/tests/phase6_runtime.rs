@@ -2145,6 +2145,78 @@ fn main() -> i32 {
 }
 
 #[test]
+fn a_raw_thread_starts_and_joins() {
+    if !toolchain_available() {
+        return;
+    }
+    let run = build_and_run(
+        "thread_start_join",
+        r#"
+fn work(_v: usize) -> usize {
+    return 1usize
+}
+
+fn main() -> i32 {
+    let arg = alloc(8)
+    let mut t = thread_start(unsafe { work as *const u8 }, arg)
+    if thread_failed(&t) {
+        dealloc(arg)
+        return 1
+    }
+    if !thread_join(&mut t) {
+        dealloc(arg)
+        return 2
+    }
+    dealloc(arg)
+    println("joined")
+    return 0
+}
+"#,
+    );
+    assert_eq!(run.stdout, "joined\n");
+    assert_eq!(run.status, 0);
+}
+
+#[test]
+fn a_detached_thread_cannot_be_joined() {
+    if !toolchain_available() {
+        return;
+    }
+    let run = build_and_run(
+        "thread_detach",
+        r#"
+fn work(_v: usize) -> usize {
+    return 0usize
+}
+
+fn main() -> i32 {
+    let arg = alloc(8)
+    let mut t = thread_start(unsafe { work as *const u8 }, arg)
+    if thread_failed(&t) {
+        dealloc(arg)
+        return 1
+    }
+    if !thread_detach(&mut t) {
+        dealloc(arg)
+        return 2
+    }
+    // A detached thread has no joinable reference left, so a join must refuse
+    // rather than wait on a handle the wrapper already released.
+    if thread_join(&mut t) {
+        dealloc(arg)
+        return 3
+    }
+    dealloc(arg)
+    println("detached")
+    return 0
+}
+"#,
+    );
+    assert_eq!(run.stdout, "detached\n");
+    assert_eq!(run.status, 0);
+}
+
+#[test]
 fn a_function_used_as_a_value_is_its_address() {
     if !toolchain_available() {
         return;

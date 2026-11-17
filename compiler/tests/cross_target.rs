@@ -1124,6 +1124,26 @@ fn a_frame_does_not_trust_the_alignment_it_was_entered_with() {
 /// parser read `&v as T` as `&(v as T)`, taking the address of the cast instead
 /// of casting the address.
 #[test]
+fn thread_detach_assembles_on_every_system() {
+    // The portable wrapper reads the handle from its slot; each platform layer
+    // spends it the way its own API expects. The Windows path is not exercised by
+    // the host test, so this checks that both targets emit a call to the right
+    // native symbol rather than failing name resolution.
+    let source = "fn work(_v: usize) -> usize {\n    return 0usize\n}\nfn main() -> i32 {\n    let arg = alloc(8)\n    let mut t = thread_start(unsafe { work as *const u8 }, arg)\n    if thread_failed(&t) {\n        dealloc(arg)\n        return 1\n    }\n    let ok = thread_detach(&mut t)\n    dealloc(arg)\n    if ok {\n        return 0\n    }\n    return 2\n}\n";
+    for (triple, symbol) in [
+        ("x86_64-unknown-linux-gnu", "pthread_detach"),
+        ("x86_64-pc-windows-gnu", "CloseHandle"),
+    ] {
+        let dir = scratch(&format!("thread-detach-{triple}"));
+        let asm = assembly_of(&dir, source, triple);
+        assert!(
+            asm.contains(symbol),
+            "{triple}: detach must reach `{symbol}`:\n{asm}"
+        );
+    }
+}
+
+#[test]
 fn a_generic_value_can_have_its_address_taken() {
     let dir = scratch("generic-address");
     let source = "fn addr_of<A>(value: A) -> usize {\n    return unsafe { &value as *const A as usize }\n}\n\nfn main() -> i32 {\n    let n: i64 = 42i64\n    let p = addr_of::<i64>(n)\n    println_i64(unsafe { *(p as *const i64) })\n    return 0\n}\n";

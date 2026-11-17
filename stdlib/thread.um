@@ -178,3 +178,16 @@ fn thread_join(t: &mut Thread) -> bool {
     t.joined = true
     return ok == 0
 }
+
+// Releases the joinable reference without waiting. The thread keeps running
+// until its entry returns; no result can be collected afterwards. The handle
+// slot belongs to this wrapper and is released here on either path.
+fn thread_detach(t: &mut Thread) -> bool {
+    if t.joined || unsafe { t.handle as usize } == 0usize {
+        return false
+    }
+    let ok = umay_c_pthread_detach(t.handle) == 0
+    t.joined = true
+    dealloc(t.handle)
+    return ok
+}
