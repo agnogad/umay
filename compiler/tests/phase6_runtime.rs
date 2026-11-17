@@ -36,6 +36,23 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// The exit code to report for a finished program.
+///
+/// A signal death has no exit code; on Unix it is reported as 128 + the signal
+/// so a failing assertion shows a crash rather than a confusing -1.
+#[cfg(unix)]
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+}
+
+#[cfg(not(unix))]
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    status.code().unwrap_or(-1)
+}
+
 /// The result of running a built program.
 struct Run {
     stdout: String,
@@ -62,19 +79,14 @@ fn build_and_run(name: &str, source: &str) -> Run {
         String::from_utf8_lossy(&build.stdout)
     );
 
-    let exe = dir.join("dist").join("main");
+    let exe = dir.join("dist").join(if cfg!(windows) { "main.exe" } else { "main" });
     // The program runs in its own scratch directory: a test that writes a file
     // must not leave it in the directory the test binary was started from.
     let out = Command::new(&exe)
         .current_dir(&dir)
         .output()
         .expect("run built program");
-    let code = out.status.code().unwrap_or_else(|| {
-        use std::os::unix::process::ExitStatusExt;
-        // A signal death has no exit code; report it as a large number so a
-        // failing assertion shows a crash rather than a confusing -1.
-        128 + out.status.signal().unwrap_or(0)
-    });
+    let code = exit_code(out.status);
     Run {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
