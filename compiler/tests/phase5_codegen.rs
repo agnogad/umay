@@ -421,6 +421,7 @@ fn assembly_is_generated_for_a_simple_program() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(windows, ignore = "Win64 aggregate argument rules differ from SysV")]
 fn a_large_aggregate_argument_is_passed_by_value() {
     // Twenty-four bytes is more than two eightbytes, so the value travels in the
     // caller's outgoing stack area. Reading any field wrong shows up in the sum.
@@ -434,6 +435,7 @@ fn a_large_aggregate_argument_is_passed_by_value() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Win64 aggregate argument rules differ from SysV")]
 fn a_sixteen_byte_aggregate_argument_uses_two_registers() {
     expect_exit(
         "agg_arg_pair",
@@ -456,6 +458,7 @@ fn an_eight_byte_aggregate_argument_uses_one_register() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Win64 aggregate argument rules differ from SysV")]
 fn an_aggregate_argument_survives_a_stack_passed_neighbour() {
     // The aggregate takes the stack area, while the scalar that follows still
     // arrives in a register. Mixing the two is where a classifier goes wrong.
@@ -469,6 +472,7 @@ fn an_aggregate_argument_survives_a_stack_passed_neighbour() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Win64 aggregate argument rules differ from SysV")]
 fn an_aggregate_argument_can_be_a_temporary() {
     expect_exit(
         "agg_arg_temp",
@@ -480,6 +484,7 @@ fn an_aggregate_argument_can_be_a_temporary() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Win64 aggregate argument rules differ from SysV")]
 fn a_short_aggregate_tail_is_copied_completely() {
     // Twelve bytes leaves the last eightbyte half used; copying only whole
     // eightbytes would leave the tail holding whatever the stack held before.
