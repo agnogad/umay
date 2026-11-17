@@ -502,7 +502,7 @@ mod tests {
         for n in 0..5 {
             let source = format!("source-{n}");
             let key = CacheKey::derive(Artifact::ProgramAsm, "O2", source.as_bytes(), &[]);
-            cache.write(&key, Artifact::ProgramAsm, &vec![7u8; 100]).expect("write");
+            cache.write(&key, Artifact::ProgramAsm, &[7u8; 100]).expect("write");
         }
         let (before, bytes) = cache.stats();
         assert_eq!((before, bytes), (5, 500));

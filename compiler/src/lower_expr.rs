@@ -58,16 +58,15 @@ impl Lowering<'_> {
                 // is not `Copy`; copying it would give two owners.
                 let value = init.as_ref().map(|i| {
                     let op = self.lower_expr(i);
-                    self.into_move_if_owned(op, i.ty)
+                    self.move_if_owned(op, i.ty)
                 });
                 // Every binding gets its own part of the value. Handing the whole
                 // value to the first binding and only reserving storage for the
                 // rest left them uninitialised, which the checker then reported
                 // the moment one was read.
                 let whole: Option<Place> = None;
-                let mut binding_index: usize = 0;
                 let mut to_bind: Vec<(LocalId, Operand)> = Vec::new();
-                collect_bindings(pattern, &bindings, &mut binding_index, &mut |b, path| {
+                collect_bindings(pattern, &mut |b, path| {
                     let src = match &value {
                         Some(v) => {
                             if path.is_empty() {
@@ -554,7 +553,7 @@ impl Lowering<'_> {
     /// Used wherever a value is transferred rather than duplicated: `let`
     /// bindings and call arguments. Without this, an owned value would have two
     /// owners and be dropped twice.
-    pub(crate) fn into_move_if_owned(&mut self, op: Operand, ty: TyId) -> Operand {
+    pub(crate) fn move_if_owned(&mut self, op: Operand, ty: TyId) -> Operand {
         if self.types.is_copy(ty) {
             return op;
         }
@@ -641,28 +640,16 @@ impl Lowering<'_> {
 /// is needed, only the path from the whole value to each piece.
 fn collect_bindings(
     pattern: &HirPattern,
-    bindings: &[LocalId],
-    next_index: &mut usize,
     out: &mut impl FnMut(LocalId, Vec<Projection>),
 ) {
     fn walk(
         pattern: &HirPattern,
         path: &mut Vec<Projection>,
-        bindings: &[LocalId],
-        next_index: &mut usize,
         out: &mut impl FnMut(LocalId, Vec<Projection>),
     ) {
         match &pattern.kind {
             HirPatternKind::Binding { local, .. } => {
-                // The binding order in `bindings` is the order the checker
-                // collected it, which is the order this walk visits them.
-                let local = if bindings.contains(local) {
-                    *local
-                } else {
-                    *local
-                };
-                let _ = next_index;
-                out(local, path.clone());
+                out(*local, path.clone());
             }
             HirPatternKind::Wildcard
             | HirPatternKind::IntLit { .. }
@@ -675,14 +662,14 @@ fn collect_bindings(
             HirPatternKind::Tuple(items) => {
                 for (n, item) in items.iter().enumerate() {
                     path.push(Projection::Field(n as u32));
-                    walk(item, path, bindings, next_index, out);
+                    walk(item, path, out);
                     path.pop();
                 }
             }
             HirPatternKind::Struct { fields, .. } => {
                 for f in fields {
                     path.push(Projection::Field(f.index));
-                    walk(&f.pattern, path, bindings, next_index, out);
+                    walk(&f.pattern, path, out);
                     path.pop();
                 }
             }
@@ -690,14 +677,14 @@ fn collect_bindings(
                 VariantPatternFields::Tuple(items) => {
                     for (n, item) in items.iter().enumerate() {
                         path.push(Projection::Field(n as u32));
-                        walk(item, path, bindings, next_index, out);
+                        walk(item, path, out);
                         path.pop();
                     }
                 }
                 VariantPatternFields::Struct { fields, .. } => {
                     for f in fields {
                         path.push(Projection::Field(f.index));
-                        walk(&f.pattern, path, bindings, next_index, out);
+                        walk(&f.pattern, path, out);
                         path.pop();
                     }
                 }
@@ -707,18 +694,18 @@ fn collect_bindings(
                 // An irrefutable `or` cannot bind: the two arms would have to
                 // agree on every binding. Only the first is walked.
                 if let Some(first) = items.first() {
-                    walk(first, path, bindings, next_index, out);
+                    walk(first, path, out);
                 }
             }
             HirPatternKind::Slice { elems, .. } => {
                 for (n, item) in elems.iter().enumerate() {
                     path.push(Projection::Field(n as u32));
-                    walk(item, path, bindings, next_index, out);
+                    walk(item, path, out);
                     path.pop();
                 }
             }
         }
     }
     let mut path = Vec::new();
-    walk(pattern, &mut path, bindings, next_index, out);
+    walk(pattern, &mut path, out);
 }

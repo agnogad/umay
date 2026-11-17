@@ -87,7 +87,7 @@ pub fn dependencies_of_project(source_dir: &Path) -> Vec<DependencyPath> {
     manifest
         .dependencies
         .iter()
-        .filter_map(|dependency| {
+        .map(|dependency| {
             // A path dependency lives where the manifest points. A fetched one
             // was unpacked under `deps/<name>`, whose `src/` is its module root,
             // the same shape a path dependency has.
@@ -95,10 +95,10 @@ pub fn dependencies_of_project(source_dir: &Path) -> Vec<DependencyPath> {
                 Some(path) => project_dir.join(path).join("src"),
                 None => project_dir.join("deps").join(&dependency.name).join("src"),
             };
-            Some(DependencyPath {
+            DependencyPath {
                 name: dependency.name.clone(),
                 source_dir,
-            })
+            }
         })
         .collect()
 }
@@ -111,7 +111,7 @@ pub fn dependencies_of_project(source_dir: &Path) -> Vec<DependencyPath> {
 fn find_manifest(dir: &Path) -> Option<(PathBuf, crate::manifest::Manifest)> {
     let mut current = Some(dir.to_path_buf());
     for _ in 0..3 {
-        let Some(directory) = current else { return None };
+        let directory = current?;
         if let Ok(manifest) = crate::manifest::read_project(&directory) {
             return Some((directory, manifest));
         }
@@ -264,12 +264,7 @@ fn expand(&mut self, items: Vec<Item>, dir: &Path) -> Vec<Item> {
 /// `a/foo.um` puts its modules in `a/`; `a/foo/mod.um` is itself the module
 /// `foo`, so its children live in `a/foo/`.
 fn module_dir(file: &Path) -> PathBuf {
-    let parent = file.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    if file.file_name().is_some_and(|n| n == "mod.um") {
-        parent
-    } else {
-        parent
-    }
+    file.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
 }
 
 /// The file a `mod name;` refers to, in the order the language looks.

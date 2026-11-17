@@ -319,9 +319,9 @@ impl<'c, 's> FnChecker<'c, 's> {
     /// The literal's value is unchanged, which is correct because the caller has
     /// already checked that it fits.
     pub fn coerce_literal(&mut self, mut e: HirExpr, want: crate::types::TyId) -> HirExpr {
-        if self.cx.cx.is_integer_var(e.ty) && self.cx.cx.is_integer(want) {
-            e.ty = want;
-        } else if self.cx.cx.is_float_var(e.ty) && self.cx.cx.is_float(want) {
+        let integer = self.cx.cx.is_integer_var(e.ty) && self.cx.cx.is_integer(want);
+        let float = self.cx.cx.is_float_var(e.ty) && self.cx.cx.is_float(want);
+        if integer || float {
             e.ty = want;
         }
         e

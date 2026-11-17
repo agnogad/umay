@@ -577,7 +577,7 @@ impl FnChecker<'_, '_> {
                 .cx
                 .methods_of_type
                 .get(&type_name)
-                .map(|v| v.clone())
+                .cloned()
                 .unwrap_or_default();
             let mut d = Diagnostic::error("E0101", format!("`{type_name}` has no method `{method}`"))
                 .at(method_span)
@@ -797,7 +797,7 @@ impl FnChecker<'_, '_> {
                 return Some((bound.trait_name.clone(), bound.args.clone()));
             }
         }
-        return None;
+        None
     }
 
     pub(crate) fn nominal_name(&self, ty: TyId) -> Option<String> {
@@ -1589,7 +1589,7 @@ impl FnChecker<'_, '_> {
                             None => true,
                         }
                     }
-                    None => b.owner == None,
+                    None => b.owner.is_none(),
                 }
             });
         }
@@ -1660,7 +1660,7 @@ impl FnChecker<'_, '_> {
                             None => true,
                         }
                     }
-                    None => b.owner == None,
+                    None => b.owner.is_none(),
                 }
             });
         }

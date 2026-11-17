@@ -47,8 +47,7 @@ fn exchange(messages: &[&str]) -> Vec<String> {
 fn split_frames(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = text;
-    loop {
-        let Some(head) = rest.find("\r\n\r\n") else { break };
+    while let Some(head) = rest.find("\r\n\r\n") {
         let headers = &rest[..head];
         let length: usize = headers
             .lines()
@@ -92,7 +91,7 @@ fn json_string(text: &str) -> String {
 }
 
 /// Finds the reply with a given id, as raw text.
-fn reply_with_id<'a>(bodies: &'a [String], id: i64) -> Option<&'a str> {
+fn reply_with_id(bodies: &[String], id: i64) -> Option<&str> {
     let needle = format!(r#""id":{id}"#);
     bodies.iter().map(|b| b.as_str()).find(|b| b.contains(&needle))
 }
@@ -149,9 +148,7 @@ fn fixing_the_file_clears_the_squiggle() {
 #[test]
 fn hover_describes_the_name_under_the_cursor() {
     let text = "fn add(a: i64, b: i64) -> i64 {\n    return a + b\n}\n";
-    let hover = concat!(
-        r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///t.um"},"position":{"line":0,"character":4}}}"#
-    );
+    let hover = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"file:///t.um\"},\"position\":{\"line\":0,\"character\":4}}}";
     let replies = exchange(&[initialize(), &open("file:///t.um", text), hover]);
     let reply = reply_with_id(&replies, 2).expect("a reply to hover");
     assert!(

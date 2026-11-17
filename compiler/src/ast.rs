@@ -319,6 +319,9 @@ pub struct Stmt {
 }
 
 #[derive(Debug, Clone)]
+// Boxing `Let` and `Expr` would allocate on every statement to flatten a size
+// difference the AST is short-lived enough not to care about.
+#[allow(clippy::large_enum_variant)]
 pub enum StmtKind {
     /// `let [mut] pattern [: Type] [= expr]`
     Let(LetStmt),

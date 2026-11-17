@@ -137,7 +137,7 @@ impl Writer {
     fn comment(&mut self, gap: &str) {
         // The break that ended the line above has already been written, so it is
         // not part of the comment's own text.
-        let text = gap.trim_start_matches(|c: char| c == '\n' || c == ' ' || c == '\t');
+        let text = gap.trim_start_matches(['\n', ' ', '\t']);
         if text.trim().is_empty() {
             return;
         }
@@ -158,10 +158,11 @@ impl Writer {
         // the author put the space there to separate the comment from what comes
         // next. Only an empty line counts: the last piece is normally just the
         // indentation of the line that follows.
-        if text.contains("\n\n") && pieces.last().is_some_and(|p| p.is_empty()) {
-            if !self.out.ends_with("\n\n") {
-                self.out.push('\n');
-            }
+        if text.contains("\n\n")
+            && pieces.last().is_some_and(|p| p.is_empty())
+            && !self.out.ends_with("\n\n")
+        {
+            self.out.push('\n');
         }
     }
 

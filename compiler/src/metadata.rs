@@ -103,10 +103,7 @@ pub fn symbols_or_empty(text: &str) -> Vec<Symbol> {
 /// The same, for a document that has a path, so its `mod name;` declarations
 /// resolve against the directory it is really in.
 pub fn symbols_or_empty_at(name: &str, text: &str) -> Vec<Symbol> {
-    match crate::metadata_source(name, text) {
-        Ok(symbols) => symbols,
-        Err(_) => Vec::new(),
-    }
+    crate::metadata_source(name, text).unwrap_or_default()
 }
 
 impl Symbol {

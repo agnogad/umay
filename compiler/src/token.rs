@@ -258,6 +258,9 @@ impl Keyword {
         }
     }
 
+    // The parser only needs the lookup; implementing `FromStr` would change the
+    // error type for no caller.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Keyword> {
         Some(match s {
             "fn" => Keyword::Fn,

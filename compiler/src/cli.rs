@@ -1184,15 +1184,14 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         target,
     );
     let mut linked_from_cache = false;
-    match cache.read(&exe_key, umayc::build::Artifact::LinkedExe) {
-        Some(bytes) => match write_executable(&exe_path, &bytes) {
+    if let Some(bytes) = cache.read(&exe_key, umayc::build::Artifact::LinkedExe) {
+        match write_executable(&exe_path, &bytes) {
             Ok(()) => linked_from_cache = true,
             Err(e) => {
                 eprintln!("umay: cannot write `{}`: {e}", exe_path.display());
                 return exit::IO_ERROR;
             }
-        },
-        None => {}
+        }
     }
 
     if !linked_from_cache {

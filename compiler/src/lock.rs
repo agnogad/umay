@@ -323,7 +323,7 @@ fn walk(
             ));
             continue;
         }
-        if visited.iter().any(|v| *v == canonical) {
+        if visited.contains(&canonical) {
             // Reached through another route. Two routes to the same directory is
             // a diamond, which is fine: it is one package.
             continue;

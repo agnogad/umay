@@ -179,9 +179,7 @@ pub fn generate(
     // The entry-point shim belongs to the program, not to the runtime: both
     // objects are linked into one executable, and a `WinMain` in each is a
     // multiple-definition error.
-    if is_program {
-        out.push_str(target.object_trailer());
-    } else if target.format == crate::target::ObjectFormat::Elf {
+    if is_program || target.format == crate::target::ObjectFormat::Elf {
         out.push_str(target.object_trailer());
     }
     Ok(out)

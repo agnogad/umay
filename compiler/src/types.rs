@@ -534,10 +534,7 @@ impl TyCtxt {
 
     /// True for types whose size is not known at compile time.
     pub fn is_unsized(&self, ty: TyId) -> bool {
-        match self.kind(ty) {
-            TyKind::Str | TyKind::Slice(_) => true,
-            _ => false,
-        }
+        matches!(self.kind(ty), TyKind::Str | TyKind::Slice(_))
     }
 
     /// True for numeric types including unresolved literal variables.

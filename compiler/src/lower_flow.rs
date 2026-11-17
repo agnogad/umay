@@ -308,11 +308,7 @@ impl Lowering<'_> {
         // passed through unchanged. A `&mut T` satisfies a `&self` receiver too:
         // reborrowing it as `&&mut T` would be a different type, and moving it
         // would make the value unusable after the call.
-        let already = match self.types.kind(receiver.ty) {
-            TyKind::Ref(_) => true,
-            TyKind::RefMut(_) => true,
-            _ => false,
-        };
+        let already = matches!(self.types.kind(receiver.ty), TyKind::Ref(_) | TyKind::RefMut(_));
         if already {
             // A variable holding the reference is borrowed rather than moved: the
             // callee sees a fresh borrow that ends with the call.

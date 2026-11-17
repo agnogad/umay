@@ -353,10 +353,7 @@ impl Server {
                     Some(span) => {
                         // Diagnostics carry byte spans over the document text,
                         // which is the file the editor has open.
-                        let line_of = |offset: u32| {
-                            let position = index.position(&document.text, offset);
-                            position
-                        };
+                        let line_of = |offset: u32| index.position(&document.text, offset);
                         Range::new(line_of(span.start), line_of(span.end))
                     }
                     None => Range::new(Position::new(0, 0), Position::new(0, 0)),
@@ -503,7 +500,7 @@ impl Server {
                 // declaration cannot be found -- it is generated, or the text
                 // changed between the parse and this call -- the range falls
                 // back to the top of the file rather than guessing.
-                let offset = definition_offset(&document.text, &symbol.short_name())
+                let offset = definition_offset(&document.text, symbol.short_name())
                     .unwrap_or(0);
                 let range = index.range(&document.text, offset, offset);
                 Value::object([

@@ -568,8 +568,6 @@ pub fn symbol_name(name: &str) -> String {
     for (i, ch) in name.chars().enumerate() {
         if ch.is_ascii_alphanumeric() || ch == '_' || (ch == '.' && i > 0) {
             out.push(ch);
-        } else if ch == ' ' {
-            out.push('_');
         } else {
             out.push('_');
         }

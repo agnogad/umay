@@ -841,25 +841,21 @@ fn rewrite_inst(inst: &mut Inst, allocation: &Allocation) {
     // materialised by two loads, which the selector never produces. In practice
     // bases are always physical or allocated to a register.
     let fix_mem = |mem: &mut Mem, allocation: &Allocation| {
-        if let Some(base) = mem.base {
-            if let Reg::Virtual(v) = base {
-                match allocation.locations.get(&v) {
-                    Some(Location::Reg(r)) => mem.base = Some(Reg::Phys(*r)),
-                    // A base spilled to the stack cannot be an addressing mode
-                    // operand: that would need an extra load the selector never
-                    // emits. It cannot happen -- `address_registers` marks such
-                    // a register as unspillable -- so reaching here is a bug
-                    // worth stopping on rather than printing `(%!v14)`.
-                    other => panic!("base register v{v} has no physical home: {other:?}"),
-                }
+        if let Some(Reg::Virtual(v)) = mem.base {
+            match allocation.locations.get(&v) {
+                Some(Location::Reg(r)) => mem.base = Some(Reg::Phys(*r)),
+                // A base spilled to the stack cannot be an addressing mode
+                // operand: that would need an extra load the selector never
+                // emits. It cannot happen -- `address_registers` marks such
+                // a register as unspillable -- so reaching here is a bug
+                // worth stopping on rather than printing `(%!v14)`.
+                other => panic!("base register v{v} has no physical home: {other:?}"),
             }
         }
-        if let Some((index, scale)) = mem.index {
-            if let Reg::Virtual(v) = index {
-                match allocation.locations.get(&v) {
-                    Some(Location::Reg(r)) => mem.index = Some((Reg::Phys(*r), scale)),
-                    other => panic!("index register v{v} has no physical home: {other:?}"),
-                }
+        if let Some((Reg::Virtual(v), scale)) = mem.index {
+            match allocation.locations.get(&v) {
+                Some(Location::Reg(r)) => mem.index = Some((Reg::Phys(*r), scale)),
+                other => panic!("index register v{v} has no physical home: {other:?}"),
             }
         }
     };

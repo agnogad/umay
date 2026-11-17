@@ -594,7 +594,7 @@ impl<'a, 't> Isel<'a, 't> {
     /// The byte offset and type of a field inside an enum variant's payload.
     fn enum_field_offset(&mut self, base_ty: TyId, variant: u32, index: u32) -> Result<(i64, TyId), String> {
         let TyKind::Adt { def, args } = self.types().kind_owned(base_ty) else {
-            return Err(format!("enum field access on non-adt"));
+            return Err("enum field access on non-adt".to_string());
         };
         let payload = self
             .layouts
@@ -759,11 +759,9 @@ fn promotable_locals(body: &Body, layouts: &mut Layouts<'_>) -> Vec<LocalId> {
             disqualified.insert(p.local);
         }
         for proj in &p.projection {
-            if let Projection::Index(op) = proj {
-                if let Operand::Copy(ip) | Operand::Move(ip) = op {
-                    if !ip.projection.is_empty() {
-                        disqualified.insert(ip.local);
-                    }
+            if let Projection::Index(Operand::Copy(ip) | Operand::Move(ip)) = proj {
+                if !ip.projection.is_empty() {
+                    disqualified.insert(ip.local);
                 }
             }
         }

@@ -68,8 +68,6 @@ impl FnChecker<'_, '_> {
                     let else_var_ty = self.cx.cx.is_integer_var(else_ty);
                     if then_var_ty && !else_var_ty {
                         else_ty
-                    } else if else_var_ty && !then_var_ty {
-                        then_ty
                     } else {
                         then_ty
                     }

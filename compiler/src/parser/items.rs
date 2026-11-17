@@ -657,15 +657,14 @@ impl Parser {
             TokenKind::LBracket => {
                 self.advance();
                 let elem = Box::new(self.parse_type());
-                let span = if self.eat(&TokenKind::Semi) {
+                if self.eat(&TokenKind::Semi) {
                     let len = self.parse_expr();
                     let end = self.expect(TokenKind::RBracket, "E0220", "array type").unwrap_or(len.span);
                     TypeExpr::Array { elem, len: Box::new(len), span: start.to(end) }
                 } else {
                     let end = self.expect(TokenKind::RBracket, "E0221", "slice type").unwrap_or(elem.span());
                     TypeExpr::Slice { elem, span: start.to(end) }
-                };
-                span
+                }
             }
             TokenKind::LParen => {
                 self.advance();

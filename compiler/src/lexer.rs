@@ -638,11 +638,9 @@ pub fn lex_errors_to_diagnostics(errors: Vec<LexError>) -> Vec<Diagnostic> {
     errors
         .into_iter()
         .map(|e| {
-            let sev = match e.code {
-                // E0001 (unknown character) is recoverable; keep as error since
-                // the offending text is genuinely not part of UMAY.
-                _ => Severity::Error,
-            };
+            // E0001 (unknown character) is recoverable; keep it an error since
+            // the offending text is genuinely not part of UMAY.
+            let sev = Severity::Error;
             let msg = e.message;
             let mut d = Diagnostic::new(e.code, sev, msg).at(e.span);
             match e.code {

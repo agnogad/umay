@@ -50,7 +50,7 @@ fn a_dependency_is_fetched_and_locked_by_hash_case() {
 
     // Point the fetcher at the throwaway registry.
     std::env::set_var("UMAY_REGISTRY", &registry);
-    let result = (|| {
+    {
         let manifest = manifest::read_project(&project).expect("manifest reads");
         let resolution = umayc::lock::resolve(&project, &manifest);
         assert!(
@@ -84,9 +84,8 @@ fn a_dependency_is_fetched_and_locked_by_hash_case() {
             problems.iter().any(|p| p.contains("lib")),
             "an edited dependency must fail verification: {problems:?}"
         );
-    })();
+    };
     std::env::remove_var("UMAY_REGISTRY");
-    result
 }
 
 fn a_missing_package_names_the_registry_that_lacked_it_case() {
@@ -99,7 +98,7 @@ fn a_missing_package_names_the_registry_that_lacked_it_case() {
     );
 
     std::env::set_var("UMAY_REGISTRY", &registry);
-    let result = (|| {
+    {
         let manifest = manifest::read_project(&project).expect("manifest reads");
         let resolution = umayc::lock::resolve(&project, &manifest);
         assert_eq!(resolution.unresolved.len(), 1, "the missing package must be reported");
@@ -109,9 +108,8 @@ fn a_missing_package_names_the_registry_that_lacked_it_case() {
             reason.contains("absent") && reason.contains("9.9.9"),
             "the message must name what was looked for: {reason}"
         );
-    })();
+    };
     std::env::remove_var("UMAY_REGISTRY");
-    result
 }
 
 fn a_transitive_dependency_is_fetched_too_case() {
@@ -136,7 +134,7 @@ fn a_transitive_dependency_is_fetched_too_case() {
     );
 
     std::env::set_var("UMAY_REGISTRY", &registry);
-    let result = (|| {
+    {
         let manifest = manifest::read_project(&project).expect("manifest reads");
         let resolution = umayc::lock::resolve(&project, &manifest);
         assert!(
@@ -149,9 +147,8 @@ fn a_transitive_dependency_is_fetched_too_case() {
             resolution.lockfile.get("inner").is_some(),
             "a dependency's own dependency must be locked too"
         );
-    })();
+    };
     std::env::remove_var("UMAY_REGISTRY");
-    result
 }
 
 fn a_package_without_a_version_gets_the_newest_case() {
@@ -167,7 +164,7 @@ fn a_package_without_a_version_gets_the_newest_case() {
     );
 
     std::env::set_var("UMAY_REGISTRY", &registry);
-    let result = (|| {
+    {
         let manifest = manifest::read_project(&project).expect("manifest reads");
         let resolution = umayc::lock::resolve(&project, &manifest);
         assert!(resolution.unresolved.is_empty(), "{:?}", resolution.unresolved);
@@ -180,9 +177,8 @@ fn a_package_without_a_version_gets_the_newest_case() {
         let body = std::fs::read_to_string(project.join("deps/lib/src/lib.um"))
             .expect("fetched source");
         assert!(body.contains("10"), "the fetched body must be 1.10.0's: {body}");
-    })();
+    };
     std::env::remove_var("UMAY_REGISTRY");
-    result
 }
 
 /// Runs every case in order, in one test.

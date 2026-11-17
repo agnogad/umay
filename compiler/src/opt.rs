@@ -244,13 +244,13 @@ fn is_comparison(op: BinOp) -> bool {
 
 /// Rewrites a constant's type annotation, keeping its value.
 fn retype_constant(op: &mut Operand, ty: crate::types::TyId) {
-    if let Operand::Constant(c) = op {
-        match c {
-            Constant::Int { ty: slot, .. } | Constant::Uint { ty: slot, .. } | Constant::Float { ty: slot, .. } => {
-                *slot = ty
-            }
-            _ => {}
-        }
+    if let Operand::Constant(
+        Constant::Int { ty: slot, .. }
+        | Constant::Uint { ty: slot, .. }
+        | Constant::Float { ty: slot, .. },
+    ) = op
+    {
+        *slot = ty;
     }
 }
 
@@ -667,6 +667,9 @@ fn rewrite_terminator(t: &mut Terminator, resolved: &BTreeMap<LocalId, LocalId>)
 /// syntactic count, so `x = 1; x = 2; use(x)` keeps only the second assignment.
 /// This is what makes the safety net useful: lowering emits a store for every
 /// intermediate value, and most of them are read exactly never.
+// The index is used to mutate the block whose live-out set is being read, so an
+// iterator over `blocks` would borrow it twice.
+#[allow(clippy::needless_range_loop)]
 pub fn dce(body: &mut Body, types: &TyCtxt) -> usize {
     let mut removed = 0;
     // Repeat until nothing changes, because deleting one statement can make

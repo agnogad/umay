@@ -284,7 +284,7 @@ impl<'t> Mono<'t> {
         let names = self.decl_generics.get(&callee)?;
         let mut subst: Vec<Option<TyId>> = vec![None; names.len()];
         for (p, a) in param_tys.iter().zip(arg_tys.iter()) {
-            unify_param(self.types, *p, *a, &names, &mut subst);
+            unify_param(self.types, *p, *a, names, &mut subst);
         }
         subst.into_iter().collect()
     }

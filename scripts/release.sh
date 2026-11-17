@@ -54,7 +54,11 @@ if grep -q "Status: \*\*draft\*\*" docs/language-specification.md; then
     exit 1
 fi
 
-# 3. The suite must pass. A release is a claim that the tests pass.
+# 3. The suite and the lints must pass. A release is a claim that the tree is
+# clean in both senses.
+echo "==> checking lints"
+cargo clippy --all-targets --quiet -- -D warnings
+
 echo "==> running the test suite"
 cargo test --quiet
 
