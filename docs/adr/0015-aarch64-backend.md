@@ -100,11 +100,11 @@ needs no cross C library.
 - The compiler itself is built as a static `aarch64-unknown-linux-musl` binary
   with `rust-lld`, published as the `aarch64-linux-musl` archive and selected by
   `install.sh` on ARM64 Linux. CI builds it and runs `umay version` under qemu.
-- The macOS ARM64 target emits Mach-O ARM64 and is cross-linked on an Intel
-  macOS runner, where `file` confirms the `arm64` architecture. The
-  `aarch64-darwin` archive is part of a tag release. A native Apple Silicon run
-  is not available to this private repository's hosted runners; Windows ARM64
-  runs natively on `windows-11-arm`.
+- The macOS ARM64 target emits Mach-O ARM64. An Intel macOS runner cross-builds
+  the ARM64 compiler and a generated object, and `file` confirms both are
+  `arm64`; the `aarch64-darwin` archive is part of a tag release. A native
+  Apple Silicon run is not available to this private repository's hosted
+  runners; Windows ARM64 runs natively on `windows-11-arm`.
 
 ## Known limitations
 
