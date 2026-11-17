@@ -895,15 +895,17 @@ compiler passes the same test corpus.
 The compiler and the three x86_64 release artifacts are in place. What remains
 is breadth, packaging, and the two known quality gaps.
 
-- [~] **ARM64.** A second backend and a native Apple Silicon build. The first
-      scalar slice is in `compiler/src/aarch64.rs`: `aarch64-unknown-linux-gnu`
-      parses, `umay asm` emits AArch64 for scalars, strings, arrays and struct
-      fields, clang assembles the result into an `EM_AARCH64` object, and the
-      runtime compiles to a second object. A CI job links and runs a program
-      under qemu. Aggregate passing, enum fields and ARM64 macOS/Windows are
-      next; see
-      [ADR 0015](docs/adr/0015-aarch64-backend.md). Until then the support
-      matrix is x86_64 only and the README says so.
+- [~] **ARM64.** The Linux AArch64 backend in `compiler/src/aarch64.rs` lowers
+      the full MIR surface: scalars, strings, pointers, arrays, structs,
+      tuples, enums, generics, function pointers, floats and indirect calls.
+      AAPCS64 calls pass integer arguments in `x0`-`x7`, floats in `v0`-`v7`,
+      composites in registers or by reference, and extra arguments on the
+      stack; returns use `x0`/`x1`, `d0`/`s0`, or the hidden `x8` pointer. The
+      program and runtime compile for `aarch64-unknown-linux-gnu`, and a CI job
+      links and runs a feature-covering program under qemu. HFA C interop,
+      register allocation, and ARM64 macOS/Windows remain; see
+      [ADR 0015](docs/adr/0015-aarch64-backend.md). Until a release artifact is
+      cut, the support matrix is x86_64 and the README says so.
 - [ ] **Hosted `upm` registry.** The fetcher, version choice and content hash
       already work against a directory. A network registry is a transport layer
       over the same code, not a second resolver.

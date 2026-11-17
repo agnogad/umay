@@ -90,9 +90,6 @@ fn generate_one(
     for local in &body.locals {
         require_value(types, local.ty, &format!("local `{}`", local.name))?;
     }
-    if body.arg_count > 8 {
-        return Err("AAPCS64 passes the first eight arguments in registers; more are not implemented".into());
-    }
 
     let tag = body
         .fn_id
@@ -103,7 +100,15 @@ fn generate_one(
         .and_then(|id| symbols.get(&id))
         .map(|name| mangle(name, foreign, target))
         .unwrap_or_else(|| body.name.clone());
-    let (offsets, frame) = frame_layout(body, types, hir)?;
+    let ret_size = {
+        let mut layouts = Layouts::new(types, hir);
+        layouts
+            .layout(body.ret_ty)
+            .map(|layout| layout.size)
+            .map_err(|e| format!("layout failed for the return type: {e:?}"))?
+    };
+    let needs_sret = is_aggregate(types.kind(body.ret_ty)) && ret_size > 16;
+    let (offsets, frame, sret_offset) = frame_layout(body, types, hir, needs_sret)?;
 
     let mut emitter = Emitter {
         out: String::new(),
@@ -117,6 +122,7 @@ fn generate_one(
         offsets,
         next_label: 0,
         hir,
+        sret_offset,
     };
 
     let _ = writeln!(emitter.out, ".p2align 2");
@@ -126,13 +132,18 @@ fn generate_one(
     let _ = writeln!(emitter.out, "    stp x29, x30, [sp, #-16]!");
     let _ = writeln!(emitter.out, "    mov x29, sp");
     if frame > 0 {
-        let _ = writeln!(emitter.out, "    sub sp, sp, #{frame}");
+        if frame <= 4095 {
+            let _ = writeln!(emitter.out, "    sub sp, sp, #{frame}");
+        } else {
+            let _ = writeln!(emitter.out, "    mov x12, #{frame}");
+            let _ = writeln!(emitter.out, "    sub sp, sp, x12");
+        }
     }
-    for arg in 0..body.arg_count {
-        let offset = emitter.offsets[arg as usize];
-        let _ = writeln!(emitter.out, "    sub x9, x29, #{offset}");
-        let _ = writeln!(emitter.out, "    str x{arg}, [x9]");
+    if emitter.sret_offset.is_some() {
+        emitter.sret_address(9)?;
+        let _ = writeln!(emitter.out, "    str x8, [x9]");
     }
+    emitter.store_incoming_args()?;
 
     for (block_index, block) in body.blocks.iter().enumerate() {
         let _ = writeln!(emitter.out, ".L{tag}_bb{block_index}:");
@@ -144,6 +155,27 @@ fn generate_one(
 
     let _ = writeln!(emitter.out, ".size {symbol}, .-{symbol}");
     Ok(emitter.out)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgKind {
+    Scalar,
+    /// A scalar float, passed in an FP/SIMD register.
+    Float,
+    /// A composite of at most 16 bytes, passed in one or two general registers.
+    Small,
+    /// A composite larger than 16 bytes, passed by reference.
+    Large,
+}
+
+#[derive(Debug, Clone)]
+struct ArgLoc {
+    regs: Vec<u8>,
+    freg: Option<u8>,
+    stack: Option<u64>,
+    kind: ArgKind,
+    size: u64,
+    float64: bool,
 }
 
 struct Emitter<'a> {
@@ -158,6 +190,7 @@ struct Emitter<'a> {
     offsets: Vec<u32>,
     next_label: usize,
     hir: &'a Hir,
+    sret_offset: Option<u32>,
 }
 
 impl Emitter<'_> {
@@ -165,11 +198,19 @@ impl Emitter<'_> {
         match statement {
             Statement::Assign { place, value, .. } => {
                 let place_ty = self.place_ty(place)?;
+                let mut float_result = false;
                 match value {
                     Rvalue::Use(operand) => {
                         if is_aggregate(self.types.kind(place_ty)) {
+                            if let Operand::Constant(Constant::UnitVariant { def, index }) = operand {
+                                self.unit_variant(place, *def, *index)?;
+                                return Ok(());
+                            }
                             let source = match operand {
                                 Operand::Copy(place) | Operand::Move(place) => place,
+                                // An unreachable block still assigns `()` to the
+                                // return slot. There is nothing to initialise.
+                                Operand::Constant(Constant::Unit) => return Ok(()),
                                 _ => {
                                     return Err("the AArch64 backend cannot initialise an aggregate from this value".into());
                                 }
@@ -182,17 +223,39 @@ impl Emitter<'_> {
                         self.normalize(place_ty)?;
                     }
                     Rvalue::Binary { op, lhs, rhs } => {
-                        self.operand(lhs, 0)?;
-                        self.operand(rhs, 1)?;
                         let lhs_ty = self.operand_ty(lhs);
-                        self.binary(*op, lhs_ty, place_ty)?;
-                        self.normalize(place_ty)?;
+                        let float_operands = lhs_ty
+                            .map(|ty| self.is_float(ty))
+                            .unwrap_or_else(|| self.is_float(place_ty));
+                        if float_operands {
+                            self.float_binary(*op, lhs, rhs, lhs_ty.unwrap_or(place_ty))?;
+                            float_result = !matches!(
+                                op,
+                                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                            );
+                        } else {
+                            self.operand(lhs, 0)?;
+                            self.operand(rhs, 1)?;
+                            self.binary(*op, lhs_ty, place_ty)?;
+                            self.normalize(place_ty)?;
+                        }
                     }
                     Rvalue::Unary { op, operand } => {
                         self.operand(operand, 0)?;
                         match op {
                             UnOp::Neg => {
-                                let _ = writeln!(self.out, "    neg x0, x0");
+                                if self.operand_ty(operand).map(|ty| self.is_float(ty)).unwrap_or(false) {
+                                    let float64 = self
+                                        .operand_ty(operand)
+                                        .map(|ty| matches!(self.types.kind(ty), TyKind::F64))
+                                        .unwrap_or(false);
+                                    self.operand_float(operand, 0, float64)?;
+                                    let prefix = if float64 { "d" } else { "s" };
+                                    let _ = writeln!(self.out, "    fneg {prefix}0, {prefix}0");
+                                    float_result = true;
+                                } else {
+                                    let _ = writeln!(self.out, "    neg x0, x0");
+                                }
                             }
                             UnOp::Not => {
                                 if matches!(self.operand_ty(operand).map(|t| self.types.kind(t)), Some(TyKind::Bool)) {
@@ -205,7 +268,17 @@ impl Emitter<'_> {
                         self.normalize(place_ty)?;
                     }
                     Rvalue::Cast { operand, to: _ } => {
-                        self.operand(operand, 0)?;
+                        let source_float = self
+                            .operand_ty(operand)
+                            .map(|ty| self.is_float(ty))
+                            .unwrap_or(false);
+                        let target_float = self.is_float(place_ty);
+                        if source_float || target_float {
+                            self.cast_float(operand, place_ty)?;
+                            float_result = target_float;
+                        } else {
+                            self.operand(operand, 0)?;
+                        }
                         self.normalize(place_ty)?;
                     }
                     Rvalue::Ref { place: borrowed, .. } | Rvalue::Reborrow { place: borrowed, .. } => {
@@ -225,7 +298,7 @@ impl Emitter<'_> {
                         let pointee = self.pointee(place_ty)?;
                         let size = self.size_of(pointee)?;
                         if size != 1 {
-                            let _ = writeln!(self.out, "    mov x2, #{size}");
+                            self.emit_mov_u64(2, size)?;
                             let _ = writeln!(self.out, "    mul x1, x1, x2");
                         }
                         let _ = writeln!(self.out, "    add x0, x0, x1");
@@ -249,15 +322,32 @@ impl Emitter<'_> {
                     Rvalue::Aggregate { kind: AggregateKind::Struct(def), operands } => {
                         self.struct_literal(place, place_ty, *def, operands)?;
                     }
-                    other => {
-                        return Err(format!(
-                            "the AArch64 backend does not support `{}` assignments yet",
-                            rvalue_name(other)
-                        ));
+                    Rvalue::Aggregate { kind: AggregateKind::Variant { def, index }, operands } => {
+                        self.variant_literal(place, place_ty, *def, *index, operands)?;
+                    }
+                    Rvalue::Aggregate { kind: AggregateKind::Tuple, operands } => {
+                        self.tuple_literal(place, place_ty, operands)?;
+                    }
+                    Rvalue::Discriminant(discriminant_place) => {
+                        let enum_ty = self.place_ty(discriminant_place)?;
+                        let (def, _) = self.enum_parts(enum_ty)?;
+                        let size = self.tag_size(def)?;
+                        self.address_of(discriminant_place)?;
+                        if size == 1 {
+                            let _ = writeln!(self.out, "    ldrb w0, [x11]");
+                        } else {
+                            let _ = writeln!(self.out, "    ldr w0, [x11]");
+                        }
+                        self.normalize(place_ty)?;
                     }
                 }
                 if is_scalar(self.types.kind(place_ty)) {
-                    self.store(place, 0)?;
+                    if float_result {
+                        let float64 = matches!(self.types.kind(place_ty), TyKind::F64);
+                        self.store_float_result(place, float64)?;
+                    } else {
+                        self.store(place, 0)?;
+                    }
                 }
                 Ok(())
             }
@@ -271,20 +361,32 @@ impl Emitter<'_> {
     fn repeat(&mut self, place: &Place, ty: TyId, operand: &Operand, count: u64) -> Result<(), String> {
         let element = self.element(ty)?;
         let size = self.size_of(element)?;
+        let aggregate = is_aggregate(self.types.kind(element));
         let label = self.label();
-        self.operand(operand, 0)?;
+        if aggregate {
+            self.operand_address(operand)?;
+            let _ = writeln!(self.out, "    mov x13, x11");
+        } else {
+            self.operand(operand, 0)?;
+        }
         self.address_of(place)?;
+        let _ = writeln!(self.out, "    mov x14, x11");
         let _ = writeln!(self.out, "    mov x10, #0");
         let _ = writeln!(self.out, ".L{label}:");
-        let _ = writeln!(self.out, "    cmp x10, #{count}");
+        self.cmp_immediate(10, count)?;
         let _ = writeln!(self.out, "    b.hs .L{label}_done");
-        if size == 1 {
-            let _ = writeln!(self.out, "    strb w0, [x11, x10]");
-        } else {
-            let _ = writeln!(self.out, "    mov x12, #{size}");
+        if aggregate {
+            self.emit_mov_u64(12, size)?;
             let _ = writeln!(self.out, "    mul x12, x10, x12");
-            let _ = writeln!(self.out, "    add x12, x11, x12");
-            let _ = writeln!(self.out, "    str x0, [x12]");
+            let _ = writeln!(self.out, "    add x11, x14, x12");
+            self.copy_bytes(13, size)?;
+        } else if size == 1 {
+            let _ = writeln!(self.out, "    strb w0, [x14, x10]");
+        } else {
+            self.emit_mov_u64(12, size)?;
+            let _ = writeln!(self.out, "    mul x12, x10, x12");
+            let _ = writeln!(self.out, "    add x11, x14, x12");
+            self.store_at(element, 0)?;
         }
         let _ = writeln!(self.out, "    add x10, x10, #1");
         let _ = writeln!(self.out, "    b .L{label}");
@@ -296,18 +398,9 @@ impl Emitter<'_> {
         let element = self.element(ty)?;
         let size = self.size_of(element)?;
         self.address_of(place)?;
-        // Each operand load may address a local and overwrite `x11`.
-        let _ = writeln!(self.out, "    mov x13, x11");
+        let _ = writeln!(self.out, "    mov x14, x11");
         for (index, operand) in operands.iter().enumerate() {
-            self.operand(operand, 0)?;
-            let at = index as u64 * size;
-            if size == 1 {
-                let _ = writeln!(self.out, "    strb w0, [x13, #{at}]");
-            } else {
-                let _ = writeln!(self.out, "    mov x12, #{at}");
-                let _ = writeln!(self.out, "    add x12, x13, x12");
-                let _ = writeln!(self.out, "    str x0, [x12]");
-            }
+            self.store_operand_field(operand, element, 14, index as u64 * size)?;
         }
         Ok(())
     }
@@ -321,20 +414,94 @@ impl Emitter<'_> {
     ) -> Result<(), String> {
         let (_, args) = self.adt_parts(ty)?;
         let offsets = self.field_offsets(def, &args)?;
-        let fields = self.field_types(def)?;
+        let fields = self.field_types(def, &args)?;
         if operands.len() != fields.len() {
             return Err("a struct literal and its definition disagree on field count".into());
         }
         self.address_of(place)?;
-        let _ = writeln!(self.out, "    mov x13, x11");
+        let _ = writeln!(self.out, "    mov x14, x11");
         for ((operand, offset), field_ty) in operands.iter().zip(offsets).zip(fields) {
-            self.operand(operand, 0)?;
-            // Loading the operand may have used `x11` for a local's address.
-            let _ = writeln!(self.out, "    mov x11, x13");
-            self.add_to_address(offset)?;
-            self.store_at(field_ty, 0)?;
+            self.store_operand_field(operand, field_ty, 14, offset)?;
         }
         Ok(())
+    }
+
+    fn store_operand_field(
+        &mut self,
+        operand: &Operand,
+        ty: TyId,
+        base: u8,
+        offset: u64,
+    ) -> Result<(), String> {
+        if is_aggregate(self.types.kind(ty)) {
+            let size = self.size_of(ty)?;
+            let _ = writeln!(self.out, "    mov x11, x{base}");
+            self.add_to_address(offset)?;
+            let _ = writeln!(self.out, "    mov x9, x11");
+            self.operand_address(operand)?;
+            let _ = writeln!(self.out, "    mov x13, x11");
+            let _ = writeln!(self.out, "    mov x11, x9");
+            self.copy_bytes(13, size)?;
+        } else {
+            self.operand(operand, 0)?;
+            let _ = writeln!(self.out, "    mov x11, x{base}");
+            self.add_to_address(offset)?;
+            self.store_at(ty, 0)?;
+        }
+        Ok(())
+    }
+
+    fn tuple_literal(&mut self, place: &Place, ty: TyId, operands: &[Operand]) -> Result<(), String> {
+        let (offsets, fields) = self.tuple_fields(ty)?;
+        if operands.len() != fields.len() {
+            return Err("a tuple literal and its type disagree on element count".into());
+        }
+        self.address_of(place)?;
+        let _ = writeln!(self.out, "    mov x14, x11");
+        for ((operand, offset), field_ty) in operands.iter().zip(offsets).zip(fields) {
+            self.store_operand_field(operand, field_ty, 14, offset)?;
+        }
+        Ok(())
+    }
+
+    fn store_tag(&mut self, base: u8, def: DefId, index: u32) -> Result<(), String> {
+        let size = self.tag_size(def)?;
+        let _ = writeln!(self.out, "    mov x12, #{index}");
+        if size == 1 {
+            let _ = writeln!(self.out, "    strb w12, [x{base}]");
+        } else {
+            let _ = writeln!(self.out, "    str w12, [x{base}]");
+        }
+        Ok(())
+    }
+
+    fn variant_literal(
+        &mut self,
+        place: &Place,
+        ty: TyId,
+        def: DefId,
+        index: u32,
+        operands: &[Operand],
+    ) -> Result<(), String> {
+        let (_, args) = self.enum_parts(ty)?;
+        let payload = self.enum_payload_offset(def, &args)?;
+        let offsets = self.variant_offsets(def, index, &args)?;
+        let fields = self.variant_types(def, index, &args)?;
+        if operands.len() != fields.len() {
+            return Err("an enum variant literal and its definition disagree on field count".into());
+        }
+        self.address_of(place)?;
+        let _ = writeln!(self.out, "    mov x14, x11");
+        self.store_tag(14, def, index)?;
+        for ((operand, offset), field_ty) in operands.iter().zip(offsets).zip(fields) {
+            self.store_operand_field(operand, field_ty, 14, payload + offset)?;
+        }
+        Ok(())
+    }
+
+    fn unit_variant(&mut self, place: &Place, def: DefId, index: u32) -> Result<(), String> {
+        self.address_of(place)?;
+        self.store_tag(11, def, index)
     }
 
     fn copy_aggregate(&mut self, destination: &Place, source: &Place, size: u64) -> Result<(), String> {
@@ -342,13 +509,31 @@ impl Emitter<'_> {
         let _ = writeln!(self.out, "    mov x13, x11");
         self.address_of(destination)?;
         let label = self.label();
-        let _ = writeln!(self.out, "    mov x10, #0");
+        let _ = writeln!(self.out, "    mov x15, #0");
         let _ = writeln!(self.out, ".L{label}:");
-        let _ = writeln!(self.out, "    cmp x10, #{size}");
+        self.cmp_immediate(15, size)?;
         let _ = writeln!(self.out, "    b.hs .L{label}_done");
-        let _ = writeln!(self.out, "    ldrb w0, [x13, x10]");
-        let _ = writeln!(self.out, "    strb w0, [x11, x10]");
-        let _ = writeln!(self.out, "    add x10, x10, #1");
+        let _ = writeln!(self.out, "    ldrb w0, [x13, x15]");
+        let _ = writeln!(self.out, "    strb w0, [x11, x15]");
+        let _ = writeln!(self.out, "    add x15, x15, #1");
+        let _ = writeln!(self.out, "    b .L{label}");
+        let _ = writeln!(self.out, ".L{label}_done:");
+        Ok(())
+    }
+
+    /// Copies `size` bytes from `[x13]` to `[x11]`.
+    fn copy_bytes(&mut self, source_register: u8, size: u64) -> Result<(), String> {
+        let label = self.label();
+        if source_register != 13 {
+            let _ = writeln!(self.out, "    mov x13, x{source_register}");
+        }
+        let _ = writeln!(self.out, "    mov x15, #0");
+        let _ = writeln!(self.out, ".L{label}:");
+        self.cmp_immediate(15, size)?;
+        let _ = writeln!(self.out, "    b.hs .L{label}_done");
+        let _ = writeln!(self.out, "    ldrb w12, [x13, x15]");
+        let _ = writeln!(self.out, "    strb w12, [x11, x15]");
+        let _ = writeln!(self.out, "    add x15, x15, #1");
         let _ = writeln!(self.out, "    b .L{label}");
         let _ = writeln!(self.out, ".L{label}_done:");
         Ok(())
@@ -371,32 +556,7 @@ impl Emitter<'_> {
                 Ok(())
             }
             Terminator::Call { callee, args, destination, target, .. } => {
-                if args.len() > 8 {
-                    return Err("AAPCS64 passes the first eight arguments in registers; more are not implemented".into());
-                }
-                let symbol = self.callee(callee)?;
-                if symbol.is_none() {
-                    self.operand(callee, 9)?;
-                }
-                for (index, arg) in args.iter().enumerate() {
-                    self.operand(arg, index as u8)?;
-                }
-                match symbol {
-                    Some(symbol) => {
-                        let _ = writeln!(self.out, "    bl {symbol}");
-                    }
-                    None => {
-                        let _ = writeln!(self.out, "    blr x9");
-                    }
-                }
-                if let Some(destination) = destination {
-                    let ty = self.place_ty(destination)?;
-                    if is_array(self.types.kind(ty)) {
-                        return Err("the AArch64 backend does not support returning an array yet".into());
-                    }
-                    self.normalize(ty)?;
-                    self.store(destination, 0)?;
-                }
+                self.emit_call(callee, args, destination.as_ref())?;
                 let _ = writeln!(self.out, "    b .L{}_bb{}", self.tag, target.0);
                 Ok(())
             }
@@ -409,15 +569,37 @@ impl Emitter<'_> {
                 if let Some(local) = self.ret_local() {
                     let place = Place::local(local);
                     let ty = self.place_ty(&place)?;
-                    if is_array(self.types.kind(ty)) {
-                        return Err("the AArch64 backend does not support returning an array yet".into());
+                    if is_aggregate(self.types.kind(ty)) {
+                        let size = self.size_of(ty)?;
+                        if size > 16 {
+                            self.address_of(&place)?;
+                            let _ = writeln!(self.out, "    mov x13, x11");
+                            self.sret_address(11)?;
+                            let _ = writeln!(self.out, "    ldr x11, [x11]");
+                            self.copy_bytes(13, size)?;
+                        } else {
+                            self.address_of(&place)?;
+                            let _ = writeln!(self.out, "    ldr x0, [x11]");
+                            if size > 8 {
+                                let _ = writeln!(self.out, "    ldr x1, [x11, #8]");
+                            }
+                        }
+                    } else if self.is_float(ty) {
+                        let float64 = matches!(self.types.kind(ty), TyKind::F64);
+                        self.load_float(&place, 0, float64)?;
+                    } else {
+                        self.load(&place, 0)?;
                     }
-                    self.load(&place, 0)?;
                 } else {
                     let _ = writeln!(self.out, "    mov x0, #0");
                 }
                 if self.frame > 0 {
-                    let _ = writeln!(self.out, "    add sp, sp, #{}", self.frame);
+                    if self.frame <= 4095 {
+                        let _ = writeln!(self.out, "    add sp, sp, #{}", self.frame);
+                    } else {
+                        let _ = writeln!(self.out, "    mov x12, #{}", self.frame);
+                        let _ = writeln!(self.out, "    add sp, sp, x12");
+                    }
                 }
                 let _ = writeln!(self.out, "    ldp x29, x30, [sp], #16");
                 let _ = writeln!(self.out, "    ret");
@@ -428,6 +610,484 @@ impl Emitter<'_> {
                 Ok(())
             }
         }
+    }
+
+    fn store_incoming_args(&mut self) -> Result<(), String> {
+        let types: Vec<Option<TyId>> = self
+            .body
+            .locals
+            .iter()
+            .take(self.body.arg_count as usize)
+            .map(|local| Some(local.ty))
+            .collect();
+        let (locations, _) = self.assign_args(&types)?;
+        // Register arguments first. Every one of them is in x0..x7 at entry, so
+        // copying a large aggregate must use scratch registers that are not
+        // argument registers.
+        for (index, location) in locations.iter().enumerate() {
+            if location.regs.is_empty() && location.freg.is_none() {
+                continue;
+            }
+            match location.kind {
+                ArgKind::Scalar => {
+                    self.local_address(index, 11)?;
+                    let _ = writeln!(self.out, "    str x{}, [x11]", location.regs[0]);
+                }
+                ArgKind::Small => {
+                    self.local_address(index, 11)?;
+                    let _ = writeln!(self.out, "    str x{}, [x11]", location.regs[0]);
+                    if location.size > 8 {
+                        let _ = writeln!(
+                            self.out,
+                            "    str x{}, [x11, #8]",
+                            location.regs[1]
+                        );
+                    }
+                }
+                ArgKind::Large => {
+                    self.copy_from_pointer(location.regs[0], index, location.size)?;
+                }
+                ArgKind::Float => {
+                    self.local_address(index, 11)?;
+                    let reg = location.freg.unwrap();
+                    let kind = if location.float64 { "d" } else { "s" };
+                    let _ = writeln!(self.out, "    str {kind}{reg}, [x11]");
+                }
+            }
+        }
+        // Then the stack arguments, read from the caller's outgoing area at
+        // `x29 + 16`.
+        for (index, location) in locations.iter().enumerate() {
+            let Some(stack) = location.stack else {
+                continue;
+            };
+            let from = 16 + stack;
+            match location.kind {
+                ArgKind::Scalar | ArgKind::Small => {
+                    self.local_address(index, 11)?;
+                    let _ = writeln!(self.out, "    ldr x12, [x29, #{from}]");
+                    let _ = writeln!(self.out, "    str x12, [x11]");
+                    if location.kind == ArgKind::Small && location.size > 8 {
+                        let _ = writeln!(self.out, "    ldr x12, [x29, #{}]", from + 8);
+                        let _ = writeln!(self.out, "    str x12, [x11, #8]");
+                    }
+                }
+                ArgKind::Large => {
+                    let _ = writeln!(self.out, "    ldr x13, [x29, #{from}]");
+                    self.copy_from_register_pointer(13, index, location.size)?;
+                }
+                ArgKind::Float => {
+                    let kind = if location.float64 { "d" } else { "s" };
+                    self.local_address(index, 11)?;
+                    let _ = writeln!(self.out, "    ldr {kind}12, [x29, #{from}]");
+                    let _ = writeln!(self.out, "    str {kind}12, [x11]");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_from_pointer(&mut self, register: u8, local: usize, size: u64) -> Result<(), String> {
+        let _ = writeln!(self.out, "    mov x13, x{register}");
+        self.copy_from_register_pointer(13, local, size)
+    }
+
+    fn copy_from_register_pointer(
+        &mut self,
+        pointer_register: u8,
+        local: usize,
+        size: u64,
+    ) -> Result<(), String> {
+        let label = self.label();
+        self.local_address(local, 11)?;
+        let _ = writeln!(self.out, "    mov x13, x{pointer_register}");
+        let _ = writeln!(self.out, "    mov x15, #0");
+        let _ = writeln!(self.out, ".L{label}:");
+        self.cmp_immediate(15, size)?;
+        let _ = writeln!(self.out, "    b.hs .L{label}_done");
+        let _ = writeln!(self.out, "    ldrb w12, [x13, x15]");
+        let _ = writeln!(self.out, "    strb w12, [x11, x15]");
+        let _ = writeln!(self.out, "    add x15, x15, #1");
+        let _ = writeln!(self.out, "    b .L{label}");
+        let _ = writeln!(self.out, ".L{label}_done:");
+        Ok(())
+    }
+
+    fn emit_call(
+        &mut self,
+        callee: &Operand,
+        args: &[Operand],
+        destination: Option<&Place>,
+    ) -> Result<(), String> {
+        let types: Vec<Option<TyId>> = args.iter().map(|arg| self.call_arg_ty(arg)).collect::<Result<_, _>>()?;
+        let (locations, stack_bytes) = self.assign_args(&types)?;
+        let symbol = self.callee(callee)?;
+
+        if stack_bytes > 0 {
+            if stack_bytes <= 4095 {
+                let _ = writeln!(self.out, "    sub sp, sp, #{stack_bytes}");
+            } else {
+                self.emit_mov_u64(12, stack_bytes)?;
+                let _ = writeln!(self.out, "    sub sp, sp, x12");
+            }
+        }
+        // Stack arguments first: the scratch registers used to copy them are
+        // the argument registers themselves.
+        for (arg, location) in args.iter().zip(&locations) {
+            let Some(stack) = location.stack else {
+                continue;
+            };
+            match location.kind {
+                ArgKind::Scalar => {
+                    self.operand(arg, 12)?;
+                    let _ = writeln!(self.out, "    str x12, [sp, #{stack}]");
+                }
+                ArgKind::Small => {
+                    self.operand_address(arg)?;
+                    let _ = writeln!(self.out, "    ldr x12, [x11]");
+                    let _ = writeln!(self.out, "    str x12, [sp, #{stack}]");
+                    if location.size > 8 {
+                        let _ = writeln!(self.out, "    ldr x12, [x11, #8]");
+                        let _ = writeln!(self.out, "    str x12, [sp, #{}]", stack + 8);
+                    }
+                }
+                ArgKind::Large => {
+                    self.operand_address(arg)?;
+                    let _ = writeln!(self.out, "    str x11, [sp, #{stack}]");
+                }
+                ArgKind::Float => {
+                    self.operand_float(arg, 12, location.float64)?;
+                    let kind = if location.float64 { "d" } else { "s" };
+                    let _ = writeln!(self.out, "    str {kind}12, [sp, #{stack}]");
+                }
+            }
+        }
+        // A large return goes through x8, which the callee reads before any
+        // call it makes.
+        if let Some(destination) = destination {
+            let ty = self.place_ty(destination)?;
+            if is_aggregate(self.types.kind(ty)) && self.size_of(ty)? > 16 {
+                self.address_of(destination)?;
+                let _ = writeln!(self.out, "    mov x8, x11");
+            }
+        }
+        if symbol.is_none() {
+            // `(*f)()` models a function value through a `*const fn`. The
+            // reference backend treats the pointer itself as the entry point;
+            // loading the pointee would read the first instruction as an
+            // address. Drop the final `Deref` and load the pointer value.
+            let indirect = match callee {
+                Operand::Copy(place) | Operand::Move(place)
+                    if matches!(place.projection.last(), Some(Projection::Deref)) =>
+                {
+                    let mut projection = place.projection.clone();
+                    projection.pop();
+                    Operand::Copy(Place { local: place.local, projection })
+                }
+                other => other.clone(),
+            };
+            self.operand(&indirect, 9)?;
+        }
+        // Register arguments last, so nothing clobbers them.
+        for (arg, location) in args.iter().zip(&locations) {
+            if location.regs.is_empty() && location.freg.is_none() {
+                continue;
+            }
+            match location.kind {
+                ArgKind::Scalar => {
+                    self.operand(arg, location.regs[0])?;
+                }
+                ArgKind::Small => {
+                    self.operand_address(arg)?;
+                    let _ = writeln!(self.out, "    ldr x{}, [x11]", location.regs[0]);
+                    if location.size > 8 {
+                        let _ = writeln!(
+                            self.out,
+                            "    ldr x{}, [x11, #8]",
+                            location.regs[1]
+                        );
+                    }
+                }
+                ArgKind::Large => {
+                    self.operand_address(arg)?;
+                    let _ = writeln!(self.out, "    mov x{}, x11", location.regs[0]);
+                }
+                ArgKind::Float => {
+                    self.operand_float(arg, location.freg.unwrap(), location.float64)?;
+                }
+            }
+        }
+        match symbol {
+            Some(symbol) => {
+                let _ = writeln!(self.out, "    bl {symbol}");
+            }
+            None => {
+                let _ = writeln!(self.out, "    blr x9");
+            }
+        }
+        if stack_bytes > 0 {
+            if stack_bytes <= 4095 {
+                let _ = writeln!(self.out, "    add sp, sp, #{stack_bytes}");
+            } else {
+                self.emit_mov_u64(12, stack_bytes)?;
+                let _ = writeln!(self.out, "    add sp, sp, x12");
+            }
+        }
+        if let Some(destination) = destination {
+            let ty = self.place_ty(destination)?;
+            if is_aggregate(self.types.kind(ty)) {
+                let size = self.size_of(ty)?;
+                if size <= 16 {
+                    self.address_of(destination)?;
+                    let _ = writeln!(self.out, "    str x0, [x11]");
+                    if size > 8 {
+                        let _ = writeln!(self.out, "    str x1, [x11, #8]");
+                    }
+                }
+            } else if matches!(self.types.kind(ty), TyKind::F32 | TyKind::F64) {
+                self.store_float_result(destination, matches!(self.types.kind(ty), TyKind::F64))?;
+            } else {
+                self.normalize(ty)?;
+                self.store(destination, 0)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn call_arg_ty(&mut self, operand: &Operand) -> Result<Option<TyId>, String> {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) => Ok(Some(self.place_ty(place)?)),
+            Operand::Constant(Constant::Int { ty, .. })
+            | Operand::Constant(Constant::Uint { ty, .. })
+            | Operand::Constant(Constant::Float { ty, .. }) => Ok(Some(*ty)),
+            _ => Ok(None),
+        }
+    }
+
+    fn operand_address(&mut self, operand: &Operand) -> Result<(), String> {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) => self.address_of(place),
+            _ => Err("an aggregate argument must be a place, not a constant".into()),
+        }
+    }
+
+    fn assign_args(&mut self, types: &[Option<TyId>]) -> Result<(Vec<ArgLoc>, u64), String> {
+        let mut regs = 0u8;
+        let mut fregs = 0u8;
+        let mut stack = 0u64;
+        let mut gpr_stack = false;
+        let mut fpr_stack = false;
+        let mut locations = Vec::with_capacity(types.len());
+        for ty in types {
+            let (kind, size, float64) = self.arg_kind(*ty)?;
+            if kind == ArgKind::Float {
+                if !fpr_stack && fregs < 8 {
+                    locations.push(ArgLoc {
+                        regs: Vec::new(),
+                        freg: Some(fregs),
+                        stack: None,
+                        kind,
+                        size,
+                        float64,
+                    });
+                    fregs += 1;
+                } else {
+                    fpr_stack = true;
+                    locations.push(ArgLoc {
+                        regs: Vec::new(),
+                        freg: None,
+                        stack: Some(stack),
+                        kind,
+                        size,
+                        float64,
+                    });
+                    stack += 8;
+                }
+                continue;
+            }
+            let needed = match kind {
+                ArgKind::Scalar => 1,
+                ArgKind::Small => size.div_ceil(8) as u8,
+                ArgKind::Large => 1,
+                ArgKind::Float => unreachable!(),
+            };
+            // AAPCS64 keeps a two-register composite on an even register.
+            if kind == ArgKind::Small && needed == 2 && regs % 2 == 1 {
+                regs += 1;
+            }
+            if !gpr_stack && regs + needed <= 8 {
+                let assigned = (regs..regs + needed).collect();
+                regs += needed;
+                locations.push(ArgLoc {
+                    regs: assigned,
+                    freg: None,
+                    stack: None,
+                    kind,
+                    size,
+                    float64,
+                });
+            } else {
+                gpr_stack = true;
+                let slot = match kind {
+                    ArgKind::Scalar | ArgKind::Large | ArgKind::Float => 8,
+                    ArgKind::Small => (size + 7) & !7,
+                };
+                locations.push(ArgLoc {
+                    regs: Vec::new(),
+                    freg: None,
+                    stack: Some(stack),
+                    kind,
+                    size,
+                    float64,
+                });
+                stack += slot;
+            }
+        }
+        let stack_bytes = (stack + 15) & !15;
+        Ok((locations, stack_bytes))
+    }
+
+    fn arg_kind(&mut self, ty: Option<TyId>) -> Result<(ArgKind, u64, bool), String> {
+        let Some(ty) = ty else {
+            return Ok((ArgKind::Scalar, 8, false));
+        };
+        match self.types.kind(ty) {
+            TyKind::F32 => Ok((ArgKind::Float, 4, false)),
+            TyKind::F64 => Ok((ArgKind::Float, 8, true)),
+            _ if is_aggregate(self.types.kind(ty)) => {
+                let size = self.size_of(ty)?;
+                if size > 16 {
+                    Ok((ArgKind::Large, size, false))
+                } else {
+                    Ok((ArgKind::Small, size, false))
+                }
+            }
+            _ => Ok((ArgKind::Scalar, 8, false)),
+        }
+    }
+
+    fn is_float(&self, ty: TyId) -> bool {
+        matches!(self.types.kind(ty), TyKind::F32 | TyKind::F64)
+    }
+
+    fn operand_float(&mut self, operand: &Operand, freg: u8, float64: bool) -> Result<(), String> {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) => self.load_float(place, freg, float64),
+            Operand::Constant(Constant::Float { value, ty: _ }) => {
+                if float64 {
+                    self.emit_mov_u64(12, value.to_bits())?;
+                    let _ = writeln!(self.out, "    fmov d{freg}, x12");
+                } else {
+                    self.emit_mov_u64(12, u64::from((*value as f32).to_bits()))?;
+                    let _ = writeln!(self.out, "    fmov s{freg}, w12");
+                }
+                Ok(())
+            }
+            _ => Err("a floating-point argument must be a float value".into()),
+        }
+    }
+
+    fn load_float(&mut self, place: &Place, freg: u8, float64: bool) -> Result<(), String> {
+        self.address_of(place)?;
+        let kind = if float64 { "d" } else { "s" };
+        let _ = writeln!(self.out, "    ldr {kind}{freg}, [x11]");
+        Ok(())
+    }
+
+    fn store_float_result(&mut self, destination: &Place, float64: bool) -> Result<(), String> {
+        self.address_of(destination)?;
+        let kind = if float64 { "d" } else { "s" };
+        let _ = writeln!(self.out, "    str {kind}0, [x11]");
+        Ok(())
+    }
+
+    fn emit_mov_u64(&mut self, register: u8, value: u64) -> Result<(), String> {
+        let _ = writeln!(self.out, "    movz x{register}, #{}", value & 0xffff);
+        for (shift, chunk) in [(16, (value >> 16) & 0xffff), (32, (value >> 32) & 0xffff), (48, (value >> 48) & 0xffff)] {
+            if chunk != 0 {
+                let _ = writeln!(self.out, "    movk x{register}, #{chunk}, lsl #{shift}");
+            }
+        }
+        Ok(())
+    }
+
+    fn float_binary(&mut self, op: BinOp, lhs: &Operand, rhs: &Operand, lhs_ty: TyId) -> Result<(), String> {
+        let float64 = matches!(self.types.kind(lhs_ty), TyKind::F64);
+        let prefix = if float64 { "d" } else { "s" };
+        self.operand_float(lhs, 0, float64)?;
+        self.operand_float(rhs, 1, float64)?;
+        match op {
+            BinOp::Add => {
+                let _ = writeln!(self.out, "    fadd {prefix}0, {prefix}0, {prefix}1");
+            }
+            BinOp::Sub => {
+                let _ = writeln!(self.out, "    fsub {prefix}0, {prefix}0, {prefix}1");
+            }
+            BinOp::Mul => {
+                let _ = writeln!(self.out, "    fmul {prefix}0, {prefix}0, {prefix}1");
+            }
+            BinOp::Div => {
+                let _ = writeln!(self.out, "    fdiv {prefix}0, {prefix}0, {prefix}1");
+            }
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                let condition = match op {
+                    BinOp::Eq => "eq",
+                    BinOp::Ne => "ne",
+                    BinOp::Lt => "mi",
+                    BinOp::Le => "ls",
+                    BinOp::Gt => "gt",
+                    _ => "ge",
+                };
+                let _ = writeln!(self.out, "    fcmp {prefix}0, {prefix}1");
+                let _ = writeln!(self.out, "    cset x0, {condition}");
+            }
+            _ => {
+                return Err("the AArch64 backend supports only arithmetic and comparison on floats".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn cast_float(&mut self, operand: &Operand, to: TyId) -> Result<(), String> {
+        let from = self
+            .operand_ty(operand)
+            .ok_or_else(|| "a float cast has no source type".to_string())?;
+        let from_float = self.is_float(from);
+        let to_float = self.is_float(to);
+        match (from_float, to_float) {
+            (true, true) => {
+                if from == to {
+                    return Ok(());
+                }
+                if matches!(self.types.kind(from), TyKind::F64) {
+                    self.operand_float(operand, 0, true)?;
+                    let _ = writeln!(self.out, "    fcvt s0, d0");
+                } else {
+                    self.operand_float(operand, 0, false)?;
+                    let _ = writeln!(self.out, "    fcvt d0, s0");
+                }
+            }
+            (true, false) => {
+                let float64 = matches!(self.types.kind(from), TyKind::F64);
+                self.operand_float(operand, 0, float64)?;
+                let prefix = if float64 { "d" } else { "s" };
+                let unsigned = self.is_unsigned(to);
+                let op = if unsigned { "fcvtzu" } else { "fcvtzs" };
+                let _ = writeln!(self.out, "    {op} x0, {prefix}0");
+            }
+            (false, true) => {
+                self.operand(operand, 0)?;
+                let unsigned = self.is_unsigned(from);
+                let op = if unsigned { "ucvtf" } else { "scvtf" };
+                if matches!(self.types.kind(to), TyKind::F64) {
+                    let _ = writeln!(self.out, "    {op} d0, x0");
+                } else {
+                    let _ = writeln!(self.out, "    {op} s0, x0");
+                }
+            }
+            (false, false) => {}
+        }
+        Ok(())
     }
 
     fn callee(&self, operand: &Operand) -> Result<Option<String>, String> {
@@ -454,12 +1114,12 @@ impl Emitter<'_> {
             Constant::Int { value, .. } => {
                 let value = i64::try_from(*value)
                     .map_err(|_| "an integer constant does not fit in 64 bits".to_string())?;
-                let _ = writeln!(self.out, "    mov x{reg}, #{value}");
+                self.emit_mov_u64(reg, value as u64)?;
             }
             Constant::Uint { value, .. } => {
                 let value = u64::try_from(*value)
                     .map_err(|_| "an integer constant does not fit in 64 bits".to_string())?;
-                let _ = writeln!(self.out, "    mov x{reg}, #{value}");
+                self.emit_mov_u64(reg, value)?;
             }
             Constant::Bool(value) => {
                 let _ = writeln!(self.out, "    mov x{reg}, #{}", u8::from(*value));
@@ -470,9 +1130,30 @@ impl Emitter<'_> {
             Constant::Unit => {
                 let _ = writeln!(self.out, "    mov x{reg}, #0");
             }
+            Constant::Float { value, ty } => {
+                let bits = if matches!(self.types.kind(*ty), TyKind::F32) {
+                    u64::from((*value as f32).to_bits())
+                } else {
+                    value.to_bits()
+                };
+                self.emit_mov_u64(reg, bits)?;
+            }
             Constant::Str(id) => {
                 let _ = writeln!(self.out, "    adrp x{reg}, .Lstr_{}", id.0);
                 let _ = writeln!(self.out, "    add x{reg}, x{reg}, :lo12:.Lstr_{}", id.0);
+            }
+            Constant::Fn(id) => {
+                let name = self
+                    .symbols
+                    .get(id)
+                    .map(|name| mangle(name, self.foreign, self.target))
+                    .ok_or_else(|| "a function pointer names no symbol".to_string())?;
+                let _ = writeln!(self.out, "    adrp x{reg}, {name}");
+                let _ = writeln!(self.out, "    add x{reg}, x{reg}, :lo12:{name}");
+            }
+            Constant::NamedFn(name) => {
+                let _ = writeln!(self.out, "    adrp x{reg}, {name}");
+                let _ = writeln!(self.out, "    add x{reg}, x{reg}, :lo12:{name}");
             }
             other => {
                 return Err(format!(
@@ -486,9 +1167,8 @@ impl Emitter<'_> {
 
     /// Computes the address of `place` into `x11`.
     fn address_of(&mut self, place: &Place) -> Result<(), String> {
-        let offset = self.offsets[place.local.0 as usize];
         let mut ty = self.body.local(place.local).ty;
-        let _ = writeln!(self.out, "    sub x11, x29, #{offset}");
+        self.local_address(place.local.0 as usize, 11)?;
         for projection in &place.projection {
             match projection {
                 Projection::Deref => {
@@ -515,16 +1195,14 @@ impl Emitter<'_> {
                     ty = element;
                 }
                 Projection::Field(index) => {
-                    let (def, args) = self.adt_parts(ty)?;
-                    let offsets = self.field_offsets(def, &args)?;
-                    let offset = *offsets
-                        .get(*index as usize)
-                        .ok_or_else(|| "a struct field index is out of range".to_string())?;
+                    let (offset, field_ty) = self.field_access(ty, *index)?;
                     self.add_to_address(offset)?;
-                    ty = self.field_type(def, *index)?;
+                    ty = field_ty;
                 }
-                Projection::EnumField { .. } => {
-                    return Err("the AArch64 backend does not support enum fields yet".into());
+                Projection::EnumField { variant, index } => {
+                    let (offset, field_ty) = self.enum_field_access(ty, *variant, *index)?;
+                    self.add_to_address(offset)?;
+                    ty = field_ty;
                 }
             }
         }
@@ -545,7 +1223,7 @@ impl Emitter<'_> {
             TyKind::I16 | TyKind::U16 => {
                 let _ = writeln!(self.out, "    ldrh w{reg}, [x11]");
             }
-            TyKind::I32 | TyKind::U32 | TyKind::Char => {
+            TyKind::I32 | TyKind::U32 | TyKind::Char | TyKind::F32 => {
                 let _ = writeln!(self.out, "    ldr w{reg}, [x11]");
             }
             _ => {
@@ -569,7 +1247,7 @@ impl Emitter<'_> {
             TyKind::I16 | TyKind::U16 => {
                 let _ = writeln!(self.out, "    strh w{reg}, [x11]");
             }
-            TyKind::I32 | TyKind::U32 | TyKind::Char => {
+            TyKind::I32 | TyKind::U32 | TyKind::Char | TyKind::F32 => {
                 let _ = writeln!(self.out, "    str w{reg}, [x11]");
             }
             _ => {
@@ -603,6 +1281,15 @@ impl Emitter<'_> {
                 return Err("short-circuit logical operators are lowered to branches, not binary operations".into());
             }
         };
+        if matches!(op, BinOp::Shl | BinOp::Shr) {
+            let bits = self.size_of(result_ty)? * 8;
+            // x86 masks the count to five bits below 64-bit width; match that
+            // so the two backends agree on the same program.
+            let mask = if bits < 64 { 31 } else { 63 };
+            if mask < 63 {
+                let _ = writeln!(self.out, "    and x1, x1, #{mask}");
+            }
+        }
         match op {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let _ = writeln!(self.out, "    {mnemonic} x0, x1");
@@ -656,8 +1343,11 @@ impl Emitter<'_> {
             | TyKind::RawPtrMut(_)
             | TyKind::FnPtr { .. }
             | TyKind::IntVar(_)
+            | TyKind::F32
+            | TyKind::F64
             | TyKind::Array { .. }
-            | TyKind::Adt { .. } => {}
+            | TyKind::Adt { .. }
+            | TyKind::Tuple(_) => {}
             _ => {
                 return Err(format!(
                     "the AArch64 backend does not support values of type `{}` yet",
@@ -675,7 +1365,7 @@ impl Emitter<'_> {
         )
     }
 
-    fn operand_ty(&self, operand: &Operand) -> Option<TyId> {
+    fn operand_ty(&mut self, operand: &Operand) -> Option<TyId> {
         match operand {
             Operand::Copy(place) | Operand::Move(place) => self.place_ty(place).ok(),
             Operand::Constant(Constant::Int { ty, .. })
@@ -685,18 +1375,15 @@ impl Emitter<'_> {
         }
     }
 
-    fn place_ty(&self, place: &Place) -> Result<TyId, String> {
+    fn place_ty(&mut self, place: &Place) -> Result<TyId, String> {
         let mut ty = self.body.local(place.local).ty;
         for projection in &place.projection {
             ty = match projection {
                 Projection::Deref => self.pointee(ty)?,
                 Projection::Index(_) => self.element(ty)?,
-                Projection::Field(index) => {
-                    let (def, _) = self.adt_parts(ty)?;
-                    self.field_type(def, *index)?
-                }
-                Projection::EnumField { .. } => {
-                    return Err("the AArch64 backend does not support enum fields yet".into());
+                Projection::Field(index) => self.field_access(ty, *index)?.1,
+                Projection::EnumField { variant, index } => {
+                    self.enum_field_access(ty, *variant, *index)?.1
                 }
             };
         }
@@ -753,27 +1440,155 @@ impl Emitter<'_> {
             .map_err(|e| format!("the AArch64 backend cannot lay out fields: {e:?}"))
     }
 
-    fn field_types(&self, def: DefId) -> Result<Vec<TyId>, String> {
-        let info = self
-            .hir
-            .structs
-            .iter()
-            .find(|s| s.def_id == def)
-            .ok_or_else(|| "a struct has no definition in the HIR".to_string())?;
-        let types: Vec<TyId> = info.fields.iter().map(|f| f.ty).collect();
-        for ty in &types {
-            if matches!(self.types.kind(*ty), TyKind::Param { .. }) {
-                return Err("the AArch64 backend does not substitute generic struct fields yet".into());
-            }
-        }
-        Ok(types)
+    fn field_types(&mut self, def: DefId, args: &[TyId]) -> Result<Vec<TyId>, String> {
+        let mut layouts = Layouts::new(self.types, self.hir);
+        layouts
+            .struct_field_tys(def, args)
+            .map_err(|e| format!("the AArch64 backend cannot type struct fields: {e:?}"))
     }
 
-    fn field_type(&self, def: DefId, index: u32) -> Result<TyId, String> {
-        self.field_types(def)?
+    fn field_type(&mut self, def: DefId, index: u32, args: &[TyId]) -> Result<TyId, String> {
+        self.field_types(def, args)?
             .get(index as usize)
             .copied()
             .ok_or_else(|| "a struct field index is out of range".to_string())
+    }
+
+    fn tuple_fields(&mut self, ty: TyId) -> Result<(Vec<u64>, Vec<TyId>), String> {
+        let elems = match self.types.kind(ty) {
+            TyKind::Tuple(elems) => elems.clone(),
+            _ => return Err("a tuple field was requested from a non-tuple".into()),
+        };
+        let mut layouts = Layouts::new(self.types, self.hir);
+        let mut offset = 0u64;
+        let mut offsets = Vec::with_capacity(elems.len());
+        for elem in &elems {
+            let layout = layouts
+                .layout(*elem)
+                .map_err(|e| format!("the AArch64 backend cannot lay out a tuple: {e:?}"))?;
+            let align = layout.align().max(1);
+            offset = (offset + align - 1) & !(align - 1);
+            offsets.push(offset);
+            offset += layout.size;
+        }
+        Ok((offsets, elems))
+    }
+
+    fn field_access(&mut self, ty: TyId, index: u32) -> Result<(u64, TyId), String> {
+        match self.types.kind(ty).clone() {
+            TyKind::Adt { def, args } => {
+                let offsets = self.field_offsets(def, &args)?;
+                let offset = *offsets
+                    .get(index as usize)
+                    .ok_or_else(|| "a struct field index is out of range".to_string())?;
+                let field_ty = self.field_type(def, index, &args)?;
+                Ok((offset, field_ty))
+            }
+            TyKind::Tuple(_) => {
+                let (offsets, elems) = self.tuple_fields(ty)?;
+                let offset = *offsets
+                    .get(index as usize)
+                    .ok_or_else(|| "a tuple index is out of range".to_string())?;
+                let field_ty = *elems
+                    .get(index as usize)
+                    .ok_or_else(|| "a tuple index is out of range".to_string())?;
+                Ok((offset, field_ty))
+            }
+            _ => Err(format!(
+                "the AArch64 backend cannot take field {index} of `{}`",
+                self.types.display(ty)
+            )),
+        }
+    }
+
+    fn enum_field_access(&mut self, ty: TyId, variant: u32, index: u32) -> Result<(u64, TyId), String> {
+        let (def, args) = self.enum_parts(ty)?;
+        let payload = self.enum_payload_offset(def, &args)?;
+        let offsets = self.variant_offsets(def, variant, &args)?;
+        let offset = *offsets
+            .get(index as usize)
+            .ok_or_else(|| "an enum field index is out of range".to_string())?;
+        let field_ty = self
+            .variant_types(def, variant, &args)?
+            .get(index as usize)
+            .copied()
+            .ok_or_else(|| "an enum field index is out of range".to_string())?;
+        Ok((payload + offset, field_ty))
+    }
+
+    fn enum_parts(&self, ty: TyId) -> Result<(DefId, Vec<TyId>), String> {
+        match self.types.kind(ty) {
+            TyKind::Adt { def, args } => Ok((*def, args.clone())),
+            _ => Err("an enum field was requested from a non-enum".into()),
+        }
+    }
+
+    fn enum_variant_count(&self, def: DefId) -> Result<usize, String> {
+        self.hir
+            .enums
+            .iter()
+            .find(|e| e.def_id == def)
+            .map(|e| e.variants.len())
+            .ok_or_else(|| "an enum has no definition in the HIR".to_string())
+    }
+
+    fn tag_size(&self, def: DefId) -> Result<u64, String> {
+        Ok(if self.enum_variant_count(def)? <= 256 { 1 } else { 4 })
+    }
+
+    fn enum_payload_offset(&mut self, def: DefId, args: &[TyId]) -> Result<u64, String> {
+        let mut layouts = Layouts::new(self.types, self.hir);
+        layouts
+            .enum_payload_offset(def, args)
+            .map_err(|e| format!("the AArch64 backend cannot lay out an enum: {e:?}"))
+    }
+
+    fn variant_offsets(&mut self, def: DefId, index: u32, args: &[TyId]) -> Result<Vec<u64>, String> {
+        let mut layouts = Layouts::new(self.types, self.hir);
+        layouts
+            .variant_field_offsets(def, index, args)
+            .map_err(|e| format!("the AArch64 backend cannot lay out an enum variant: {e:?}"))
+    }
+
+    fn variant_types(&mut self, def: DefId, index: u32, args: &[TyId]) -> Result<Vec<TyId>, String> {
+        let mut layouts = Layouts::new(self.types, self.hir);
+        layouts
+            .variant_field_tys_pub(def, index, args)
+            .map_err(|e| format!("the AArch64 backend cannot type an enum variant: {e:?}"))
+    }
+
+    fn local_address(&mut self, local: usize, dest: u8) -> Result<(), String> {
+        let offset = self.offsets[local];
+        if offset <= 4095 {
+            let _ = writeln!(self.out, "    sub x{dest}, x29, #{offset}");
+        } else {
+            self.emit_mov_u64(12, u64::from(offset))?;
+            let _ = writeln!(self.out, "    sub x{dest}, x29, x12");
+        }
+        Ok(())
+    }
+
+    fn sret_address(&mut self, dest: u8) -> Result<(), String> {
+        let offset = self
+            .sret_offset
+            .ok_or_else(|| "a large aggregate return has no hidden pointer slot".to_string())?;
+        if offset <= 4095 {
+            let _ = writeln!(self.out, "    sub x{dest}, x29, #{offset}");
+        } else {
+            self.emit_mov_u64(12, u64::from(offset))?;
+            let _ = writeln!(self.out, "    sub x{dest}, x29, x12");
+        }
+        Ok(())
+    }
+
+    fn cmp_immediate(&mut self, register: u8, value: u64) -> Result<(), String> {
+        if value <= 4095 {
+            let _ = writeln!(self.out, "    cmp x{register}, #{value}");
+        } else {
+            self.emit_mov_u64(14, value)?;
+            let _ = writeln!(self.out, "    cmp x{register}, x14");
+        }
+        Ok(())
     }
 
     /// Adds a compile-time offset to the address in `x11`.
@@ -781,7 +1596,7 @@ impl Emitter<'_> {
         if offset <= 4095 {
             let _ = writeln!(self.out, "    add x11, x11, #{offset}");
         } else {
-            let _ = writeln!(self.out, "    mov x12, #{offset}");
+            self.emit_mov_u64(12, offset)?;
             let _ = writeln!(self.out, "    add x11, x11, x12");
         }
         Ok(())
@@ -795,8 +1610,8 @@ impl Emitter<'_> {
             .map(|i| crate::hir::LocalId(i as u32))
     }
 
-    fn label(&mut self) -> usize {
-        let label = self.next_label;
+    fn label(&mut self) -> String {
+        let label = format!("{}_{}", self.tag, self.next_label);
         self.next_label += 1;
         label
     }
@@ -815,15 +1630,12 @@ fn require_value(types: &TyCtxt, ty: TyId, what: &str) -> Result<(), String> {
 }
 
 fn is_value(kind: &TyKind) -> bool {
-    is_scalar(kind) || matches!(kind, TyKind::Array { .. } | TyKind::Adt { .. })
+    is_scalar(kind)
+        || matches!(kind, TyKind::Array { .. } | TyKind::Adt { .. } | TyKind::Tuple(_))
 }
 
 fn is_aggregate(kind: &TyKind) -> bool {
-    matches!(kind, TyKind::Array { .. } | TyKind::Adt { .. })
-}
-
-fn is_array(kind: &TyKind) -> bool {
-    matches!(kind, TyKind::Array { .. })
+    matches!(kind, TyKind::Array { .. } | TyKind::Adt { .. } | TyKind::Tuple(_))
 }
 
 fn is_scalar(kind: &TyKind) -> bool {
@@ -843,6 +1655,8 @@ fn is_scalar(kind: &TyKind) -> bool {
             | TyKind::U64
             | TyKind::Usize
             | TyKind::Char
+            | TyKind::F32
+            | TyKind::F64
             | TyKind::Ref(_)
             | TyKind::RefMut(_)
             | TyKind::RawPtr(_)
@@ -852,7 +1666,12 @@ fn is_scalar(kind: &TyKind) -> bool {
     )
 }
 
-fn frame_layout(body: &Body, types: &mut TyCtxt, hir: &Hir) -> Result<(Vec<u32>, u32), String> {
+fn frame_layout(
+    body: &Body,
+    types: &mut TyCtxt,
+    hir: &Hir,
+    needs_sret: bool,
+) -> Result<(Vec<u32>, u32, Option<u32>), String> {
     let mut layouts = Layouts::new(types, hir);
     let mut cursor = 0u64;
     let mut offsets = Vec::with_capacity(body.locals.len());
@@ -860,17 +1679,23 @@ fn frame_layout(body: &Body, types: &mut TyCtxt, hir: &Hir) -> Result<(Vec<u32>,
         let layout = layouts
             .layout(local.ty)
             .map_err(|e| format!("layout failed for `{}`: {e:?}", local.name))?;
-        let size = layout.size.max(8);
-        let align = if layout.size == 0 { 8 } else { layout.align().max(1) };
+        let size = if layout.size == 0 { 8 } else { (layout.size + 7) & !7 };
+        let align = if layout.size == 0 { 8 } else { layout.align().max(8) };
         cursor = (cursor + align - 1) & !(align - 1);
         cursor += size;
         offsets.push(cursor as u32);
     }
+    let sret_offset = if needs_sret {
+        cursor += 8;
+        Some(cursor as u32)
+    } else {
+        None
+    };
     let frame = (cursor + 15) & !15;
-    if frame > 4095 {
-        return Err("the AArch64 frame is larger than a single `sub` immediate".into());
+    if frame > (1 << 20) {
+        return Err("the AArch64 frame is larger than one megabyte".into());
     }
-    Ok((offsets, frame as u32))
+    Ok((offsets, frame as u32, sret_offset))
 }
 
 fn mangle(name: &str, foreign: &HashSet<String>, target: Target) -> String {
@@ -894,23 +1719,6 @@ fn constant_name(constant: &Constant) -> &'static str {
         Constant::NamedFn(_) => "named function",
         Constant::Const(_) => "constant",
         Constant::UnitVariant { .. } => "enum variant",
-    }
-}
-
-fn rvalue_name(value: &Rvalue) -> &'static str {
-    match value {
-        Rvalue::Use(_) => "use",
-        Rvalue::Binary { .. } => "binary operation",
-        Rvalue::Unary { .. } => "unary operation",
-        Rvalue::Ref { .. } => "reference",
-        Rvalue::Reborrow { .. } => "reborrow",
-        Rvalue::Cast { .. } => "cast",
-        Rvalue::Aggregate { .. } => "aggregate",
-        Rvalue::Repeat { .. } => "array repeat",
-        Rvalue::Discriminant(_) => "discriminant",
-        Rvalue::Len(_) => "length",
-        Rvalue::PtrToInt(_) => "pointer-to-int",
-        Rvalue::PtrOffset { .. } => "pointer offset",
     }
 }
 

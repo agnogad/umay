@@ -11,18 +11,17 @@ implementation-only changes.
 
 ### Added
 
-- **AArch64 backend, first slice.** `aarch64-unknown-linux-gnu` (and
-  `arm64-linux`) now parse to a target with the AAPCS64 ABI. A new
-  MIR-to-assembly path lowers scalar constants, locals, integer and bitwise
-  operations, comparisons, casts, branches, direct calls and returns. `umay asm`
-  produces assembly that clang assembles into an ELF object with
-  `EM_AARCH64`. String literals, pointer offsets and dereferences, fixed arrays
-  with repeat-initialisation and indexing, and indirect calls let the runtime
-  compile to a second AArch64 object. Struct literals use the shared `Layouts`
-  offsets, field access and aggregate copies work, and a CI job links and runs a
-  program under qemu that calls a function, loops, formats an integer and reads
-  struct fields. Enum fields, aggregate passing, floats and ARM64 macOS/Windows
-  are refused by name until they are implemented. See
+- **AArch64 Linux backend.** `aarch64-unknown-linux-gnu` (and `arm64-linux`)
+  parse to a target with the AAPCS64 ABI. The backend lowers the full MIR
+  surface: scalars, strings, pointers, arrays, structs, tuples, enums, generics,
+  function pointers, floats, indirect calls, casts, branches and returns.
+  AAPCS64 arguments use `x0`-`x7` and `v0`-`v7`, composites up to 16 bytes in
+  registers and larger ones by reference, extra arguments on the stack; returns
+  use `x0`/`x1`, `d0`/`s0`, or the hidden `x8` pointer. The program and runtime
+  compile for the target, and a qemu CI job links and runs a program covering
+  strings, functions, structs, aggregate arguments and returns, enums, tuples,
+  floats, nine arguments and runtime integer formatting. HFA C interop, register
+  allocation and ARM64 macOS/Windows remain. See
   [ADR 0015](docs/adr/0015-aarch64-backend.md).
 - **Installer.** `install.sh` downloads the latest release for Linux x86_64 or
   Intel macOS, verifies its SHA-256, and installs `umay` to `~/.local/bin`

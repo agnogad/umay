@@ -1,7 +1,7 @@
 # ADR 0015: The AArch64 backend
 
-Status: **in progress**. The first scalar slice is implemented; see "What exists
-today".
+Status: **Linux backend implemented; performance and other systems remain**. See
+"What exists today" and "Known limitations".
 
 ## Context
 
@@ -46,40 +46,61 @@ needs no cross C library.
 
 - `aarch64-unknown-linux-gnu` (and `arm64-linux`) parse to a target with
   `Abi::Aapcs64`.
-- Scalar constants, locals, integer and bitwise binary operations, comparisons,
-  casts, `if`/`while` branches, direct and indirect calls, and returns lower to
-  AArch64.
-- String literals become `adrp`/`add` addresses, references take the address of
-  a place, pointer offset and dereference load and store at the pointee's width,
-  and fixed arrays support repeat-initialisation, indexing and byte copies.
-- Struct literals are laid out with the shared `Layouts` code, field access adds
-  the computed field offset, and aggregate values are copied byte by byte.
-  Enum fields, tuple fields and generic substitution are still refused.
+- The full MIR surface the reference backend supports is lowered: constants,
+  locals, integer, bitwise and floating-point operations, comparisons, casts,
+  branches, direct and indirect calls, returns, `Drop` (a no-op until
+  destructors exist), storage and drop-flag bookkeeping.
+- Values:
+  - string literals as `adrp`/`add` addresses;
+  - references, pointer offsets and dereferences;
+  - fixed arrays with repeat, literal, index and copy;
+  - structs, tuples, enums (unit, tuple and struct variants) and generics,
+    with the shared `Layouts` offsets and field-type substitution;
+  - function pointers and `(*f)()` calls, using the pointer value as the entry
+    point the way the reference backend does.
+- AAPCS64 calls:
+  - integer arguments in `x0`-`x7`, floats in `v0`-`v7`;
+  - a two-register composite is kept on an even register;
+  - composites up to 16 bytes travel in one or two general registers;
+  - larger composites travel by reference;
+  - arguments that do not fit go to a 16-byte-aligned outgoing stack area, and
+    a ninth or later integer/float argument is read from the caller's area;
+  - returns of up to 16 bytes come back in `x0`/`x1`; larger returns use the
+    hidden pointer in `x8`; scalar floats return in `d0`/`s0`.
+- Frames are laid out per local with the shared `Layouts` code and support
+  frames larger than the 4095-byte `sub` immediate.
 - `umay asm --target aarch64-unknown-linux-gnu` emits assembly that clang
   assembles into an ELF object with `e_machine = EM_AARCH64` (183).
-- `umay build --target aarch64-unknown-linux-gnu --emit-object-only` compiles
-  the program and the runtime into two AArch64 objects.
-- Enum fields, floats, more than eight arguments, aggregate arguments and
-  returns, generic struct fields, drops of values with destructors, and frames
-  larger than 4095 bytes are refused with a `CodegenError` that names the
-  construct. They are not miscompiled.
-- A CI job installs `gcc-aarch64-linux-gnu` and `qemu-user-static`, then builds
-  and runs a `println` program, so the ABI, frame and runtime path are checked
-  by execution rather than by the assembler alone.
+- `umay build --target aarch64-unknown-linux-gnu` compiles the program and the
+  runtime. With an AArch64 C library and linker the result runs: the CI job
+  links a program that exercises strings, structs, aggregate arguments and
+  returns, enums, tuples, floats, nine arguments and the runtime's integer
+  formatting, then compares its output under qemu.
+
+## Known limitations
+
+- **HFA arguments and returns are not AAPCS64.** An aggregate made only of
+  floats travels through the general-register path instead of `v` registers.
+  Calls between UMAY functions are consistent because both sides use the same
+  rule; a C function with an HFA parameter or return would not be.
+- **No register allocation.** Every local lives in a stack slot and every value
+  is computed in `x0`/`x1` or `d0`/`d1`. Correctness first; speed is a later
+  pass.
+- **Linux only.** Mach-O, COFF, the Darwin and Windows ARM64 ABIs, and the
+  per-system runtime layers are the next systems, not current targets.
+- Slices and `i128` are not in the reference backend either, so they are not
+  AArch64-specific gaps.
 
 ## Next steps, in order
 
-1. **Calls with more than eight arguments and aggregate passing.** Implement the
-   AAPCS64 stack-argument area and the rule for aggregates passed and returned
-   in registers or through a hidden pointer.
-2. **Enum and tuple fields, floats, generic substitution and drops.** These are
-   the remaining value shapes a program can build.
-3. **The end-to-end corpus on AArch64.** Run the existing program tests under
-   qemu and compare exit codes and output with x86_64.
-4. **Register allocation.** Replace the stack machine with a linear scan over
-   AArch64 registers once correctness is pinned.
-5. **macOS and Windows.** Mach-O and COFF dressing, the Darwin and Win64 ARM64
-   ABIs, and artifacts for each.
+1. **The rest of the corpus under qemu.** Run every executable program test
+   against the AArch64 target and compare output and exit status with x86_64.
+2. **HFA and C interop.** Classify homogeneous float aggregates and use the
+   `v` registers where AAPCS64 requires; then a C struct of floats can cross.
+3. **Register allocation.** Replace the stack machine with a linear scan over
+   AArch64 registers once correctness is pinned by the corpus.
+4. **macOS and Windows.** Mach-O and COFF dressing, the `@PAGE`/`@PAGEOFF`
+   relocations, the Darwin and Windows ARM64 ABIs, and artifacts for each.
 
 ## Consequences
 

@@ -38,6 +38,29 @@ fn asm_for(dir: &Path, source: &str) -> Result<String, String> {
     }
 }
 
+
+fn assemble(dir: &Path, asm: &str) {
+    let probe = Command::new("clang")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !probe {
+        return;
+    }
+    std::fs::write(dir.join("main.s"), asm).expect("write assembly");
+    let assembled = Command::new("clang")
+        .args(["-c", "--target=aarch64-unknown-linux-gnu", "main.s", "-o", "main.o"])
+        .current_dir(dir)
+        .output()
+        .expect("run clang");
+    assert!(
+        assembled.status.success(),
+        "assembler rejected the output:\n{}",
+        String::from_utf8_lossy(&assembled.stderr)
+    );
+}
+
 #[test]
 fn a_scalar_program_lowers_to_aarch64_instructions() {
     let dir = scratch("scalar");
@@ -87,9 +110,9 @@ fn an_unsupported_construct_names_the_backend_instead_of_miscompiling() {
     let dir = scratch("unsupported");
     let error = asm_for(
         &dir,
-        "fn main() -> i32 {\n    let x = 1.5f64\n    return x as i32\n}\n",
+        "fn main() -> i32 {\n    let x: i128 = 1i128\n    return x as i32\n}\n",
     )
-    .expect_err("floating-point values are not supported yet");
+    .expect_err("128-bit integers are not supported yet");
     assert!(
         error.contains("AArch64 backend"),
         "the error must name the backend: {error}"
@@ -176,4 +199,33 @@ fn struct_fields_are_addressed_and_assembled() {
         "assembler rejected the struct program:\n{}",
         String::from_utf8_lossy(&assembled.stderr)
     );
+}
+
+#[test]
+fn aggregate_arguments_and_returns_assemble() {
+    let dir = scratch("aggregate");
+    let source = "struct Pair { a: i64, b: i64 }\nfn sum(p: Pair) -> i64 { return p.a + p.b }\nfn make() -> Pair { return Pair { a: 40i64, b: 2i64 } }\nfn main() -> i32 { let p = make(); return sum(p) as i32 }\n";
+    let asm = asm_for(&dir, source).expect("aggregate assembly");
+    assert!(asm.contains("bl umay_user_sum"), "{asm}");
+    assert!(asm.contains("bl umay_user_make"), "{asm}");
+    assemble(&dir, &asm);
+}
+
+#[test]
+fn enums_tuples_and_floats_assemble() {
+    let dir = scratch("mixed");
+    let source = "enum Kind { A(i64), B }\nfn main() -> i32 { let k = Kind::A(40i64); let t = (1.0f64, 2.0f64); let n = match k { Kind::A(x) => x, Kind::B => 0i64 }; return (n as f64 + t.0 + t.1) as i32 }\n";
+    let asm = asm_for(&dir, source).expect("mixed assembly");
+    assert!(asm.contains("fadd d0, d0, d1"), "{asm}");
+    assert!(asm.contains("ldrb w0, [x11]"), "enum tag load missing:\n{asm}");
+    assemble(&dir, &asm);
+}
+
+#[test]
+fn a_nine_argument_call_uses_the_stack() {
+    let dir = scratch("nine");
+    let source = "fn sum(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> i64 { return a+b+c+d+e+f+g+h+i }\nfn main() -> i32 { return sum(1i64,2i64,3i64,4i64,5i64,6i64,7i64,8i64,6i64) as i32 }\n";
+    let asm = asm_for(&dir, source).expect("nine-argument assembly");
+    assert!(asm.contains("str x12, [sp, #0]"), "the ninth argument must be on the stack:\n{asm}");
+    assemble(&dir, &asm);
 }
