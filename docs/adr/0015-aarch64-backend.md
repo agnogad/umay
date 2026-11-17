@@ -47,30 +47,34 @@ needs no cross C library.
 - `aarch64-unknown-linux-gnu` (and `arm64-linux`) parse to a target with
   `Abi::Aapcs64`.
 - Scalar constants, locals, integer and bitwise binary operations, comparisons,
-  casts, `if`/`while` branches, direct calls and returns lower to AArch64.
+  casts, `if`/`while` branches, direct and indirect calls, and returns lower to
+  AArch64.
+- String literals become `adrp`/`add` addresses, references take the address of
+  a place, pointer offset and dereference load and store at the pointee's width,
+  and fixed arrays support repeat-initialisation, indexing and byte copies.
 - `umay asm --target aarch64-unknown-linux-gnu` emits assembly that clang
   assembles into an ELF object with `e_machine = EM_AARCH64` (183).
-- Aggregates, strings in code, indirect calls, floats, stack arguments, drops of
-  values with destructors, and frames larger than 4095 bytes are refused with a
+- `umay build --target aarch64-unknown-linux-gnu --emit-object-only` compiles
+  the program and the runtime into two AArch64 objects.
+- Aggregates with fields, floats, more than eight arguments, drops of values with
+  destructors, and frames larger than 4095 bytes are refused with a
   `CodegenError` that names the construct. They are not miscompiled.
-- Runtime code is not yet compilable, so `umay build` for AArch64 fails with the
-  first unsupported construct rather than producing an executable.
+- A CI job installs `gcc-aarch64-linux-gnu` and `qemu-user-static`, then builds
+  and runs a `println` program, so the ABI, frame and runtime path are checked
+  by execution rather than by the assembler alone.
 
 ## Next steps, in order
 
-1. **Strings and the runtime surface.** Address a literal with `adrp`/`add`,
-   support reference values, and compile the runtime's scalar path.
-2. **Calls with more than eight arguments and aggregate passing.** Implement the
+1. **Calls with more than eight arguments and aggregate passing.** Implement the
    AAPCS64 stack-argument area and the hidden-pointer rule for returns larger
    than 16 bytes.
-3. **Projected places and aggregates.** Fields, arrays, `Deref`, struct copies,
-   drop flags and destructor calls.
-4. **Linking and running.** A cross linker plus `qemu-aarch64`, or a native
-   `aarch64` CI runner, to run the existing end-to-end corpus and compare exit
-   codes with x86_64.
-5. **Register allocation.** Replace the stack machine with a linear scan over
+2. **Projected places and aggregates with fields.** Struct fields, tuple
+   elements, aggregate copies, drop flags and destructor calls.
+3. **The end-to-end corpus on AArch64.** Run the existing program tests under
+   qemu and compare exit codes and output with x86_64.
+4. **Register allocation.** Replace the stack machine with a linear scan over
    AArch64 registers once correctness is pinned.
-6. **macOS and Windows.** Mach-O and COFF dressing, the Darwin and Win64 ARM64
+5. **macOS and Windows.** Mach-O and COFF dressing, the Darwin and Win64 ARM64
    ABIs, and artifacts for each.
 
 ## Consequences

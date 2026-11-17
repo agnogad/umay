@@ -87,9 +87,9 @@ fn an_unsupported_construct_names_the_backend_instead_of_miscompiling() {
     let dir = scratch("unsupported");
     let error = asm_for(
         &dir,
-        "fn main() -> i32 {\n    println(\"hello\")\n    return 0\n}\n",
+        "struct Pair { a: i64, b: i64 }\n\nfn main() -> i32 {\n    let p = Pair { a: 1i64, b: 2i64 }\n    return (p.a + p.b) as i32\n}\n",
     )
-    .expect_err("a string program is not supported yet");
+    .expect_err("aggregate values are not supported yet");
     assert!(
         error.contains("AArch64 backend"),
         "the error must name the backend: {error}"
@@ -121,5 +121,32 @@ fn control_flow_and_a_negative_constant_assemble() {
         assembled.status.success(),
         "assembler rejected the loop:\n{}",
         String::from_utf8_lossy(&assembled.stderr)
+    );
+}
+
+#[test]
+fn the_runtime_compiles_for_aarch64() {
+    let dir = scratch("runtime");
+    let source = "fn main() -> i32 {\n    println(\"hello\")\n    return 0\n}\n";
+    let file = dir.join("main.um");
+    std::fs::write(&file, source).expect("write program");
+    let output = Command::new(compiler())
+        .arg("build")
+        .arg("--target")
+        .arg("aarch64-unknown-linux-gnu")
+        .arg("--emit-object-only")
+        .arg(&file)
+        .current_dir(&dir)
+        .output()
+        .expect("run umay build");
+    assert!(
+        output.status.success(),
+        "the runtime must compile for AArch64:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(dir.join("dist").join("main.o").is_file(), "program object missing");
+    assert!(
+        dir.join("dist").join("umay_runtime.o").is_file(),
+        "runtime object missing"
     );
 }
