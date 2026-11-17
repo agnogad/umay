@@ -151,16 +151,19 @@ jobs:
           qemu-aarch64 target/aarch64-unknown-linux-musl/release/umay version
 
   macos-arm:
-    # The native Apple Silicon job: the compiler is built for arm64, emits
-    # Mach-O ARM64, links with the system cc and runs the result. macOS 26 has
-    # no Intel image, so this label cannot fall back to x86_64.
-    runs-on: macos-26
+    # This repository is private, and GitHub does not offer the standard arm64
+    # macOS runner to it: `macos-26` queued and was cancelled after fifteen
+    # minutes. An Intel macOS host can still cross-link the ARM64 Mach-O and
+    # check its architecture, which is what this job does. Native execution is
+    # covered by the AArch64 Linux qemu job and Windows ARM64; a real Apple
+    # Silicon run needs a runner this repository can obtain.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build the compiler
         run: cargo build --release --locked --manifest-path compiler/Cargo.toml
-      - name: Link and run an ARM64 macOS binary
+      - name: Cross-link an ARM64 macOS binary
         run: |
           dir="$RUNNER_TEMP/umay-mac-arm"
           mkdir -p "$dir"
@@ -176,9 +179,9 @@ jobs:
           }
           EOF
           "$GITHUB_WORKSPACE/target/release/umay" build --target aarch64-apple-darwin main.um
-          ./dist/main > output.txt
-          printf 'mac-arm\n42\n' > expected.txt
-          diff -u expected.txt output.txt
+          file dist/main > arch.txt
+          cat arch.txt
+          grep -q "arm64" arch.txt
       - name: Package the ARM64 macOS artifact
         if: startsWith(github.ref, 'refs/tags/v')
         run: |

@@ -906,7 +906,8 @@ is breadth, packaging, and the two known quality gaps.
       program and runtime compile for `aarch64-unknown-linux-gnu`, and a CI job
       links and runs a feature-covering program under qemu. Homogeneous float
       aggregates use the AAPCS64 `v` registers. `aarch64-apple-darwin` emits
-      Mach-O ARM64 and runs natively on an Apple Silicon CI runner.
+      Mach-O ARM64 and cross-links it on an Intel macOS CI runner; a native
+      Apple Silicon run needs a runner this private repository cannot obtain.
       `aarch64-w64-mingw32` emits COFF ARM64, links with llvm-mingw, and a
       native Windows ARM64 CI job runs the PE. The release workflow builds
       `aarch64-linux-musl`, `aarch64-darwin` and `aarch64-windows` artifacts.

@@ -100,9 +100,11 @@ needs no cross C library.
 - The compiler itself is built as a static `aarch64-unknown-linux-musl` binary
   with `rust-lld`, published as the `aarch64-linux-musl` archive and selected by
   `install.sh` on ARM64 Linux. CI builds it and runs `umay version` under qemu.
-- The macOS ARM64 compiler is built natively on a `macos-26` runner, emits
-  Mach-O ARM64, links with the system `cc` and runs a program in CI. The
-  `aarch64-darwin` archive is part of a tag release.
+- The macOS ARM64 target emits Mach-O ARM64 and is cross-linked on an Intel
+  macOS runner, where `file` confirms the `arm64` architecture. The
+  `aarch64-darwin` archive is part of a tag release. A native Apple Silicon run
+  is not available to this private repository's hosted runners; Windows ARM64
+  runs natively on `windows-11-arm`.
 
 ## Known limitations
 
@@ -129,7 +131,7 @@ needs no cross C library.
   affected.
 - Windows ARM64 is cross-linked with llvm-mingw and the PE header is checked
   (`COFF-ARM64`, console subsystem). The native CI job runs the executable on a
-  Windows ARM64 runner.
+  Windows ARM64 runner. macOS ARM64 is cross-linked but not executed in CI.
 - Slices and `i128` are not in the reference backend either, so they are not
   AArch64-specific gaps.
 
