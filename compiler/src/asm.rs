@@ -48,6 +48,7 @@ pub fn print_function(
     let shadow = match target.abi {
         crate::target::Abi::SysV => 0,
         crate::target::Abi::Win64 => 32,
+        crate::target::Abi::Aapcs64 => unreachable!("AArch64 has its own backend"),
     };
     let callee_bytes = (callee_saved.len() as u64) * 8;
     let frame = align16(function.stack_size + spill_bytes + callee_bytes + shadow);
@@ -99,6 +100,7 @@ pub fn print_function(
         let sret_reg = match target.abi {
             crate::target::Abi::SysV => "%rdi",
             crate::target::Abi::Win64 => "%rcx",
+            crate::target::Abi::Aapcs64 => unreachable!("AArch64 has its own backend"),
         };
         let _ = writeln!(out, "    movq {sret_reg}, {offset}(%rbp)");
     }
@@ -109,6 +111,7 @@ pub fn print_function(
     let all_arg_regs: &[u8] = match target.abi {
         crate::target::Abi::SysV => &crate::machine::ARG_REGS_SYSV,
         crate::target::Abi::Win64 => &crate::machine::ARG_REGS_WIN64,
+        crate::target::Abi::Aapcs64 => unreachable!("AArch64 has its own backend"),
     };
     let mut next_reg = usize::from(function.sret_offset.is_some());
     // Stack arguments begin just above the return address; an eightbyte of
@@ -121,6 +124,7 @@ pub fn print_function(
     let mut stack_offset = match target.abi {
         crate::target::Abi::SysV => 16i64,
         crate::target::Abi::Win64 => 16 + 32,
+        crate::target::Abi::Aapcs64 => unreachable!("AArch64 has its own backend"),
     };
     for (index, (_, offset)) in function.local_slots.iter().take(function.arg_count as usize).enumerate() {
         let kind = function

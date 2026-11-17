@@ -39,7 +39,7 @@ impl std::fmt::Display for CodegenError {
 /// This comes from the HIR rather than the MIR bodies because an `extern fn` has
 /// no body: it exists only as a declaration, and a call to it must name the
 /// symbol the C library provides (`puts`, `malloc`) rather than a placeholder.
-fn function_symbols(hir: &crate::hir::Hir, program: &MirProgram) -> HashMap<FnId, String> {
+pub(crate) fn function_symbols(hir: &crate::hir::Hir, program: &MirProgram) -> HashMap<FnId, String> {
     let mut map = HashMap::new();
     for f in &hir.fns {
         // A method's symbol carries its type's name: `read` on `File` is
@@ -82,6 +82,19 @@ fn function_symbols(hir: &crate::hir::Hir, program: &MirProgram) -> HashMap<FnId
     map
 }
 
+/// Symbols that name code outside this program: every `extern fn "symbol"`.
+///
+/// `umay_*` is the runtime's own surface, declared `extern fn` so the prelude can
+/// reach it, but *defined* by UMAY. It is spelled like the rest of UMAY's code,
+/// not like the C library.
+pub(crate) fn foreign_symbols(hir: &crate::hir::Hir) -> std::collections::HashSet<String> {
+    hir.fns
+        .iter()
+        .filter_map(|f| f.link_name.clone())
+        .filter(|name| !name.starts_with("umay_"))
+        .collect()
+}
+
 /// Emits assembly text for every body in `program`.
 ///
 /// The result is a complete `.s` file: the caller assembles and links it. The
@@ -94,6 +107,9 @@ pub fn generate(
     target: crate::target::Target,
     is_program: bool,
 ) -> Result<String, Vec<CodegenError>> {
+    if target.arch == "aarch64" {
+        return crate::aarch64::generate(program, types, hir, target, is_program);
+    }
     let symbols = function_symbols(hir, program);
     let mut errors = Vec::new();
     let mut out = String::new();
@@ -110,15 +126,7 @@ pub fn generate(
     // C library's spelling -- MinGW's CRT exports `malloc`, not `_malloc`.
     // Everything else is UMAY's own and takes the target's prefix, so a
     // definition and a reference can never disagree.
-    let foreign: std::collections::HashSet<String> = hir
-        .fns
-        .iter()
-        .filter_map(|f| f.link_name.clone())
-        // `umay_*` is the runtime's own surface, declared `extern fn` so the
-        // prelude can reach it, but *defined* by UMAY. It is spelled like the
-        // rest of UMAY's code, not like the C library.
-        .filter(|name| !name.starts_with("umay_"))
-        .collect();
+    let foreign = foreign_symbols(hir);
 
     // Only the functions a program can actually reach are emitted.
     //
@@ -225,7 +233,7 @@ fn generate_one(
 /// in the program is a root (an indirect call cannot be resolved statically, so
 /// the value it might hold must survive), and every body with no function id is
 /// kept because the linker names it rather than the program.
-fn reachable_functions(program: &MirProgram) -> std::collections::HashSet<crate::hir::FnId> {
+pub(crate) fn reachable_functions(program: &MirProgram) -> std::collections::HashSet<crate::hir::FnId> {
     use crate::mir::{Constant, Operand, Rvalue, Statement, Terminator};
 
     let mut seen: std::collections::HashSet<crate::hir::FnId> = std::collections::HashSet::new();
@@ -369,6 +377,9 @@ pub(crate) fn aggregate_goes_through_pointer(abi: crate::target::Abi, size: u64)
     match abi {
         crate::target::Abi::SysV => size > 16,
         crate::target::Abi::Win64 => !matches!(size, 1 | 2 | 4 | 8 | 16 | 32 | 64),
+        // AAPCS64 returns small aggregates in registers and larger ones through
+        // a hidden pointer. The AArch64 backend decides this itself.
+        crate::target::Abi::Aapcs64 => unreachable!("AArch64 has its own backend"),
     }
 }
 

@@ -19,6 +19,7 @@ consequences, alternatives.
 | [0012](0012-json-over-counted-bytes.md) | JSON is read and written over counted bytes | accepted |
 | [0011](0011-concurrency.md) | Concurrency is process-based (`fork`) until `Send`/`Sync` are specified; async is not the plan | accepted |
 
+| [0015](0015-aarch64-backend.md) | AArch64 is a second MIR-to-assembly path, starting as a stack machine | in progress |
 ## Template
 
 ```markdown

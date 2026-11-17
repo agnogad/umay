@@ -16,6 +16,7 @@
 //! code generation, the runtime and the standard library. `ROADMAP.md` records
 //! the phases and what has been verified on each supported system.
 
+pub mod aarch64;
 pub mod ast;
 pub mod asm;
 pub mod build;

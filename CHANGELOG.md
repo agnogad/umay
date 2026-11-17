@@ -11,6 +11,14 @@ implementation-only changes.
 
 ### Added
 
+- **AArch64 backend, first slice.** `aarch64-unknown-linux-gnu` (and
+  `arm64-linux`) now parse to a target with the AAPCS64 ABI. A new
+  MIR-to-assembly path lowers scalar constants, locals, integer and bitwise
+  operations, comparisons, casts, branches, direct calls and returns. `umay asm`
+  produces assembly that clang assembles into an ELF object with
+  `EM_AARCH64`; aggregates, strings in code, indirect calls, floats and the
+  runtime are refused by name until they are implemented. See
+  [ADR 0015](docs/adr/0015-aarch64-backend.md).
 - **Installer.** `install.sh` downloads the latest release for Linux x86_64 or
   Intel macOS, verifies its SHA-256, and installs `umay` to `~/.local/bin`
   (overridable with `UMAY_INSTALL_DIR`). Windows users install from the zip.

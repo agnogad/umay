@@ -67,6 +67,7 @@ impl<'a, 't> Isel<'a, 't> {
         match self.abi {
             crate::target::Abi::SysV => &crate::machine::ARG_REGS_SYSV,
             crate::target::Abi::Win64 => &crate::machine::ARG_REGS_WIN64,
+            crate::target::Abi::Aapcs64 => unreachable!("AArch64 has its own backend"),
         }
     }
 
@@ -80,6 +81,7 @@ impl<'a, 't> Isel<'a, 't> {
         match self.abi {
             crate::target::Abi::SysV => 0,
             crate::target::Abi::Win64 => 32,
+            crate::target::Abi::Aapcs64 => unreachable!("AArch64 has its own backend"),
         }
     }
 }

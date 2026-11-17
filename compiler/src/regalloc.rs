@@ -69,14 +69,17 @@ pub fn allocate(function: &mut MachineFunction, abi: crate::target::Abi) -> Allo
     let caller_saved: &[u8] = match abi {
         crate::target::Abi::SysV => &crate::machine::CALLER_SAVED,
         crate::target::Abi::Win64 => &crate::machine::CALLER_SAVED_WIN64,
+        crate::target::Abi::Aapcs64 => unreachable!("AArch64 has its own backend"),
     };
     let allocatable: &[u8] = match abi {
         crate::target::Abi::SysV => &crate::machine::ALLOCATABLE,
         crate::target::Abi::Win64 => &crate::machine::ALLOCATABLE_WIN64,
+        crate::target::Abi::Aapcs64 => unreachable!("AArch64 has its own backend"),
     };
     let callee_saved_of_abi = |reg: u8| match abi {
         crate::target::Abi::SysV => crate::machine::is_callee_saved_sysv(reg),
         crate::target::Abi::Win64 => crate::machine::is_callee_saved_win64(reg),
+        crate::target::Abi::Aapcs64 => unreachable!("AArch64 has its own backend"),
     };
     let mut point = 0usize;
     // Virtual registers numbered contiguously, so the interval table can be an

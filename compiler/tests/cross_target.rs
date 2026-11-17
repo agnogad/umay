@@ -1266,14 +1266,14 @@ fn an_unsupported_target_is_refused_before_building() {
         .current_dir(&dir)
         .arg("build")
         .arg("--target")
-        .arg("aarch64-apple-darwin")
+        .arg("riscv64-unknown-linux-gnu")
         .arg("main.um")
         .output()
         .expect("run umay build");
     assert!(!out.status.success(), "an ARM target must be refused");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("only x86_64 has a backend"),
+        stderr.contains("x86_64 has the complete backend"),
         "the error must say why:\n{stderr}"
     );
 }

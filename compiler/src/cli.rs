@@ -99,7 +99,8 @@ OPTIONS:
     --explain              Include the full explanation under each diagnostic
     -O0 .. -O3             Optimisation level for build, run and asm (-O = -O2)
     --target <triple>      Build for another system (x86_64-unknown-linux-gnu,
-                           x86_64-apple-darwin, x86_64-pc-windows-gnu)
+                           x86_64-apple-darwin, x86_64-pc-windows-gnu,
+                           aarch64-unknown-linux-gnu — asm only for now)
     --emit-object-only     Also leave the object in dist/ (build, asm)
 
 EXIT CODES:

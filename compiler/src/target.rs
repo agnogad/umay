@@ -51,6 +51,8 @@ pub enum Abi {
     SysV,
     /// Microsoft x64 calling convention.
     Win64,
+    /// The Arm 64-bit Procedure Call Standard, used by AArch64 systems.
+    Aapcs64,
 }
 
 /// Which assembler syntax a target's `as` accepts.
@@ -163,8 +165,20 @@ impl Target {
         // `arch-os` form the project manifest uses (`x86_64-linux`), so a
         // manifest and a command line can say the same thing two ways.
         let lower = normalised.to_ascii_lowercase();
-        if !lower.starts_with("x86_64") && !lower.starts_with("amd64") {
+        let arch = if lower.starts_with("x86_64") || lower.starts_with("amd64") {
+            "x86_64"
+        } else if lower.starts_with("aarch64") || lower.starts_with("arm64") {
+            "aarch64"
+        } else {
             return Err(TargetError::UnsupportedArch {
+                target: normalised.to_string(),
+            });
+        };
+        if arch == "aarch64" {
+            if lower.contains("linux") {
+                return Ok(Target::AARCH64_LINUX);
+            }
+            return Err(TargetError::UnsupportedOs {
                 target: normalised.to_string(),
             });
         }
@@ -195,6 +209,8 @@ impl Target {
             Target::MACOS
         } else if cfg!(target_os = "windows") {
             Target::WINDOWS
+        } else if cfg!(target_arch = "aarch64") {
+            Target::AARCH64_LINUX
         } else {
             Target::LINUX
         }
@@ -272,7 +288,25 @@ impl Target {
         linker: "x86_64-w64-mingw32-gcc",
     };
 
-    /// Every target this compiler can emit code for.
+    /// Linux on AArch64, ARM's 64-bit ABI.
+    ///
+    /// The backend is being built one construct at a time; see
+    /// `docs/adr/0015-aarch64-backend.md`. It currently emits assembly for
+    /// scalar code and refuses aggregates and strings with a named error rather
+    /// than a wrong object.
+    pub const AARCH64_LINUX: Target = Target {
+        triple: "aarch64-unknown-linux-gnu",
+        os: "linux",
+        arch: "aarch64",
+        abi: Abi::Aapcs64,
+        format: ObjectFormat::Elf,
+        assembler: "clang",
+        assembler_args: &["-c", "--target=aarch64-unknown-linux-gnu"],
+        object_extension: ".o",
+        linker: "aarch64-linux-gnu-gcc",
+    };
+
+    /// Every target with a complete backend.
     pub const ALL: &'static [Target] = &[Target::LINUX, Target::MACOS, Target::WINDOWS];
 
     /// The name a symbol has in the object file.
@@ -515,13 +549,15 @@ impl std::fmt::Display for TargetError {
             TargetError::UnsupportedArch { target } => write!(
                 f,
                 "`{target}` is not a supported architecture\n  \
-                 only x86_64 has a backend; supported targets: {}",
+                 x86_64 has the complete backend; aarch64-unknown-linux-gnu has an \
+                 assembly-only backend. Complete targets: {}",
                 target_list()
             ),
             TargetError::UnsupportedOs { target } => write!(
                 f,
                 "`{target}` is not a supported target\n  \
-                 supported targets: {}",
+                 complete targets: {}\n  \
+                 assembly-only: aarch64-unknown-linux-gnu",
                 target_list()
             ),
         }
@@ -566,9 +602,18 @@ mod tests {
     fn rejects_other_architectures() {
         // A plausible-looking triple with no backend must not fall back to
         // x86_64: that produces a binary the kernel will not load.
-        let err = Target::parse("aarch64-apple-darwin").unwrap_err();
+        let err = Target::parse("riscv64-unknown-linux-gnu").unwrap_err();
         assert!(matches!(err, TargetError::UnsupportedArch { .. }));
-        assert!(err.to_string().contains("only x86_64 has a backend"));
+        assert!(err.to_string().contains("x86_64 has the complete backend"));
+    }
+
+    #[test]
+    fn parses_aarch64_linux() {
+        let target = Target::parse("aarch64-unknown-linux-gnu").unwrap();
+        assert_eq!(target.triple, "aarch64-unknown-linux-gnu");
+        assert_eq!(target.arch, "aarch64");
+        assert_eq!(target.abi, Abi::Aapcs64);
+        assert_eq!(Target::parse("arm64-linux").unwrap(), target);
     }
 
     #[test]
