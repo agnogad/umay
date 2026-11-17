@@ -30,7 +30,8 @@ implementation-only changes.
   - Homogeneous float aggregates use the AAPCS64 `v` registers; a C helper
     returning and taking a two-double struct is exercised in CI.
   - The macOS target emits Mach-O ARM64 with `@PAGE`/`@PAGEOFF`; a `macos-26`
-    job builds, links and runs a program natively on Apple Silicon. The
+    job builds, links and runs a program natively on Apple Silicon. The linker
+    is passed `-arch arm64` for this target instead of the hard-coded x86_64. The
     `aarch64-darwin` archive is part of a tag release.
   - `aarch64-w64-mingw32` emits COFF ARM64, links with llvm-mingw and produces
     a console PE. A native `windows-11-arm` CI job runs the result, and the

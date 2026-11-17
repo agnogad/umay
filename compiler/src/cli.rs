@@ -1206,9 +1206,9 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         let mut link = std::process::Command::new(target.linker);
         // Driver-wide flags must precede the inputs: `-arch` selects the
         // slice of the implicit C library as well as the output architecture.
-        // This backend is x86_64-only even when the host is arm64.
         if target.triple.contains("darwin") {
-            link.arg("-arch").arg("x86_64");
+            let arch = if target.arch == "aarch64" { "arm64" } else { "x86_64" };
+            link.arg("-arch").arg(arch);
         }
         link.arg("-o").arg(&exe_path).arg(&obj_path).arg(&runtime_obj);
         // The driver's own flags: `-no-pie` on Linux ELF, `-lSystem` on macOS,

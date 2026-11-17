@@ -729,8 +729,8 @@ mod tests {
     #[test]
     fn linker_flags_match_the_object_format() {
         // `-no-pie` is an ELF flag, `-lSystem` is the macOS C library, and
-        // `-mconsole` is a PE concern. `-arch x86_64` is a driver-wide flag and
-        // lives in the CLI before the input objects, not here.
+        // `-mconsole` is a PE concern. `-arch` is a driver-wide flag and lives
+        // in the CLI before the input objects, where it follows the target.
         assert_eq!(Target::LINUX.linker_flags(), &["-no-pie"]);
         assert_eq!(Target::MACOS.linker_flags(), &["-lSystem"]);
         assert_eq!(Target::WINDOWS.linker_flags(), &["-mconsole", "-lws2_32"]);
