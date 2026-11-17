@@ -153,12 +153,12 @@ implementation-only changes.
   with `E0330`. It now tracks groups opened inside the argument list; a `)` or
   `]` that closes an outer group ends the scan. Differential seed 1573 found
   it, and `parenthesized_comparison_is_not_generic_args` pins the fix.
-- **macOS CI now runs on an Intel runner and links its C library explicitly.**
-  The backend emits x86_64 objects. An arm64 runner discarded them as the wrong
-  architecture and, after an explicit `-arch x86_64`, could not resolve x86_64
-  libc symbols. CI now uses `macos-15-intel`; the driver passes `-arch x86_64`
-  before the input objects and `-lSystem` after them so the C library's matching
-  slice is selected.
+- **macOS C calls now use Mach-O's leading underscore.** Foreign symbols were
+  emitted bare, as ELF and Win64 require, so the Mach-O linker looked for
+  `malloc` instead of `_malloc` and reported every libc function undefined.
+  The assembler now prefixes foreign symbols only for Mach-O, and the object
+  test rejects a bare C name. The CI smoke job also runs on `macos-15-intel`;
+  an arm64 runner cannot link this x86_64 backend's objects against its libc.
 - **A `<` comparison could be parsed as generic arguments.** The lookahead that
   distinguishes `f<T>()` from `x < y` scanned up to 64 tokens and ignored
   boundaries, so a `>` in a *later* statement closed a phantom argument list:

@@ -205,6 +205,13 @@ fn a_macos_object_leaves_only_its_own_runtime_undefined() {
         if name.starts_with("_umay_") || name.starts_with("_main") {
             continue;
         }
+        // Mach-O C symbols always carry a leading underscore. This assertion
+        // is what the bare-name list below cannot make: `malloc` and `_malloc`
+        // both strip to a known library name, but only the latter links.
+        assert!(
+            name.starts_with('_'),
+            "the runtime refers to `{name}` without Mach-O's leading underscore"
+        );
         // Mach-O prefixes C names with an underscore; the list is written bare.
         let bare = name.strip_prefix('_').unwrap_or(&name);
         assert!(

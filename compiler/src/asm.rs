@@ -501,15 +501,17 @@ fn mangle_symbol(
     if name.starts_with(".L") {
         return name.to_string();
     }
-    // A symbol that names code outside this program is used verbatim: MinGW's
-    // CRT exports `malloc`, and adding the prefix MSVC uses turned every libc
-    // call into an undefined reference. Everything else is UMAY's own and takes
-    // the target's prefix, so its definition and its references agree.
+    // A symbol that names code outside this program is normally used verbatim:
+    // ELF and Win64 C symbols have no leading underscore, and adding one turned
+    // every libc call into an undefined reference. Mach-O is the exception:
+    // its C symbols carry `_`, so `malloc` must be emitted as `_malloc`.
     if foreign.contains(name) {
-        name.to_string()
-    } else {
-        target.mangle(name)
+        if target.format == crate::target::ObjectFormat::MachO {
+            return target.mangle(name);
+        }
+        return name.to_string();
     }
+    target.mangle(name)
 }
 
 pub fn mem_str(
