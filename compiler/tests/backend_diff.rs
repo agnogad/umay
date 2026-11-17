@@ -83,7 +83,12 @@ fn build_and_run(dir: &Path, src: &str, opt: &str) -> ExecOutcome {
 }
 
 fn matches_oracle(outcome: &ExecOutcome, oracle: &str) -> bool {
-    matches!(outcome, ExecOutcome::Ok { stdout, status: 0 } if stdout == oracle)
+    // Windows writes `\r\n` to a captured pipe; the oracle is written with
+    // `\n`. The line endings are the host's, not the program's answer.
+    matches!(
+        outcome,
+        ExecOutcome::Ok { stdout, status: 0 } if stdout.replace("\r\n", "\n") == oracle
+    )
 }
 
 fn run_one_seed(
