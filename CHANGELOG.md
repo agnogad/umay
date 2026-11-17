@@ -370,4 +370,4 @@ defines — every phase from architecture to stabilization is done.
   it was not installed on the measurement machine; it is named, not dropped.
 
 [0.2.0]: https://github.com/agnogad/umay/releases/tag/v0.2.0
-[0.1.0]: https://example.invalid/umay/releases/tag/v0.1.0
+[0.1.0]: https://github.com/agnogad/umay/releases/tag/v0.1.0
