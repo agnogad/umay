@@ -14,9 +14,10 @@ implementation-only changes.
 - **macOS and Windows release artifacts.** The tag workflow now packages a
   `x86_64-darwin` tar.gz and an `x86_64-windows` zip next to the static Linux
   artifact, and a final job publishes all three with their checksums. A new
-  `windows-latest` job runs the locked test suite and builds the compiler, so a
-  Windows regression is visible in CI rather than only under Wine on one
-  machine.
+  `windows-latest` job runs the unit suite, builds the compiler and links a
+  small program, so a Windows regression is visible in CI rather than only
+  under Wine on one machine. Integration suites that drive the Unix assembler
+  and linker skip on Windows; the native smoke covers that path.
 - `scripts/package.py` owns archive creation and checksums on every host, so
   Linux, macOS and Windows packages cannot drift in contents or layout.
 

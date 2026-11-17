@@ -63,8 +63,8 @@ jobs:
               $dir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
             }
           }
-      - name: Test (locked)
-        run: cargo test --locked --manifest-path compiler/Cargo.toml
+      - name: Unit tests (locked)
+        run: cargo test --locked --lib --manifest-path compiler/Cargo.toml
       - name: Release build
         run: cargo build --release --locked --manifest-path compiler/Cargo.toml
       - name: Link and run a Windows binary
