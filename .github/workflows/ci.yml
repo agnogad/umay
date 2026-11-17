@@ -71,10 +71,26 @@ jobs:
           dir="$RUNNER_TEMP/umay-arm64"
           mkdir -p "$dir"
           cd "$dir"
-          printf 'fn main() -> i32 {\n    println("arm64")\n    return 0\n}\n' > main.um
+          cat > main.um <<'EOF'
+          fn add(a: i64, b: i64) -> i64 {
+              return a + b
+          }
+
+          fn main() -> i32 {
+              println("arm64")
+              println_i64(add(40i64, 2i64))
+              let mut i = 0i64
+              while i < 3i64 {
+                  i = i + 1i64
+              }
+              println_i64(i)
+              return 0
+          }
+          EOF
           "$GITHUB_WORKSPACE/target/release/umay" build --target aarch64-unknown-linux-gnu main.um
-          output="$(qemu-aarch64 -L /usr/aarch64-linux-gnu ./dist/main)"
-          test "$output" = "arm64"
+          qemu-aarch64 -L /usr/aarch64-linux-gnu ./dist/main > output.txt
+          printf 'arm64\n42\n3\n' > expected.txt
+          diff -u expected.txt output.txt
 
   windows:
     runs-on: windows-latest
