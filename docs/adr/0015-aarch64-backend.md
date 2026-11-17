@@ -1,8 +1,8 @@
 # ADR 0015: The AArch64 backend
 
 Status: **Implemented for Linux, macOS and Windows ARM64, with a graph-colouring
-local register allocator.** Values still pass through fixed scratch registers;
-see "Known limitations".
+local register allocator and direct destination lowering.** Call boundaries and
+stack operands still use fixed scratch registers; see "Known limitations".
 
 ## Context
 
@@ -39,6 +39,9 @@ and `d0`/`d1`, but locals are now allocated:
   and the frame reserves slots only for locals that stay in memory.
 - Parameters are forced apart at entry, since they have no defining assignment
   from which interference could be discovered.
+- Scalar assignments write the allocated destination directly when both
+  operands are already in registers. `add x19, x19, x20` replaces the old
+  `mov`/`add`/`mov` sequence, and `fadd d8, d8, d9` does the same for floats.
 
 This keeps code generation local and testable while removing most stack traffic.
 Direct calls still follow AAPCS64.
@@ -100,14 +103,16 @@ needs no cross C library.
   aggregate that is not homogeneous (for example `{ i64, f64 }`) still travels
   through the integer-register path; UMAY's own calls agree on that, but it is
   not AAPCS64 C interop.
-- **Intermediates are not allocated.** Locals get registers, but each MIR
-  operation still moves its operands through `x0`/`x1` or `d0`/`d1`, and
-  aggregates and address-taken locals remain in stack slots. On a
-  three-million iteration integer loop the allocator roughly halved qemu wall
-  time (0.064 s to 0.030 s median) and reduced stack loads and stores from 21
-  to 2. A loop with twenty short-lived locals improved from 0.032 s to 0.011 s,
-  with stack accesses falling from 36 to 1. A float loop improved from 0.076 s
-  to 0.071 s: its stack traffic disappeared, but arithmetic dominates.
+- **Operands that are not in registers still take the old path.** Scalar
+  assignment is direct only when its operands are allocated too. Calls, stack
+  operands, constants and aggregates still move through `x0`/`x1` or `d0`/`d1`,
+  and address-taken locals remain in stack slots. On a three-million iteration
+  integer loop the allocator roughly halved qemu wall time (0.064 s to 0.030 s
+  median) and reduced stack loads and stores from 21 to 2. A loop with twenty
+  short-lived locals improved from 0.032 s to 0.011 s, with stack accesses
+  falling from 36 to 1. Direct destination lowering cut that loop's `mov`
+  instructions from 142 to 16. A 30-million iteration arithmetic loop improved
+  from 0.203 s to 0.198 s in qemu.
 - **Windows ARM64 C aggregate calls follow Microsoft's ABI, not AAPCS64's
   HFA rule.** UMAY-to-UMAY calls are internally consistent. The runtime's
   external calls pass scalars, so startup, file and console calls are not
@@ -123,9 +128,11 @@ needs no cross C library.
 1. **The rest of the corpus under qemu/native runners.** Run every executable
    program test against the AArch64 targets and compare output and exit status
    with x86_64.
-2. **Allocate intermediates.** Keep values in `x0`-`x17` and `d0`-`d7` between
-   operations instead of moving through fixed scratch registers, while the
-   graph-colouring allocator remains the fallback for address-taken locals.
+2. **Allocate the remaining operands.** Extend direct lowering to constants,
+   stack operands and call arguments, then replace per-statement emission with a
+   small machine IR so values can stay in `x0`-`x17` and `d0`-`d7` between
+   operations. The graph-colouring allocator remains the fallback for
+   address-taken locals.
 3. **Windows aggregate C interop.** Match Microsoft's composite classification
    when a UMAY aggregate crosses into a C function on Windows ARM64.
 

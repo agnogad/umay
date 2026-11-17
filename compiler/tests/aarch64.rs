@@ -73,8 +73,8 @@ fn a_scalar_program_lowers_to_aarch64_instructions() {
     let asm = asm_for(&dir, source).expect("AArch64 assembly");
     assert!(asm.contains(".globl main"), "{asm}");
     assert!(asm.contains("bl umay_user_add"), "{asm}");
-    assert!(asm.contains("add x0, x0, x1"), "{asm}");
-    assert!(asm.contains("sxtw x0, w0"), "{asm}");
+    assert!(asm.contains("add x19, x19, x20"), "{asm}");
+    assert!(asm.contains("sxtw x19, w19"), "{asm}");
     assert!(asm.contains("ret"), "{asm}");
     assert!(
         !asm.contains(".globl const "),
@@ -143,7 +143,7 @@ fn control_flow_and_a_negative_constant_assemble() {
         "the loop must branch:\n{asm}"
     );
     assert!(
-        asm.contains("neg x0, x0"),
+        asm.contains("neg x19, x19"),
         "the negative value must be emitted:\n{asm}"
     );
     let probe = Command::new("clang")
@@ -254,7 +254,7 @@ fn enums_tuples_and_floats_assemble() {
     let dir = scratch("mixed");
     let source = "enum Kind { A(i64), B }\nfn main() -> i32 { let k = Kind::A(40i64); let t = (1.0f64, 2.0f64); let n = match k { Kind::A(x) => x, Kind::B => 0i64 }; return (n as f64 + t.0 + t.1) as i32 }\n";
     let asm = asm_for(&dir, source).expect("mixed assembly");
-    assert!(asm.contains("fadd d0, d0, d1"), "{asm}");
+    assert!(asm.contains("fadd d8, d8, d9"), "{asm}");
     assert!(
         asm.contains("ldrb w0, [x11]"),
         "enum tag load missing:\n{asm}"
@@ -359,6 +359,34 @@ fn more_than_ten_live_values_spill_to_the_stack() {
     assert!(
         asm.contains("sub x11, x29"),
         "the two locals that do not fit must stay in stack slots:\n{asm}"
+    );
+    assemble(&dir, &asm);
+}
+
+#[test]
+fn scalar_arithmetic_targets_allocated_registers() {
+    let dir = scratch("direct_int");
+    let source = "fn add(a: i64, b: i64) -> i64 { return a + b }\nfn main() -> i32 { return add(40i64, 2i64) as i32 }\n";
+    let asm = asm_for(&dir, source).expect("direct integer assembly");
+    assert!(
+        asm.contains("add x19, x19, x20"),
+        "the addition must write the allocated destination directly:\n{asm}"
+    );
+    assert!(
+        !asm.contains("add x0, x0, x1"),
+        "the scratch-register round trip must be gone:\n{asm}"
+    );
+    assemble(&dir, &asm);
+}
+
+#[test]
+fn float_arithmetic_targets_allocated_registers() {
+    let dir = scratch("direct_float");
+    let source = "fn add(a: f64, b: f64) -> f64 { return a + b }\nfn main() -> i32 { return add(40.0f64, 2.0f64) as i32 }\n";
+    let asm = asm_for(&dir, source).expect("direct float assembly");
+    assert!(
+        asm.contains("fadd d8, d8, d9"),
+        "the float addition must write the allocated destination directly:\n{asm}"
     );
     assemble(&dir, &asm);
 }

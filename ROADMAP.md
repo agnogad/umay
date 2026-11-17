@@ -927,8 +927,9 @@ is breadth, packaging, and the two known quality gaps.
 - [~] **Register-allocation quality.** Liveness and interference graph
       colouring allocate address-free integer and float locals to callee-saved
       registers, sharing registers across disjoint lifetimes and spilling the
-      rest. A twenty-local loop's qemu time fell from 0.032 s to 0.011 s. A full
-      allocator for intermediates and aggregates is still open.
+      rest. Scalar assignments lower directly into those registers, cutting a
+      twenty-local loop's `mov` count from 142 to 16. Constants, stack operands,
+      call arguments and aggregates still take the scratch-register path.
 - [ ] **Reproducible release check.** Rebuild an artifact and compare bytes, so
       "the tarball matches the commit" is verified rather than assumed.
 

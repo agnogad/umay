@@ -250,6 +250,12 @@ impl Emitter<'_> {
         match statement {
             Statement::Assign { place, value, .. } => {
                 let place_ty = self.place_ty(place)?;
+                if place.projection.is_empty()
+                    && is_scalar(self.types.kind(place_ty))
+                    && self.direct_assign(place, place_ty, value)?
+                {
+                    return Ok(());
+                }
                 let mut float_result = false;
                 match value {
                     Rvalue::Use(operand) => {
@@ -454,6 +460,308 @@ impl Emitter<'_> {
             | Statement::SetDropFlag { .. }
             | Statement::Nop => Ok(()),
         }
+    }
+
+    fn promoted_int(&self, operand: &Operand) -> Option<u8> {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) if place.projection.is_empty() => {
+                self.local_reg[place.local.0 as usize]
+            }
+            _ => None,
+        }
+    }
+
+    fn promoted_float(&self, operand: &Operand) -> Option<u8> {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) if place.projection.is_empty() => {
+                self.local_freg[place.local.0 as usize]
+            }
+            _ => None,
+        }
+    }
+
+    /// Lowers a scalar assignment directly into its allocated register.
+    ///
+    /// The stack-machine path computes every value in `x0`/`x1` or `d0`/`d1`
+    /// and then moves it into the local's register. When the destination and
+    /// both operands already have registers, that round trip is unnecessary:
+    /// `add x21, x19, x20` replaces two moves, the add and a third move.
+    /// Returning `false` means nothing was emitted and the caller must use the
+    /// general path.
+    fn direct_assign(
+        &mut self,
+        place: &Place,
+        place_ty: TyId,
+        value: &Rvalue,
+    ) -> Result<bool, String> {
+        let local = place.local.0 as usize;
+        let dest_int = self.local_reg[local];
+        let dest_float = self.local_freg[local];
+        match value {
+            Rvalue::Use(operand) => {
+                if let Some(dest) = dest_int {
+                    self.operand(operand, dest)?;
+                    self.normalize_reg(place_ty, dest)?;
+                    return Ok(true);
+                }
+                if let Some(dest) = dest_float {
+                    if matches!(operand, Operand::Constant(Constant::Unit)) {
+                        return Ok(true);
+                    }
+                    let float64 = matches!(self.types.kind(place_ty), TyKind::F64);
+                    self.operand_float(operand, dest, float64)?;
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            Rvalue::Binary { op, lhs, rhs } => {
+                let lhs_ty = self.operand_ty(lhs);
+                let float_comparison = lhs_ty
+                    .map(|ty| self.is_float(ty))
+                    .unwrap_or(false)
+                    && matches!(
+                        op,
+                        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                    );
+                if float_comparison {
+                    let (Some(dest), Some(lhs_reg), Some(rhs_reg)) = (
+                        dest_int,
+                        self.promoted_float(lhs),
+                        self.promoted_float(rhs),
+                    ) else {
+                        return Ok(false);
+                    };
+                    let float64 = lhs_ty
+                        .map(|ty| matches!(self.types.kind(ty), TyKind::F64))
+                        .unwrap_or(false);
+                    let prefix = if float64 { "d" } else { "s" };
+                    let condition = match op {
+                        BinOp::Eq => "eq",
+                        BinOp::Ne => "ne",
+                        BinOp::Lt => "mi",
+                        BinOp::Le => "ls",
+                        BinOp::Gt => "gt",
+                        _ => "ge",
+                    };
+                    let _ = writeln!(self.out, "    fcmp {prefix}{lhs_reg}, {prefix}{rhs_reg}");
+                    let _ = writeln!(self.out, "    cset x{dest}, {condition}");
+                    self.normalize_reg(place_ty, dest)?;
+                    return Ok(true);
+                }
+                if self.is_float(place_ty) {
+                    let Some(dest) = dest_float else { return Ok(false) };
+                    let (Some(lhs_reg), Some(rhs_reg)) =
+                        (self.promoted_float(lhs), self.promoted_float(rhs))
+                    else {
+                        return Ok(false);
+                    };
+                    let float64 = self
+                        .operand_ty(lhs)
+                        .map(|ty| matches!(self.types.kind(ty), TyKind::F64))
+                        .unwrap_or(false);
+                    let prefix = if float64 { "d" } else { "s" };
+                    match op {
+                        BinOp::Add => {
+                            let _ = writeln!(
+                                self.out,
+                                "    fadd {prefix}{dest}, {prefix}{lhs_reg}, {prefix}{rhs_reg}"
+                            );
+                        }
+                        BinOp::Sub => {
+                            let _ = writeln!(
+                                self.out,
+                                "    fsub {prefix}{dest}, {prefix}{lhs_reg}, {prefix}{rhs_reg}"
+                            );
+                        }
+                        BinOp::Mul => {
+                            let _ = writeln!(
+                                self.out,
+                                "    fmul {prefix}{dest}, {prefix}{lhs_reg}, {prefix}{rhs_reg}"
+                            );
+                        }
+                        BinOp::Div => {
+                            let _ = writeln!(
+                                self.out,
+                                "    fdiv {prefix}{dest}, {prefix}{lhs_reg}, {prefix}{rhs_reg}"
+                            );
+                        }
+                        _ => return Ok(false),
+                    }
+                    Ok(true)
+                } else {
+                    let Some(dest) = dest_int else { return Ok(false) };
+                    let (Some(lhs_reg), Some(rhs_reg)) =
+                        (self.promoted_int(lhs), self.promoted_int(rhs))
+                    else {
+                        return Ok(false);
+                    };
+                    self.direct_int_binary(*op, lhs_reg, rhs_reg, lhs, place_ty, dest)?;
+                    Ok(true)
+                }
+            }
+            Rvalue::Unary { op, operand } => {
+                if self.is_float(place_ty) {
+                    let (Some(dest), Some(source)) = (dest_float, self.promoted_float(operand))
+                    else {
+                        return Ok(false);
+                    };
+                    let float64 = matches!(self.types.kind(place_ty), TyKind::F64);
+                    let prefix = if float64 { "d" } else { "s" };
+                    match op {
+                        UnOp::Neg => {
+                            let _ = writeln!(
+                                self.out,
+                                "    fneg {prefix}{dest}, {prefix}{source}"
+                            );
+                        }
+                        UnOp::Not => return Ok(false),
+                    }
+                    Ok(true)
+                } else {
+                    let (Some(dest), Some(source)) = (dest_int, self.promoted_int(operand)) else {
+                        return Ok(false);
+                    };
+                    match op {
+                        UnOp::Neg => {
+                            let _ = writeln!(self.out, "    neg x{dest}, x{source}");
+                        }
+                        UnOp::Not => {
+                            let bool_operand = self
+                                .operand_ty(operand)
+                                .map(|ty| matches!(self.types.kind(ty), TyKind::Bool))
+                                .unwrap_or(false);
+                            if bool_operand {
+                                let _ = writeln!(self.out, "    eor x{dest}, x{source}, #1");
+                            } else {
+                                let _ = writeln!(self.out, "    mvn x{dest}, x{source}");
+                            }
+                        }
+                    }
+                    self.normalize_reg(place_ty, dest)?;
+                    Ok(true)
+                }
+            }
+            Rvalue::Cast { operand, to: _ } => {
+                let Some(source_ty) = self.operand_ty(operand) else {
+                    return Ok(false);
+                };
+                let source_float = self.is_float(source_ty);
+                let target_float = self.is_float(place_ty);
+                if source_float {
+                    let Some(source) = self.promoted_float(operand) else {
+                        return Ok(false);
+                    };
+                    let source64 = matches!(self.types.kind(source_ty), TyKind::F64);
+                    if target_float {
+                        let Some(dest) = dest_float else { return Ok(false) };
+                        let target64 = matches!(self.types.kind(place_ty), TyKind::F64);
+                        if source64 == target64 {
+                            let prefix = if target64 { "d" } else { "s" };
+                            if dest != source {
+                                let _ = writeln!(
+                                    self.out,
+                                    "    fmov {prefix}{dest}, {prefix}{source}"
+                                );
+                            }
+                        } else if target64 {
+                            let _ = writeln!(self.out, "    fcvt d{dest}, s{source}");
+                        } else {
+                            let _ = writeln!(self.out, "    fcvt s{dest}, d{source}");
+                        }
+                    } else {
+                        let Some(dest) = dest_int else { return Ok(false) };
+                        let unsigned = self.is_unsigned(place_ty);
+                        let op = if unsigned { "fcvtzu" } else { "fcvtzs" };
+                        let prefix = if source64 { "d" } else { "s" };
+                        let _ = writeln!(self.out, "    {op} x{dest}, {prefix}{source}");
+                        self.normalize_reg(place_ty, dest)?;
+                    }
+                } else if target_float {
+                    let Some(source) = self.promoted_int(operand) else {
+                        return Ok(false);
+                    };
+                    let Some(dest) = dest_float else { return Ok(false) };
+                    let unsigned = self.is_unsigned(source_ty);
+                    let op = if unsigned { "ucvtf" } else { "scvtf" };
+                    let target64 = matches!(self.types.kind(place_ty), TyKind::F64);
+                    let prefix = if target64 { "d" } else { "s" };
+                    let _ = writeln!(self.out, "    {op} {prefix}{dest}, x{source}");
+                } else {
+                    let (Some(source), Some(dest)) = (self.promoted_int(operand), dest_int) else {
+                        return Ok(false);
+                    };
+                    if dest != source {
+                        let _ = writeln!(self.out, "    mov x{dest}, x{source}");
+                    }
+                    self.normalize_reg(place_ty, dest)?;
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn direct_int_binary(
+        &mut self,
+        op: BinOp,
+        lhs: u8,
+        rhs: u8,
+        lhs_operand: &Operand,
+        result_ty: TyId,
+        dest: u8,
+    ) -> Result<(), String> {
+        let lhs_ty = self.operand_ty(lhs_operand);
+        let unsigned = lhs_ty
+            .map(|ty| self.is_unsigned(ty))
+            .unwrap_or_else(|| self.is_unsigned(result_ty));
+        let (mnemonic, comparison) = match op {
+            BinOp::Add => ("add", None),
+            BinOp::Sub => ("sub", None),
+            BinOp::Mul => ("mul", None),
+            BinOp::BitAnd => ("and", None),
+            BinOp::BitOr => ("orr", None),
+            BinOp::BitXor => ("eor", None),
+            BinOp::Shl => ("lsl", None),
+            BinOp::Shr => (if unsigned { "lsr" } else { "asr" }, None),
+            BinOp::Div | BinOp::Rem => (if unsigned { "udiv" } else { "sdiv" }, None),
+            BinOp::Eq => ("cmp", Some("eq")),
+            BinOp::Ne => ("cmp", Some("ne")),
+            BinOp::Lt => ("cmp", Some(if unsigned { "lo" } else { "lt" })),
+            BinOp::Le => ("cmp", Some(if unsigned { "ls" } else { "le" })),
+            BinOp::Gt => ("cmp", Some(if unsigned { "hi" } else { "gt" })),
+            BinOp::Ge => ("cmp", Some(if unsigned { "hs" } else { "ge" })),
+            BinOp::LogicalAnd | BinOp::LogicalOr => {
+                return Err(
+                    "short-circuit logical operators are lowered to branches, not binary operations"
+                        .into(),
+                );
+            }
+        };
+        if matches!(op, BinOp::Shl | BinOp::Shr) {
+            let bits = self.size_of(result_ty)? * 8;
+            let mask = if bits < 64 { 31 } else { 63 };
+            if mask < 63 {
+                let _ = writeln!(self.out, "    and x12, x{rhs}, #{mask}");
+                let _ = writeln!(self.out, "    {mnemonic} x{dest}, x{lhs}, x12");
+            } else {
+                let _ = writeln!(self.out, "    {mnemonic} x{dest}, x{lhs}, x{rhs}");
+            }
+        } else {
+            match op {
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                    let _ = writeln!(self.out, "    cmp x{lhs}, x{rhs}");
+                    let _ = writeln!(self.out, "    cset x{dest}, {}", comparison.unwrap());
+                }
+                BinOp::Rem => {
+                    let _ = writeln!(self.out, "    {mnemonic} x12, x{lhs}, x{rhs}");
+                    let _ = writeln!(self.out, "    msub x{dest}, x12, x{rhs}, x{lhs}");
+                }
+                _ => {
+                    let _ = writeln!(self.out, "    {mnemonic} x{dest}, x{lhs}, x{rhs}");
+                }
+            }
+        }
+        self.normalize_reg(result_ty, dest)
     }
 
     fn repeat(
@@ -1644,7 +1952,9 @@ impl Emitter<'_> {
     fn load(&mut self, place: &Place, reg: u8) -> Result<(), String> {
         if place.projection.is_empty() {
             if let Some(local) = self.local_reg[place.local.0 as usize] {
-                let _ = writeln!(self.out, "    mov x{reg}, x{local}");
+                if local != reg {
+                    let _ = writeln!(self.out, "    mov x{reg}, x{local}");
+                }
                 return Ok(());
             }
         }
@@ -1753,30 +2063,34 @@ impl Emitter<'_> {
     }
 
     fn normalize(&mut self, ty: TyId) -> Result<(), String> {
+        self.normalize_reg(ty, 0)
+    }
+
+    fn normalize_reg(&mut self, ty: TyId, reg: u8) -> Result<(), String> {
         match self.types.kind(ty) {
             TyKind::Unit => {
-                let _ = writeln!(self.out, "    mov x0, #0");
+                let _ = writeln!(self.out, "    mov x{reg}, #0");
             }
             TyKind::Bool => {
-                let _ = writeln!(self.out, "    and x0, x0, #1");
+                let _ = writeln!(self.out, "    and x{reg}, x{reg}, #1");
             }
             TyKind::I8 => {
-                let _ = writeln!(self.out, "    sxtb x0, w0");
+                let _ = writeln!(self.out, "    sxtb x{reg}, w{reg}");
             }
             TyKind::I16 => {
-                let _ = writeln!(self.out, "    sxth x0, w0");
+                let _ = writeln!(self.out, "    sxth x{reg}, w{reg}");
             }
             TyKind::I32 => {
-                let _ = writeln!(self.out, "    sxtw x0, w0");
+                let _ = writeln!(self.out, "    sxtw x{reg}, w{reg}");
             }
             TyKind::U8 | TyKind::Char => {
-                let _ = writeln!(self.out, "    and x0, x0, #255");
+                let _ = writeln!(self.out, "    and x{reg}, x{reg}, #255");
             }
             TyKind::U16 => {
-                let _ = writeln!(self.out, "    uxth w0, w0");
+                let _ = writeln!(self.out, "    uxth w{reg}, w{reg}");
             }
             TyKind::U32 => {
-                let _ = writeln!(self.out, "    mov w0, w0");
+                let _ = writeln!(self.out, "    mov w{reg}, w{reg}");
             }
             TyKind::I64
             | TyKind::U64
