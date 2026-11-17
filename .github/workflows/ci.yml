@@ -34,13 +34,78 @@ jobs:
           printf 'fn main() -> i32 {\n    println("mac")\n    return 0\n}\n' > main.um
           "$GITHUB_WORKSPACE/target/release/umay" build main.um
           test "$(./dist/main)" = mac
+      - name: Package the macOS artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python3 scripts/package.py \
+            --version "${GITHUB_REF_NAME#v}" \
+            --label x86_64-darwin \
+            --binary target/release/umay \
+            --out out \
+            --strip
+      - name: Keep the macOS artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: umay-release-macos
+          path: out/*
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add MinGW to PATH
+        shell: pwsh
+        run: |
+          foreach ($dir in @("C:\msys64\mingw64\bin", "C:\mingw64\bin", "C:\tools\mingw64\bin")) {
+            if (Test-Path $dir) {
+              $dir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            }
+          }
+      - name: Test (locked)
+        run: cargo test --locked --manifest-path compiler/Cargo.toml
+      - name: Release build
+        run: cargo build --release --locked --manifest-path compiler/Cargo.toml
+      - name: Link and run a Windows binary
+        shell: pwsh
+        run: |
+          if (-not (Get-Command x86_64-w64-mingw32-gcc -ErrorAction SilentlyContinue)) {
+            Write-Host "MinGW-w64 is not installed; skipping the native link smoke"
+            exit 0
+          }
+          $dir = Join-Path $env:RUNNER_TEMP "umay-smoke"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Set-Location $dir
+          @(
+            'fn main() -> i32 {'
+            '    println("win")'
+            '    return 0'
+            '}'
+          ) | Set-Content -Encoding utf8 main.um
+          & "$env:GITHUB_WORKSPACE\target\release\umay.exe" build main.um
+          if ((& ".\dist\main.exe") -ne "win") { exit 1 }
+      - name: Package the Windows artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          python scripts/package.py `
+            --version $version `
+            --label x86_64-windows `
+            --binary target/release/umay.exe `
+            --out out
+      - name: Keep the Windows artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: umay-release-windows
+          path: out/*
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -57,19 +122,37 @@ jobs:
             ldd "$binary" >&2
             exit 1
           fi
-      - name: Keep the artifact
+      - name: Keep the Linux artifact
         uses: actions/upload-artifact@v4
         with:
-          name: umay-release
+          name: umay-release-linux
           path: out/*
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download every platform artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
+          mapfile -t files < <(find artifacts -maxdepth 1 -type f | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "error: no release artifacts were downloaded" >&2
+            exit 1
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" out/*.tar.gz out/*.sha256 --clobber
+            gh release upload "$tag" "${files[@]}" --clobber
           else
-            gh release create "$tag" out/*.tar.gz out/*.sha256 \
+            gh release create "$tag" "${files[@]}" \
               --title "umay ${tag#v}" --generate-notes
           fi

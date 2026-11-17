@@ -69,24 +69,14 @@ else
 fi
 [ -x "$binary" ] || { echo "error: $binary was not produced" >&2; exit 1; }
 
-# 5. Assemble the package.
-pkg="${out_dir}/umay-${version}-${host}"
-rm -rf "$pkg"
-mkdir -p "$pkg"
-cp "$binary" "$pkg/umay"
-strip "$pkg/umay" 2>/dev/null || true
-
-for doc in README.md CHANGELOG.md docs/language-specification.md docs/build-system.md; do
-    [ -f "$doc" ] && cp "$doc" "$pkg/$(basename "$doc")"
-done
-[ -f LICENSE ] && cp LICENSE "$pkg/LICENSE"
-
-# 6. Checksum, so a download can be checked rather than trusted.
-tarball="${pkg}.tar.gz"
-tar -C "$out_dir" -czf "$tarball" "$(basename "$pkg")"
-( cd "$out_dir" && sha256sum "$(basename "$tarball")" > "$(basename "$tarball").sha256" )
-
-echo "==> wrote $tarball"
-echo "    $(cat "${tarball}.sha256")"
+# 5. Package and checksum. One script does this on every host, so the
+# documents and the checksum layout cannot drift between systems.
+echo "==> packaging"
+python3 scripts/package.py \
+    --version "$version" \
+    --label "$host" \
+    --binary "$binary" \
+    --out "$out_dir" \
+    --strip
 echo
-echo "verify with:  sha256sum -c $(basename "$tarball").sha256"
+echo "verify with:  sha256sum -c <archive>.sha256"

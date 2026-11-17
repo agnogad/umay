@@ -50,19 +50,23 @@ Two versions move independently:
    git push origin v<version>
    ```
 
-8. **The GitHub release publishes itself.** Pushing the tag runs the `release`
-   job, which builds the artifact, checks that the Linux binary is static, and
-   attaches the tarball and its checksum to the tag. A user should be able to
-   download both and run `sha256sum -c` before executing anything. If the job
-   could not publish, attach both files by hand rather than leaving the tag with
-   no download.
+8. **The GitHub release publishes itself.** Pushing the tag builds the Linux,
+   macOS and Windows artifacts. The Linux job also checks that its binary is
+   static. A final job attaches every archive and checksum to the tag. A user
+   should be able to download a pair and run `sha256sum -c` before executing
+   anything. If the jobs could not publish, attach the files by hand rather than
+   leaving the tag with no download.
 
 ## What the artifact contains
 
-- `umay` — the compiler, stripped.
+- `umay` on Linux and macOS, `umay.exe` on Windows — the compiler. Linux and
+  macOS builds are stripped.
 - `README.md`, `CHANGELOG.md` — what it is and what changed.
 - `language-specification.md`, `build-system.md` — the normative documents.
-- `LICENSE`, when the repository has one.
+- `LICENSE`.
+
+Linux and macOS use a `tar.gz`; Windows uses a `zip`. Each archive has a sibling
+`.sha256` file.
 
 It does **not** contain the Cargo build directory, the source tree, or any
 project's `dist/`. On Linux the compiler is built against musl and statically
@@ -79,6 +83,8 @@ tar xzf umay-<version>-x86_64-linux-musl.tar.gz
 install -m 0755 umay-<version>-x86_64-linux-musl/umay ~/.local/bin/umay
 umay version
 ```
+
+On Windows, unpack the `x86_64-windows` zip and put `umay.exe` on `PATH`.
 
 ## After the release
 

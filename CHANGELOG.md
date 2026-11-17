@@ -7,6 +7,19 @@ specification carries its own version (`v1.0`), which moves only when the
 language surface changes; the compiler's package version can move for
 implementation-only changes.
 
+## [Unreleased]
+
+### Added
+
+- **macOS and Windows release artifacts.** The tag workflow now packages a
+  `x86_64-darwin` tar.gz and an `x86_64-windows` zip next to the static Linux
+  artifact, and a final job publishes all three with their checksums. A new
+  `windows-latest` job runs the locked test suite and builds the compiler, so a
+  Windows regression is visible in CI rather than only under Wine on one
+  machine.
+- `scripts/package.py` owns archive creation and checksums on every host, so
+  Linux, macOS and Windows packages cannot drift in contents or layout.
+
 ## [0.3.0] — 2026-11-17
 
 ### Added
