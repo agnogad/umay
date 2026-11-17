@@ -39,9 +39,10 @@ and `d0`/`d1`, but locals are now allocated:
   and the frame reserves slots only for locals that stay in memory.
 - Parameters are forced apart at entry, since they have no defining assignment
   from which interference could be discovered.
-- Scalar assignments write the allocated destination directly when both
-  operands are already in registers. `add x19, x19, x20` replaces the old
-  `mov`/`add`/`mov` sequence, and `fadd d8, d8, d9` does the same for floats.
+- Scalar assignments write the allocated destination directly. `add x19, x19,
+  x20` replaces the old `mov`/`add`/`mov` sequence, and `fadd d8, d8, d9` does
+  the same for floats. Constants and stack operands are staged in `x8`/`x9` or
+  `d0`/`d1`, so the result still does not pass through `x0`/`x1`.
 
 This keeps code generation local and testable while removing most stack traffic.
 Direct calls still follow AAPCS64.
@@ -103,10 +104,10 @@ needs no cross C library.
   aggregate that is not homogeneous (for example `{ i64, f64 }`) still travels
   through the integer-register path; UMAY's own calls agree on that, but it is
   not AAPCS64 C interop.
-- **Operands that are not in registers still take the old path.** Scalar
-  assignment is direct only when its operands are allocated too. Calls, stack
-  operands, constants and aggregates still move through `x0`/`x1` or `d0`/`d1`,
-  and address-taken locals remain in stack slots. On a three-million iteration
+- **Calls and aggregates still take the old path.** Scalar arithmetic, unary
+  operations and casts are direct even when a constant or stack operand must be
+  staged, but calls, aggregates and address-taken locals still move through
+  `x0`/`x1` or `d0`/`d1`. On a three-million iteration
   integer loop the allocator roughly halved qemu wall time (0.064 s to 0.030 s
   median) and reduced stack loads and stores from 21 to 2. A loop with twenty
   short-lived locals improved from 0.032 s to 0.011 s, with stack accesses
@@ -128,11 +129,10 @@ needs no cross C library.
 1. **The rest of the corpus under qemu/native runners.** Run every executable
    program test against the AArch64 targets and compare output and exit status
    with x86_64.
-2. **Allocate the remaining operands.** Extend direct lowering to constants,
-   stack operands and call arguments, then replace per-statement emission with a
-   small machine IR so values can stay in `x0`-`x17` and `d0`-`d7` between
-   operations. The graph-colouring allocator remains the fallback for
-   address-taken locals.
+2. **Allocate call arguments and aggregates.** The scalar paths are direct;
+   the remaining scratch traffic is at call boundaries and in aggregate
+   copies. After that, a small machine IR can keep values in `x0`-`x17` and
+   `d0`-`d7` between operations.
 3. **Windows aggregate C interop.** Match Microsoft's composite classification
    when a UMAY aggregate crosses into a C function on Windows ARM64.
 

@@ -284,7 +284,7 @@ fn float_locals_are_promoted_to_callee_saved_registers() {
         "the prologue must save d8:\n{asm}"
     );
     assert!(
-        asm.contains("fmov d0, d8") && asm.contains("fmov d8, d0"),
+        asm.contains("fadd d8, d8"),
         "the float local must stay in d8 instead of a stack slot:\n{asm}"
     );
     assemble(&dir, &asm);
@@ -388,6 +388,17 @@ fn float_arithmetic_targets_allocated_registers() {
         asm.contains("fadd d8, d8, d9"),
         "the float addition must write the allocated destination directly:\n{asm}"
     );
+    assemble(&dir, &asm);
+}
+
+#[test]
+fn signed_stack_loads_extend_to_the_full_register() {
+    let dir = scratch("signed_loads");
+    let source = "struct S { a: i8, b: i16, c: i32 }\nfn main() -> i32 { let s = S { a: -1i8, b: -2i16, c: -3i32 }; return (s.a as i32) + (s.b as i32) + (s.c as i32) }\n";
+    let asm = asm_for(&dir, source).expect("signed load assembly");
+    assert!(asm.contains("ldrsb"), "i8 must sign-extend:\n{asm}");
+    assert!(asm.contains("ldrsh"), "i16 must sign-extend:\n{asm}");
+    assert!(asm.contains("ldrsw"), "i32 must sign-extend:\n{asm}");
     assemble(&dir, &asm);
 }
 

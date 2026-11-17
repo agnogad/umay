@@ -928,8 +928,9 @@ is breadth, packaging, and the two known quality gaps.
       colouring allocate address-free integer and float locals to callee-saved
       registers, sharing registers across disjoint lifetimes and spilling the
       rest. Scalar assignments lower directly into those registers, cutting a
-      twenty-local loop's `mov` count from 142 to 16. Constants, stack operands,
-      call arguments and aggregates still take the scratch-register path.
+      twenty-local loop's `mov` count from 142 to 16. Constants and stack
+      operands are staged in scratch registers; call arguments and aggregates
+      still take the old path.
 - [ ] **Reproducible release check.** Rebuild an artifact and compare bytes, so
       "the tarball matches the commit" is verified rather than assumed.
 

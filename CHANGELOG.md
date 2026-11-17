@@ -43,10 +43,12 @@ implementation-only changes.
     falling from 36 to 1; a three-million iteration loop fell from 0.064 s to
     0.030 s. Stack-argument staging uses `d0`, so it cannot clobber a promoted
     parameter. Scalar assignments now write the allocated destination directly
-    when both operands are in registers (`add x19, x19, x20`,
-    `fadd d8, d8, d9`), eliminating the `x0`/`x1` round trip; a twenty-local
-    loop's `mov` count fell from 142 to 16. Calls, constants, stack operands and
-    aggregates still use fixed scratch registers; see
+    into the destination register (`add x19, x19, x20`, `fadd d8, d8, d9`),
+    eliminating the `x0`/`x1` round trip. Constants and stack operands are
+    staged in `x8`/`x9` or `d0`/`d1`; a twenty-local loop's `mov` count fell
+    from 142 to 16. Signed i8/i16/i32 stack loads now sign-extend
+    (`ldrsb`/`ldrsh`/`ldrsw`) so negative values compare and divide correctly.
+    Calls and aggregates still use fixed scratch registers; see
     [ADR 0015](docs/adr/0015-aarch64-backend.md).
 - **HTTP(S) `upm` registry.** `UMAY_REGISTRY` now accepts `http://` and
   `https://` roots in a `;`-separated list alongside directories. The client

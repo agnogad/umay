@@ -488,6 +488,42 @@ impl Emitter<'_> {
     /// `add x21, x19, x20` replaces two moves, the add and a third move.
     /// Returning `false` means nothing was emitted and the caller must use the
     /// general path.
+    /// Puts an integer operand in a register, using `scratch` when it is not
+    /// already allocated. `x8`/`x9` are caller-saved and not used by the
+    /// address calculation a stack operand may need.
+    fn int_operand(&mut self, operand: &Operand, scratch: u8) -> Result<u8, String> {
+        if let Some(register) = self.promoted_int(operand) {
+            return Ok(register);
+        }
+        self.operand(operand, scratch)?;
+        Ok(scratch)
+    }
+
+    /// Puts both float operands in registers, using `d0`/`d1` for the ones
+    /// that do not already have an allocated register.
+    fn float_operands(
+        &mut self,
+        lhs: &Operand,
+        rhs: &Operand,
+        float64: bool,
+    ) -> Result<(u8, u8), String> {
+        let lhs_reg = match self.promoted_float(lhs) {
+            Some(register) => register,
+            None => {
+                self.operand_float(lhs, 0, float64)?;
+                0
+            }
+        };
+        let rhs_reg = match self.promoted_float(rhs) {
+            Some(register) => register,
+            None => {
+                self.operand_float(rhs, 1, float64)?;
+                1
+            }
+        };
+        Ok((lhs_reg, rhs_reg))
+    }
+
     fn direct_assign(
         &mut self,
         place: &Place,
@@ -524,16 +560,11 @@ impl Emitter<'_> {
                         BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                     );
                 if float_comparison {
-                    let (Some(dest), Some(lhs_reg), Some(rhs_reg)) = (
-                        dest_int,
-                        self.promoted_float(lhs),
-                        self.promoted_float(rhs),
-                    ) else {
-                        return Ok(false);
-                    };
+                    let Some(dest) = dest_int else { return Ok(false) };
                     let float64 = lhs_ty
                         .map(|ty| matches!(self.types.kind(ty), TyKind::F64))
                         .unwrap_or(false);
+                    let (lhs_reg, rhs_reg) = self.float_operands(lhs, rhs, float64)?;
                     let prefix = if float64 { "d" } else { "s" };
                     let condition = match op {
                         BinOp::Eq => "eq",
@@ -550,15 +581,11 @@ impl Emitter<'_> {
                 }
                 if self.is_float(place_ty) {
                     let Some(dest) = dest_float else { return Ok(false) };
-                    let (Some(lhs_reg), Some(rhs_reg)) =
-                        (self.promoted_float(lhs), self.promoted_float(rhs))
-                    else {
-                        return Ok(false);
-                    };
                     let float64 = self
                         .operand_ty(lhs)
                         .map(|ty| matches!(self.types.kind(ty), TyKind::F64))
                         .unwrap_or(false);
+                    let (lhs_reg, rhs_reg) = self.float_operands(lhs, rhs, float64)?;
                     let prefix = if float64 { "d" } else { "s" };
                     match op {
                         BinOp::Add => {
@@ -590,40 +617,29 @@ impl Emitter<'_> {
                     Ok(true)
                 } else {
                     let Some(dest) = dest_int else { return Ok(false) };
-                    let (Some(lhs_reg), Some(rhs_reg)) =
-                        (self.promoted_int(lhs), self.promoted_int(rhs))
-                    else {
-                        return Ok(false);
-                    };
+                    let lhs_reg = self.int_operand(lhs, 8)?;
+                    let rhs_reg = self.int_operand(rhs, 9)?;
                     self.direct_int_binary(*op, lhs_reg, rhs_reg, lhs, place_ty, dest)?;
                     Ok(true)
                 }
             }
             Rvalue::Unary { op, operand } => {
                 if self.is_float(place_ty) {
-                    let (Some(dest), Some(source)) = (dest_float, self.promoted_float(operand))
-                    else {
+                    let Some(dest) = dest_float else { return Ok(false) };
+                    if !matches!(op, UnOp::Neg) {
                         return Ok(false);
-                    };
+                    }
                     let float64 = matches!(self.types.kind(place_ty), TyKind::F64);
                     let prefix = if float64 { "d" } else { "s" };
-                    match op {
-                        UnOp::Neg => {
-                            let _ = writeln!(
-                                self.out,
-                                "    fneg {prefix}{dest}, {prefix}{source}"
-                            );
-                        }
-                        UnOp::Not => return Ok(false),
-                    }
+                    self.operand_float(operand, dest, float64)?;
+                    let _ = writeln!(self.out, "    fneg {prefix}{dest}, {prefix}{dest}");
                     Ok(true)
                 } else {
-                    let (Some(dest), Some(source)) = (dest_int, self.promoted_int(operand)) else {
-                        return Ok(false);
-                    };
+                    let Some(dest) = dest_int else { return Ok(false) };
+                    self.operand(operand, dest)?;
                     match op {
                         UnOp::Neg => {
-                            let _ = writeln!(self.out, "    neg x{dest}, x{source}");
+                            let _ = writeln!(self.out, "    neg x{dest}, x{dest}");
                         }
                         UnOp::Not => {
                             let bool_operand = self
@@ -631,9 +647,9 @@ impl Emitter<'_> {
                                 .map(|ty| matches!(self.types.kind(ty), TyKind::Bool))
                                 .unwrap_or(false);
                             if bool_operand {
-                                let _ = writeln!(self.out, "    eor x{dest}, x{source}, #1");
+                                let _ = writeln!(self.out, "    eor x{dest}, x{dest}, #1");
                             } else {
-                                let _ = writeln!(self.out, "    mvn x{dest}, x{source}");
+                                let _ = writeln!(self.out, "    mvn x{dest}, x{dest}");
                             }
                         }
                     }
@@ -648,10 +664,14 @@ impl Emitter<'_> {
                 let source_float = self.is_float(source_ty);
                 let target_float = self.is_float(place_ty);
                 if source_float {
-                    let Some(source) = self.promoted_float(operand) else {
-                        return Ok(false);
-                    };
                     let source64 = matches!(self.types.kind(source_ty), TyKind::F64);
+                    let source = match self.promoted_float(operand) {
+                        Some(register) => register,
+                        None => {
+                            self.operand_float(operand, 0, source64)?;
+                            0
+                        }
+                    };
                     if target_float {
                         let Some(dest) = dest_float else { return Ok(false) };
                         let target64 = matches!(self.types.kind(place_ty), TyKind::F64);
@@ -677,22 +697,22 @@ impl Emitter<'_> {
                         self.normalize_reg(place_ty, dest)?;
                     }
                 } else if target_float {
-                    let Some(source) = self.promoted_int(operand) else {
-                        return Ok(false);
-                    };
                     let Some(dest) = dest_float else { return Ok(false) };
+                    let source = match self.promoted_int(operand) {
+                        Some(register) => register,
+                        None => {
+                            self.operand(operand, 8)?;
+                            8
+                        }
+                    };
                     let unsigned = self.is_unsigned(source_ty);
                     let op = if unsigned { "ucvtf" } else { "scvtf" };
                     let target64 = matches!(self.types.kind(place_ty), TyKind::F64);
                     let prefix = if target64 { "d" } else { "s" };
                     let _ = writeln!(self.out, "    {op} {prefix}{dest}, x{source}");
                 } else {
-                    let (Some(source), Some(dest)) = (self.promoted_int(operand), dest_int) else {
-                        return Ok(false);
-                    };
-                    if dest != source {
-                        let _ = writeln!(self.out, "    mov x{dest}, x{source}");
-                    }
+                    let Some(dest) = dest_int else { return Ok(false) };
+                    self.operand(operand, dest)?;
                     self.normalize_reg(place_ty, dest)?;
                 }
                 Ok(true)
@@ -1965,13 +1985,24 @@ impl Emitter<'_> {
 
     fn load_at(&mut self, ty: TyId, reg: u8) -> Result<(), String> {
         match self.types.kind(ty) {
-            TyKind::I8 | TyKind::U8 | TyKind::Bool => {
+            // Signed loads extend to the full register; a zero-extended `w`
+            // would make a negative value compare as a large positive one.
+            TyKind::I8 => {
+                let _ = writeln!(self.out, "    ldrsb x{reg}, [x11]");
+            }
+            TyKind::U8 | TyKind::Bool => {
                 let _ = writeln!(self.out, "    ldrb w{reg}, [x11]");
             }
-            TyKind::I16 | TyKind::U16 => {
+            TyKind::I16 => {
+                let _ = writeln!(self.out, "    ldrsh x{reg}, [x11]");
+            }
+            TyKind::U16 => {
                 let _ = writeln!(self.out, "    ldrh w{reg}, [x11]");
             }
-            TyKind::I32 | TyKind::U32 | TyKind::Char | TyKind::F32 => {
+            TyKind::I32 => {
+                let _ = writeln!(self.out, "    ldrsw x{reg}, [x11]");
+            }
+            TyKind::U32 | TyKind::Char | TyKind::F32 => {
                 let _ = writeln!(self.out, "    ldr w{reg}, [x11]");
             }
             _ => {
