@@ -119,6 +119,7 @@ impl<'a> Checker<'a> {
                         name: t.name.clone(),
                         span: t.name_span,
                         generics: t.generics.iter().map(|g| g.name.clone()).collect(),
+                        supertraits: Vec::new(),
                         impls: Vec::new(),
                         methods: Vec::new(),
                     });
@@ -515,22 +516,220 @@ impl<'a> Checker<'a> {
         // the methods belong to, and it costs nothing to use it.
         let mut trait_names: Vec<String> = self.traits.keys().cloned().collect();
         trait_names.sort();
-        for name in trait_names {
-            let Some(decl) = self.traits.get(&name).cloned() else { continue };
-            let mut methods = Vec::new();
-            for m in &decl.methods {
-                let params: Vec<TyId> =
-                    m.params.iter().map(|p| self.resolve_type(&p.ty, &decl.generics.iter().map(|g| g.name.clone()).collect::<Vec<_>>())).collect();
-                let ret = match &m.ret {
-                    Some(t) => self.resolve_type(t, &decl.generics.iter().map(|g| g.name.clone()).collect::<Vec<_>>()),
-                    None => self.cx.unit(),
-                };
-                methods.push(TraitMethodInfo { name: m.name.clone(), span: m.name_span, params, ret });
+
+        // Pass A: resolve and validate supertrait bounds. Names are stored on
+        // `TraitInfo` so object-safety and callers can see them without the AST.
+        for name in &trait_names {
+            let Some(decl) = self.traits.get(name).cloned() else { continue };
+            let mut supers = Vec::new();
+            for path in &decl.supertraits {
+                let Some(sname) = path.segments.last().map(|s| s.name.clone()) else { continue };
+                if !self.traits.contains_key(&sname) {
+                    self.error("E1025", path.span, format!("unknown supertrait `{sname}` of trait `{name}`"));
+                    continue;
+                }
+                if supers.contains(&sname) {
+                    self.error("E1025", path.span, format!("duplicate supertrait `{sname}` on trait `{name}`"));
+                    continue;
+                }
+                supers.push(sname);
             }
-            if let Some(info) = self.hir.traits.iter_mut().find(|t| t.name == name) {
+            if let Some(info) = self.hir.traits.iter_mut().find(|t| t.name == *name) {
+                info.supertraits = supers;
+            }
+        }
+
+        // Pass B: flatten methods in ADR 0018 §4 order — each supertrait's
+        // methods (recursively) first, then the trait's own — and dedup by name.
+        // The resulting order is the vtable slot order used by dyn dispatch.
+        let mut memo: HashMap<String, Vec<(TraitMethodInfo, Option<ast::FnDecl>)>> = HashMap::new();
+        for name in &trait_names {
+            let mut visiting = Vec::new();
+            let mut flat = self.flatten_trait_methods(name, &mut visiting, &mut memo);
+            self.synthesize_defaults(name, &mut flat);
+            let methods: Vec<TraitMethodInfo> = flat.into_iter().map(|(m, _)| m).collect();
+            if let Some(info) = self.hir.traits.iter_mut().find(|t| t.name == *name) {
                 info.methods = methods;
             }
         }
+    }
+
+    /// Flattens a trait's own and inherited methods into ADR 0018 §4 order.
+    /// The `FnDecl` alongside each method keeps a default body available for
+    /// synthesis; it is stripped before the result is stored in HIR.
+    fn flatten_trait_methods(
+        &mut self,
+        name: &str,
+        visiting: &mut Vec<String>,
+        memo: &mut HashMap<String, Vec<(TraitMethodInfo, Option<ast::FnDecl>)>>,
+    ) -> Vec<(TraitMethodInfo, Option<ast::FnDecl>)> {
+        if let Some(cached) = memo.get(name) {
+            return cached.clone();
+        }
+        if visiting.iter().any(|n| n == name) {
+            let span = self.traits.get(name).map(|d| d.name_span).unwrap_or(Span::DUMMY);
+            self.error("E1025", span, format!("cyclic supertrait bound involving `{name}`"));
+            return Vec::new();
+        }
+        visiting.push(name.to_string());
+        let Some(decl) = self.traits.get(name).cloned() else {
+            visiting.pop();
+            return Vec::new();
+        };
+        let mut out: Vec<(TraitMethodInfo, Option<ast::FnDecl>)> = Vec::new();
+        for path in &decl.supertraits {
+            let Some(sname) = path.segments.last().map(|s| s.name.clone()) else { continue };
+            let inherited = self.flatten_trait_methods(&sname, visiting, memo);
+            for item in inherited {
+                if !out.iter().any(|(m, _)| m.name == item.0.name) {
+                    out.push(item);
+                }
+            }
+        }
+        let generics: Vec<String> = decl.generics.iter().map(|g| g.name.clone()).collect();
+        for m in &decl.methods {
+            // A method's own type parameters are in scope in its signature too,
+            // so `fn generic<T>(x: T)` must not report E1003 on `T`.
+            let mut sig_generics = generics.clone();
+            sig_generics.extend(m.generics.iter().map(|g| g.name.clone()));
+            let params: Vec<TyId> = m.params.iter().map(|p| self.resolve_type(&p.ty, &sig_generics)).collect();
+            let ret = match &m.ret {
+                Some(t) => self.resolve_type(t, &sig_generics),
+                None => self.cx.unit(),
+            };
+            let info = TraitMethodInfo {
+                name: m.name.clone(),
+                span: m.name_span,
+                params,
+                ret,
+                default_fn: None,
+            };
+            if !out.iter().any(|(x, _)| x.name == info.name) {
+                out.push((info, m.body.is_some().then(|| m.clone())));
+            }
+        }
+        visiting.pop();
+        memo.insert(name.to_string(), out.clone());
+        out
+    }
+
+    /// Synthesizes a concrete `HirFn` for every method carrying a default body.
+    ///
+    /// The body is checked once per implementing type with `self` bound to that
+    /// concrete type, so a default body may call other methods on `self`. The
+    /// synthesized function is registered as a method fallback: a real impl
+    /// method with the same name still wins. `TraitMethodInfo.default_fn` keeps
+    /// the first specialization for the vtable fallback.
+    fn synthesize_defaults(
+        &mut self,
+        trait_name: &str,
+        methods: &mut [(TraitMethodInfo, Option<ast::FnDecl>)],
+    ) {
+        let impls: Vec<String> = self
+            .hir
+            .traits
+            .iter()
+            .find(|t| t.name == trait_name)
+            .map(|t| t.impls.iter().map(|i| i.type_name.clone()).collect())
+            .unwrap_or_default();
+        let generics: Vec<String> = self
+            .traits
+            .get(trait_name)
+            .map(|d| d.generics.iter().map(|g| g.name.clone()).collect())
+            .unwrap_or_default();
+        for (info, body) in methods.iter_mut() {
+            let Some(m) = body.clone() else { continue };
+            // Source-text check keeps the ceiling cheap: `Self` has no HIR type
+            // in v2, so a default body that spells it (outside the `self`
+            // receiver) would otherwise lower to an error-typed expression.
+            let body_has_self = m
+                .body
+                .as_ref()
+                .map(|b| text_mentions_self(self.sources.file(b.span.file).span_text(b.span)))
+                .unwrap_or(false);
+            if m.ret.as_ref().is_some_and(type_mentions_self)
+                || m.params.iter().any(|p| type_mentions_self(&p.ty))
+                || body_has_self
+            {
+                self.error(
+                    "E1026",
+                    m.name_span,
+                    format!("default method `{trait_name}::{}` mentions `Self`", m.name),
+                );
+                continue;
+            }
+            if impls.is_empty() {
+                // No concrete type to specialize against; the body is never
+                // reachable, so only a signature-carrying function is made.
+                let id = self.new_default_fn(&m, None, &generics);
+                info.default_fn = Some(id);
+                continue;
+            }
+            for ty in &impls {
+                let id = self.new_default_fn(&m, Some(ty), &generics);
+                if info.default_fn.is_none() {
+                    info.default_fn = Some(id);
+                }
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    self.methods.entry((ty.clone(), m.name.clone()))
+                {
+                    e.insert(id);
+                    self.methods_of_type.entry(ty.clone()).or_default().push(m.name.clone());
+                }
+            }
+        }
+    }
+
+    /// Builds one default-method function, optionally specialized to `concrete`.
+    fn new_default_fn(&mut self, m: &ast::FnDecl, concrete: Option<&str>, generics: &[String]) -> FnId {
+        let id = FnId(self.hir.fns.len() as u32);
+        let base = concrete
+            .and_then(|name| self.lookup_type_def(name))
+            .map(|def| self.cx.adt(def, Vec::new()))
+            .or_else(|| self.cx.primitive("u8"))
+            .unwrap_or_else(|| self.cx.error());
+        let has_self = m.self_param.is_some();
+        let self_mutable = m.self_param.as_ref().is_some_and(|s| s.mutable);
+        let self_by_ref = m.self_param.as_ref().is_some_and(|s| s.by_ref.is_some());
+        let mut params = Vec::new();
+        if has_self {
+            let self_ty = if self_by_ref {
+                if self_mutable { self.cx.ref_mut_to(base) } else { self.cx.ref_to(base) }
+            } else {
+                base
+            };
+            params.push(self_ty);
+        }
+        let mut sig_generics = generics.to_vec();
+        sig_generics.extend(m.generics.iter().map(|g| g.name.clone()));
+        params.extend(m.params.iter().map(|p| self.resolve_type(&p.ty, &sig_generics)));
+        let ret = match &m.ret {
+            Some(t) => self.resolve_type(t, &sig_generics),
+            None => self.cx.unit(),
+        };
+        self.hir.fns.push(HirFn {
+            id,
+            name: m.name.clone(),
+            span: m.name_span,
+            generics: generics.to_vec(),
+            params,
+            ret,
+            has_self,
+            self_mutable,
+            self_by_ref,
+            locals: Vec::new(),
+            body: None,
+            is_pub: m.is_pub,
+            owner: Some(concrete.unwrap_or("__umay_default").to_string()),
+            link_name: None,
+            variadic: false,
+            is_async: false,
+            declared_local_tys: Default::default(),
+        });
+        if concrete.is_some() {
+            self.check_one_body(id, m, generics);
+        }
+        id
     }
 
     fn resolve_signatures_in(&mut self, items: &[ast::Item]) {
@@ -1346,6 +1545,43 @@ fn returned_value_ty(block: &crate::hir::HirBlock) -> Option<TyId> {
 
 fn has_derive(attrs: &[ast::Attribute], name: &str) -> bool {
     attrs.iter().any(|a| a.name == "derive" && a.args.iter().any(|x| x == name))
+}
+
+/// Cheap, whole-word source check for `Self` in a default method body. Comments
+/// and string literals can produce a false positive; the ceiling is documented
+/// as "bodies must not mention `Self`" and a false positive is still refused.
+fn text_mentions_self(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    for i in 0..bytes.len().saturating_sub(3) {
+        if &bytes[i..i + 4] == b"Self"
+            && (i == 0 || !ident(bytes[i - 1]))
+            && (i + 4 == bytes.len() || !ident(bytes[i + 4]))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when a type expression spells `Self` anywhere. Used to reject `Self` in
+/// default method signatures (E1026): v2 HIR has no representation for it.
+fn type_mentions_self(ty: &ast::TypeExpr) -> bool {
+    match ty {
+        ast::TypeExpr::Path(p) => p.segments.iter().any(|s| s.name == "Self"),
+        ast::TypeExpr::Ref { inner, .. } | ast::TypeExpr::Ptr { inner, .. }
+        | ast::TypeExpr::Slice { elem: inner, .. } => type_mentions_self(inner),
+        ast::TypeExpr::Array { elem, .. } => type_mentions_self(elem),
+        ast::TypeExpr::Tuple { elems, .. } => elems.iter().any(type_mentions_self),
+        ast::TypeExpr::Fn { params, ret, .. } => {
+            params.iter().any(type_mentions_self)
+                || ret.as_ref().is_some_and(|r| type_mentions_self(r))
+        }
+        ast::TypeExpr::ImplTrait { bounds, .. } | ast::TypeExpr::DynTrait { bounds, .. } => {
+            bounds.iter().any(|b| b.segments.iter().any(|s| s.name == "Self"))
+        }
+        ast::TypeExpr::Infer { .. } | ast::TypeExpr::Never { .. } => false,
+    }
 }
 
 /// Returns the simple type name of a self type, e.g. `Counter` for `Counter`.

@@ -740,6 +740,23 @@ impl Parser {
     fn parse_trait(&mut self) -> Option<TraitDecl> {
         let (name, name_span) = self.expect_ident("E0150", "after `trait`")?;
         let generics = self.parse_generic_params();
+        // `trait Sub: Base + Other { ... }`. Bounds are stored as paths; name
+        // resolution and duplicate/unknown checks happen in sema (E1025).
+        let mut supertraits = Vec::new();
+        if self.eat(&TokenKind::Colon) {
+            loop {
+                match self.parse_path() {
+                    Some(path) => supertraits.push(path),
+                    None => {
+                        self.error("E0150", "expected a supertrait name after `:`", self.span());
+                        break;
+                    }
+                }
+                if !self.eat(&TokenKind::Plus) {
+                    break;
+                }
+            }
+        }
         let mut methods = Vec::new();
         if self.eat(&TokenKind::LBrace) {
             while !self.at(&TokenKind::RBrace) {
@@ -769,7 +786,7 @@ impl Parser {
             self.expect(TokenKind::RBrace, "E0153", "trait body");
         }
         let end = self.prev_span();
-        Some(TraitDecl { name, name_span, generics, methods, span: name_span.to(end) })
+        Some(TraitDecl { name, name_span, generics, supertraits, methods, span: name_span.to(end) })
     }
 
     fn parse_impl(&mut self) -> Option<ImplBlock> {

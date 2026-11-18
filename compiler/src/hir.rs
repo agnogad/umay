@@ -146,6 +146,12 @@ pub struct TraitInfo {
     /// The trait's own parameter names, in declaration order, so that a bound's
     /// arguments can be paired with the types a method mentions.
     pub generics: Vec<String>,
+    /// Resolved names of the trait's supertraits, in declaration order (ADR 0018 §4).
+    /// Empty for a trait declared without bounds.
+    pub supertraits: Vec<String>,
+    /// The trait's own methods followed by inherited ones, in ADR 0018 §4 order:
+    /// each supertrait's flattened methods first (recursively), then the trait's
+    /// own. Vtable slots use this exact order.
     pub methods: Vec<TraitMethodInfo>,
 }
 
@@ -167,6 +173,10 @@ pub struct TraitMethodInfo {
     pub span: Span,
     pub params: Vec<TyId>,
     pub ret: TyId,
+    /// A synthesized concrete function for a method that carries a default body.
+    /// The body is specialized per implementing type (so `self` has that type);
+    /// this records the first such specialization. `None` for a bare signature.
+    pub default_fn: Option<FnId>,
 }
 
 #[derive(Debug, Clone)]

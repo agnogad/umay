@@ -314,7 +314,15 @@ impl<'a> Checker<'a> {
         };
         let mut entries = Vec::new();
         for method in &info.methods {
-            let Some(impl_fn) = self.methods.get(&(type_name.to_string(), method.name.clone())).copied() else {
+            // An impl method wins; a trait method with a default body supplies
+            // the slot when the impl omits it. The default Fn is specialized for
+            // this concrete type, so the shim's cast receiver matches it.
+            let impl_fn = self
+                .methods
+                .get(&(type_name.to_string(), method.name.clone()))
+                .copied()
+                .or(method.default_fn);
+            let Some(impl_fn) = impl_fn else {
                 self.error(
                     "E1017",
                     span,

@@ -16,7 +16,7 @@
 //! | `async_await` | `FnDecl.is_async`, `ExprKind::Await` |
 //! | `gui`, `mobile`, `proc_macro` | accepted, gate no syntax (reserved for later versions) |
 //!
-//! Deliberate limits: `traits` cannot see where-clauses, supertraits or
+//! Deliberate limits: `traits` cannot see where-clauses or
 //! associated items yet (the AST has no fields for them), and string
 //! interpolation stores raw source rather than an `Expr`, so gated syntax
 //! inside `"{...}"` is not walked. Module files loaded by `mod name;` are
@@ -146,8 +146,8 @@ impl Visitor<'_> {
             Item::Trait(d) => {
                 for m in &d.methods {
                     // The only `traits` syntax the AST can represent today is a
-                    // default method body. Where-clauses, supertraits and
-                    // associated items are not in the AST yet.
+                    // default method body. Where-clauses and associated items
+                    // are not in the AST yet (supertraits now are).
                     if m.body.is_some() {
                         self.need("traits", m.span);
                     }

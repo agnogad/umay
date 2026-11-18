@@ -23,8 +23,8 @@
 //! A second, independent path handles `block_on(value)` where `value` is a
 //! *concrete user* type with a registered `Future<T>` impl (e.g.
 //! `PendingOnce` in `stdlib/future.um`). It synthesises
-//! `__umay_block_on_user_<Type>(<Type>) -> T`, which calls the impl's concrete
-//! `poll` FnId directly (no dyn/vtable) and loops while it returns
+//! `__umay_block_on_user_<Type>(*mut <Type>) -> T`, which calls the impl's
+//! concrete `poll` FnId directly (no dyn/vtable) and loops while it returns
 //! `Poll::Pending`, unwrapping `Poll::Ready(v)` into `v`. The generated-async
 //! path is tried first and is untouched.
 //!
@@ -444,6 +444,12 @@ impl<'a> Checker<'a> {
     /// makes one context, then loops: `Ready(v)` breaks with `v`, `Pending`
     /// re-polls until `USER_POLL_LIMIT` is exhausted and panics.
     ///
+    /// The helper takes `*mut State`, the same pointer `call_block_on_helper`
+    /// passes for the generated-async path, and dereferences it for the `poll`
+    /// receiver. Declaring the parameter as `State` while the caller passes a
+    /// pointer made `&mut self` point at the pointer's bytes: a one-byte struct
+    /// like `PendingOnce` happened to work, but an `i64` deadline never did.
+    ///
     /// ponytail ceilings: no waker wake (the `make_context` waker is a no-op),
     /// no reactor, no spawn/select/timeout, no cancellation, no Send, no Pin.
     /// A `Pending` from a generated async fn still aborts — its thunk never
@@ -460,6 +466,9 @@ impl<'a> Checker<'a> {
             TyKind::Adt { def, .. } => *def,
             _ => DefId(u32::MAX),
         };
+        // `call_block_on_helper` passes `&mut state as *mut State`, so the helper
+        // must declare the same pointer type and dereference it before polling.
+        let ptr_ty = self.cx.raw_ptr_mut(state_ty);
         let type_name = self
             .hir
             .structs
@@ -531,6 +540,13 @@ impl<'a> Checker<'a> {
 
         // The direct poll call. `MethodCall` with a concrete FnId is a static
         // call; `lower_receiver` inserts the `&mut state` the method declares.
+        // Local 0 holds the `*mut State` the caller passed, so dereference it to
+        // get the state place the borrow must point at.
+        let state_ref = HirExpr {
+            kind: HirExprKind::Deref(Box::new(local(LocalId(0), ptr_ty))),
+            ty: state_ty,
+            span,
+        };
         let cx_ref = HirExpr {
             kind: HirExprKind::Ref {
                 mutable: true,
@@ -541,7 +557,7 @@ impl<'a> Checker<'a> {
         };
         let poll_call = HirExpr {
             kind: HirExprKind::MethodCall {
-                receiver: Box::new(local(LocalId(0), state_ty)),
+                receiver: Box::new(state_ref),
                 method: poll_fn,
                 args: vec![cx_ref],
             },
@@ -697,13 +713,13 @@ impl<'a> Checker<'a> {
             name: helper_name,
             span,
             generics: Vec::new(),
-            params: vec![state_ty],
+            params: vec![ptr_ty],
             ret: output,
             has_self: false,
             self_mutable: false,
             self_by_ref: false,
             locals: vec![
-                LocalInfo { name: "__state".into(), ty: state_ty, mutable: true, span },
+                LocalInfo { name: "__state".into(), ty: ptr_ty, mutable: true, span },
                 LocalInfo { name: "__cx".into(), ty: context_ty, mutable: true, span },
                 LocalInfo { name: "__poll_count".into(), ty: i64_ty, mutable: true, span },
                 LocalInfo { name: "__poll".into(), ty: poll_ty, mutable: false, span },

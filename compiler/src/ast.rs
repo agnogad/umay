@@ -203,6 +203,9 @@ pub struct TraitDecl {
     pub name: String,
     pub name_span: Span,
     pub generics: Vec<GenericParam>,
+    /// `trait Sub: Base + Other` — supertrait bounds in declaration order.
+    /// Empty for a v1-style trait with no bounds.
+    pub supertraits: Vec<Path>,
     pub methods: Vec<FnDecl>,
     pub span: Span,
 }

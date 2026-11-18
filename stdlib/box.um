@@ -1,0 +1,62 @@
+// A minimal owned heap box: one `T` living at a stable heap address.
+//
+// `Box<T>` is what lets callers hand around a single owned value by pointer —
+// the payload of a collection, or a captured GUI event handler — without the
+// compiler growing a new intrinsic. It is ordinary UMAY built from the same
+// `alloc`/`dealloc`/`sizeof(T)` primitives that `Vec<T>` already uses.
+
+// The handle. `ptr` owns one allocation of `sizeof(T)` bytes until `box_free`.
+//
+// ponytail: no auto-drop. UMAY has no user-defined `Drop` trait, so releasing
+// the heap value is always an explicit `box_free` call; automatic destruction
+// is a future compiler feature.
+struct Box<T> {
+    ptr: *mut T,
+}
+
+// Allocates fresh heap storage and moves `value` into it.
+//
+// `alloc` aborts the process when it cannot satisfy the request (see
+// prelude.um:100-106), so there is no null return to check here.
+//
+// ponytail: no failure path beyond `alloc` aborting — no `Result`, no error type.
+//
+// Call-site note: a `let` binding initialised by `box_new` needs an explicit
+// `Box<T>` annotation (e.g. `let b: Box<i64> = box_new(40i64)`). The checker
+// leaves a generic call's result as `Box<T>` until monomorphisation fills `T`
+// in; the annotation is what settles the binding so the later `box_get` /
+// `box_free` calls can infer their own `T`. Field access on a `box_get` result
+// likewise needs `let p: &T = box_get(&b)`.
+fn box_new<T>(value: T) -> Box<T> {
+    let p = alloc(sizeof(T)) as *mut T
+    // Writing through a *named* pointer is supported; a computed offset such as
+    // `*(p.offset(n))` is not (see prelude.um:113-126). `p` is named, so this
+    // store lowers directly to a deref write.
+    unsafe { *p = value }
+    return Box { ptr: p }
+}
+
+// Borrows the heap value.
+//
+// ponytail: `T` must be a sized, concrete type. `Box<dyn Trait>` is not possible
+// yet: `sizeof(T)` has no answer for a trait object and no vtable is carried
+// here. That needs compiler work (vtable-bearing pointers), not just this file.
+fn box_get<T>(b: &Box<T>) -> &T {
+    return unsafe { &*b.ptr }
+}
+
+// Mutably borrows the heap value.
+fn box_get_mut<T>(b: &mut Box<T>) -> &mut T {
+    return unsafe { &mut *b.ptr }
+}
+
+// Releases the heap value and clears the handle.
+//
+// Nulling `ptr` makes a second call pass null to `dealloc`; the runtime's
+// `umay_dealloc` is C `free`, and `free(NULL)` is a no-op, so double-free does
+// not crash. Using the handle after this (other than freeing it again) is not
+// supported — there is no borrow-check tracking for a freed raw pointer.
+fn box_free<T>(b: &mut Box<T>) {
+    dealloc(b.ptr as *mut u8)
+    b.ptr = unsafe { 0 as *mut T }
+}

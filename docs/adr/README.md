@@ -27,6 +27,7 @@ consequences, alternatives.
 | [0020](0020-gui-backend-strategy.md) | Desktop GUI: SDL3 then webview then native | accepted |
 | [0021](0021-mobile-strategy.md) | Mobile: webview-first with native bridges | accepted |
 | [0022](0022-macro-expansion.md) | Declarative token macros now; proc-macro ABI design-only | accepted |
+| [0023](0023-macro-host.md) | Separate-process macro host behind a versioned wire protocol | proposed |
 
 ## Template
 

@@ -59,7 +59,24 @@ fn violation(diags: &mut Diagnostics, span: Span, method: &str, rule: &str) {
     );
 }
 
-fn check_trait(decl: &ast::TraitDecl, span: Span, diags: &mut Diagnostics) {
+fn check_trait(
+    traits: &HashMap<String, ast::TraitDecl>,
+    decl: &ast::TraitDecl,
+    span: Span,
+    diags: &mut Diagnostics,
+    visiting: &mut Vec<String>,
+) {
+    if visiting.iter().any(|n| n == &decl.name) {
+        return;
+    }
+    visiting.push(decl.name.clone());
+    // Inherited methods occupy vtable slots too (ADR 0018 §4), so their
+    // signatures must be object-safe just like the trait's own methods.
+    for supertrait in &decl.supertraits {
+        if let Some(base) = traits.get(path_name(supertrait)) {
+            check_trait(traits, base, span, diags, visiting);
+        }
+    }
     for method in &decl.methods {
         if !method.generics.is_empty() {
             violation(diags, span, &method.name, "it has generic type parameters");
@@ -68,6 +85,7 @@ fn check_trait(decl: &ast::TraitDecl, span: Span, diags: &mut Diagnostics) {
             violation(diags, span, &method.name, "it returns `Self`");
         }
     }
+    visiting.pop();
 }
 
 /// Checks every bound of a `dyn Type` expression and appends diagnostics.
@@ -100,7 +118,8 @@ pub(crate) fn check_object_safety(
             continue;
         };
         principal_count += 1;
-        check_trait(decl, span, diags);
+        let mut visiting = Vec::new();
+        check_trait(traits, decl, span, diags, &mut visiting);
     }
     if principal_count > 1 {
         diags.push(
@@ -165,6 +184,7 @@ mod tests {
             name: name.into(),
             name_span: Span::DUMMY,
             generics: vec![],
+            supertraits: vec![],
             methods,
             span: Span::DUMMY,
         }
@@ -203,6 +223,20 @@ mod tests {
         let ret = ast::TypeExpr::Path(path("Self"));
         let traits = HashMap::from([("C".into(), decl("C", vec![method("dup", vec![], Some(ret))]))]);
         assert_eq!(check(&["C"], &traits), vec!["E1023"]);
+    }
+
+    #[test]
+    fn inherited_violation_is_e1023() {
+        let generics = vec![GenericParam { name: "T".into(), span: Span::DUMMY, bounds: vec![] }];
+        let mut traits = safe();
+        traits.insert(
+            "Bad".into(),
+            decl("Bad", vec![method("generic", generics, None)]),
+        );
+        if let Some(base) = traits.get_mut("Shape") {
+            base.supertraits = vec![path("Bad")];
+        }
+        assert_eq!(check(&["Shape"], &traits), vec!["E1023"]);
     }
 
     #[test]

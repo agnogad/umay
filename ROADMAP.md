@@ -1296,6 +1296,29 @@ clean; UI harness and gated tests pass in their respective modes.
 
 Full suite: **996 passed, 1 ignored**; clippy `-D warnings` clean.
 
+**Deep work — `v2-deep-work` branch (2026-11-18).**
+
+- [x] Generic `Box<T>` in `stdlib/box.um`: `alloc(sizeof(T))` + named-pointer
+      writes, explicit `box_free` (no user `Drop` trait yet), 7 tests.
+      `Box<dyn Trait>` still needs unsizing/vtable and is NOT unblocked.
+- [x] Supertraits and default trait methods: `trait Sub: Base`, recursive
+      method flattening in ADR 0018 order (supertraits first), default bodies
+      synthesized per implementing type, vtable fallback impl -> default,
+      inherited object-safety checks (E1025/E1026). 9 tests.
+- [x] Async wakers and timer futures: `waker_wake`, counting waker,
+      `Sleep`/`YieldNow` futures that wake on Pending. Fixed a real bug in the
+      user-future `block_on` helper (it passed `*mut State` where the helper
+      declared `State`, so an `i64` deadline never completed). 6 tests.
+- [x] Design-only ADR 0023 (separate `umay-macro-host` process, versioned JSONL
+      protocol, sandbox, signed packages) and `docs/v2/gui-facade-design.md`
+      (`umay-gui` `trait Backend`/`dyn Backend` facade). Neither is implemented.
+- [x] All checks green: **1019 passed, 1 ignored**; clippy `-D warnings` clean;
+      gated (12) and UI snapshot (1) suites pass.
+
+Still open: associated types, blanket-impl coherence, `Vec<dyn T>`/unsized,
+async reactor/epoll and spawn/select/cancellation, Box<dyn> unsizing, GUI
+facade implementation, proc-macro host, mobile packaging.
+
 **Critical path**
 
 `Phase 0 → 1 closures → 2 traits/dyn → 4 async`

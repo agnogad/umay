@@ -20,6 +20,7 @@ ADRs 0017-0021  ->  specification.md  ->  feature-flags.md
                                       ->  backward-compatibility.md
                  ->  ci-matrix.md + performance-budget.md + benchmarks.md
                  ->  ffi-spike.md + native-dependencies.md + webview-decision.md
+                 ->  gui-facade-design.md
 ```
 
 | Stage | Document | Purpose | Depends on |
@@ -38,6 +39,7 @@ ADRs 0017-0021  ->  specification.md  ->  feature-flags.md
 | 4 | [ffi-spike.md](ffi-spike.md) | Per-target ABI probe and `umay-bindgen` design. | Stage 3 |
 | 4 | [native-dependencies.md](native-dependencies.md) | Build model for native libraries and build scripts. | Stage 3 |
 | 4 | [webview-decision.md](webview-decision.md) | Webview runtime per OS and the shared IPC/asset bridge. | Stage 3 |
+| 5 | [gui-facade-design.md](gui-facade-design.md) | Concrete `umay-gui` `trait Backend` / `dyn Backend` facade design (design-only). | 0018, 0020 |
 
 ADRs own decisions. The spec cites them by number and does not re-derive them;
 the spike and design drafts constrain later ADRs rather than override them.

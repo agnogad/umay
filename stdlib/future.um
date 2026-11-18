@@ -48,6 +48,34 @@ fn make_context() -> Context {
     }
 }
 
+// Calls the function whose address a waker carries, passing its opaque data word.
+//
+// The cast is the same one `stdlib/thread.um`'s `call_one` writes: a function
+// address is stored as a byte pointer, then viewed as a pointer to a function of
+// the right signature and called. The signature is not checked at the boundary,
+// so the dereference and the call live under `unsafe`.
+fn waker_wake(w: &Waker) {
+    unsafe {
+        let f = w.wake as *const fn(*mut u8)
+        (*f)(w.data)
+    }
+}
+
+// The data a counting waker points at. `count` is a raw pointer so the wake
+// callback can increment a cell the test still owns and reads afterwards.
+struct CountWakerData {
+    count: *mut i64,
+}
+
+// A wake callback that increments one `i64` through its opaque data word.
+// Tests pair it with `waker_wake` to prove the notification path ran.
+fn counting_wake(data: *mut u8) {
+    unsafe {
+        let p = data as *mut i64
+        *p = *p + 1i64
+    }
+}
+
 // A future that yields `Pending` exactly once, then `Ready(7)`.
 //
 // Pure stdlib UMAY: no compiler magic. The compiler's `block_on` path for

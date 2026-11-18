@@ -1,0 +1,58 @@
+// Timer and yield futures, written in plain UMAY and spliced into a program
+// after the prelude (which supplies `Future`, `Poll`, `Context`, `Waker`,
+// `waker_wake` and `monotonic_ms`). This file declares no FFI, features or
+// modules: it is source data the compiler sees like any other user code.
+//
+// What is real here: `poll` calls `waker_wake`, so a wake is an actual function
+// call through the waker's function pointer, not a no-op. The counting waker in
+// `stdlib/future.um` is how a test proves that call happened.
+//
+// ponytail ceilings, each with its upgrade path:
+// * `block_on`'s bounded busy-poll loop still drives re-poll. A wake is a
+//   notification only: it does not suspend the task or reschedule it. Upgrade:
+//   store the waker and re-poll when it fires (ADR 0019 sections 3-6).
+// * No reactor, epoll or timer wheel: `Sleep` reads the monotonic clock on every
+//   re-poll instead of registering a deadline with the OS. Upgrade: a timer
+//   wheel behind a reactor that wakes the saved waker.
+// * No spawn, select, timeout or cancellation, and no `Send`/`Pin`. Upgrade:
+//   the executor types from ADR 0019 sections 4-6.
+
+// Resolves when the monotonic clock reaches `deadline_ms`. `wakes` counts the
+// notifications this future sent while pending; it is observable to callers.
+struct Sleep {
+    deadline_ms: i64,
+    wakes: i64,
+}
+
+impl Future<i64> for Sleep {
+    fn poll(&mut self, cx: &mut Context) -> Poll<i64> {
+        if monotonic_ms() < self.deadline_ms {
+            self.wakes = self.wakes + 1
+            waker_wake(&cx.waker)
+            return Poll::Pending
+        }
+        return Poll::Ready(0i64)
+    }
+}
+
+// Returns `Pending` once (after waking), then `Ready(1)` on the next poll.
+struct YieldNow {
+    done: bool,
+}
+
+impl Future<i64> for YieldNow {
+    fn poll(&mut self, cx: &mut Context) -> Poll<i64> {
+        if !self.done {
+            self.done = true
+            waker_wake(&cx.waker)
+            return Poll::Pending
+        }
+        return Poll::Ready(1i64)
+    }
+}
+
+// A sleep relative to now. The deadline is fixed at construction; `poll` only
+// compares the monotonic clock against it.
+fn sleep(ms: i64) -> Sleep {
+    return Sleep { deadline_ms: monotonic_ms() + ms, wakes: 0 }
+}

@@ -528,6 +528,25 @@ pub static EXPLAIN: &[ExplainEntry] = &[
          such as `Send` and `Sync` add no vtable methods and do not count toward the limit.",
         Some("trait Base {}\ntrait Combined: Base {}\nfn f(x: &dyn Combined) { }   // not: &dyn Base + Combined"),
     ),
+    e(
+        "E1025",
+        "invalid supertrait bound",
+        "A trait's supertraits must name traits that have been declared, must not repeat a trait, \
+         and must not form a cycle (`A: B` with `B: A`). Supertrait methods are flattened into the \
+         subtrait's vtable in declaration order (ADR 0018 §4), so an unknown or repeated name has no \
+         well-defined slot and is refused. Generic arguments on a supertrait path are not \
+         substituted in v2; write the bound with a bare trait name.",
+        Some("trait Base { fn a(&self) -> i64 }\ntrait Sub: Base { fn b(&self) -> i64 }"),
+    ),
+    e(
+        "E1026",
+        "`Self` is not supported in a default method",
+        "A default method body is checked after `self` has been resolved to the concrete type that \
+         implements the trait. Spelling the `Self` *type* in a signature or body has no \
+         representation in v2 HIR, so it is refused. Use the `self` value (receiver) instead, or make \
+         the method a bare signature and define it in each `impl`.",
+        Some("trait Bad { fn dup(&self) -> Self { /* not supported */ } }"),
+    ),
     // ---- ownership and borrowing ------------------------------------------
     e(
         "E0201",
