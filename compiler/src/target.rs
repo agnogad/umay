@@ -152,6 +152,37 @@ pub struct Target {
     pub linker: &'static str,
 }
 
+/// Exact `pkg-config --libs webkit2gtk-4.1` output on the Linux-gnu host where
+/// the Phase 5/6 webview spike was validated (webkit2gtk 2.52.6). Stored as
+/// data so no build shells out to pkg-config; the linker error on a host with a
+/// different dependency chain names what is missing.
+///
+/// All 18 flags, in pkg-config's order:
+/// `-lwebkit2gtk-4.1 -lgtk-3 -lgdk-3 -lpangocairo-1.0 -lcairo-gobject`
+/// `-lgdk_pixbuf-2.0 -latk-1.0 -lpango-1.0 -lcairo -lharfbuzz -lsoup-3.0`
+/// `-lgio-2.0 -lgmodule-2.0 -pthread -lz -ljavascriptcoregtk-4.1`
+/// `-lgobject-2.0 -lglib-2.0`.
+const WEBKIT2GTK_4_1_LIBS: &[&str] = &[
+    "-lwebkit2gtk-4.1",
+    "-lgtk-3",
+    "-lgdk-3",
+    "-lpangocairo-1.0",
+    "-lcairo-gobject",
+    "-lgdk_pixbuf-2.0",
+    "-latk-1.0",
+    "-lpango-1.0",
+    "-lcairo",
+    "-lharfbuzz",
+    "-lsoup-3.0",
+    "-lgio-2.0",
+    "-lgmodule-2.0",
+    "-pthread",
+    "-lz",
+    "-ljavascriptcoregtk-4.1",
+    "-lgobject-2.0",
+    "-lglib-2.0",
+];
+
 impl Target {
     /// The target named by `--target`, or the host's own when none is given.
     ///
@@ -174,7 +205,24 @@ impl Target {
                 target: normalised.to_string(),
             });
         };
+        // Mobile names are specialisations of a desktop OS name: `apple-ios`
+        // contains `apple`, and `linux-android` contains `linux`. They must be
+        // recognised *before* the generic branches, or a mobile triple silently
+        // becomes its desktop target -- producing an object the device's loader
+        // rejects, with a message about the loader rather than about the compiler.
+        let ios = lower.contains("ios");
+        let android = lower.contains("android");
         if arch == "aarch64" {
+            if ios {
+                return Ok(if lower.contains("sim") {
+                    Target::AARCH64_APPLE_IOS_SIM
+                } else {
+                    Target::AARCH64_APPLE_IOS
+                });
+            }
+            if android {
+                return Ok(Target::AARCH64_LINUX_ANDROID);
+            }
             if lower.contains("darwin") || lower.contains("macos") || lower.contains("apple") {
                 return Ok(Target::AARCH64_MACOS);
             }
@@ -191,7 +239,15 @@ impl Target {
         // Order matters: `apple-darwin` contains no `linux`, but a hypothetical
         // `linux-gnu` vs `musl` pair would both match `linux`, which is correct
         // because they differ only in libc and both take the SysV path.
-        if lower.contains("darwin") || lower.contains("macos") || lower.contains("apple") {
+        if android {
+            Ok(Target::X86_64_LINUX_ANDROID)
+        } else if ios {
+            // x86_64 iOS only ever exists as the simulator, whose UMAY target is
+            // AArch64. Refuse rather than silently returning the macOS target.
+            Err(TargetError::UnsupportedOs {
+                target: normalised.to_string(),
+            })
+        } else if lower.contains("darwin") || lower.contains("macos") || lower.contains("apple") {
             Ok(Target::MACOS)
         } else if lower.contains("windows") || lower.contains("win32") || lower.contains("msvc") {
             Ok(Target::WINDOWS)
@@ -351,6 +407,77 @@ impl Target {
         linker: "aarch64-w64-mingw32-gcc",
     };
 
+    /// iOS on AArch64, a device.
+    ///
+    /// Mach-O with AAPCS64. `os` stays `"macos"` on purpose: iOS is Darwin, so
+    /// the macOS runtime and standard-library platform sources (POSIX names,
+    /// C symbols) are the right ones and no second runtime layer is needed.
+    ///
+    /// This target can be *assembled* by clang on any host. It cannot be linked
+    /// here: a real app needs the Xcode/iOS SDK sysroot, load commands and a
+    /// codesigning step. That work is deferred; `mobile_sdk_hint` says so rather
+    /// than handing the object to a linker that cannot produce an app.
+    pub const AARCH64_APPLE_IOS: Target = Target {
+        triple: "aarch64-apple-ios",
+        os: "macos",
+        arch: "aarch64",
+        abi: Abi::Aapcs64,
+        format: ObjectFormat::MachO,
+        assembler: "clang",
+        assembler_args: &["-c", "--target=arm64-apple-ios"],
+        object_extension: ".o",
+        linker: "cc",
+    };
+
+    /// The iOS simulator on AArch64 (Apple Silicon Macs).
+    ///
+    /// Mach-O like a device but built against the simulator SDK slice. Real
+    /// linking is deferred for the same reason as `AARCH64_APPLE_IOS`.
+    pub const AARCH64_APPLE_IOS_SIM: Target = Target {
+        triple: "aarch64-apple-ios-sim",
+        os: "macos",
+        arch: "aarch64",
+        abi: Abi::Aapcs64,
+        format: ObjectFormat::MachO,
+        assembler: "clang",
+        assembler_args: &["-c", "--target=arm64-apple-ios-simulator"],
+        object_extension: ".o",
+        linker: "cc",
+    };
+
+    /// Android on AArch64.
+    ///
+    /// ELF with AAPCS64. `os` stays `"linux"` because Bionic is POSIX, so the
+    /// existing Linux runtime and standard-library sources are correct. A real
+    /// link needs the Android NDK sysroot and Bionic startup objects; deferred.
+    pub const AARCH64_LINUX_ANDROID: Target = Target {
+        triple: "aarch64-linux-android",
+        os: "linux",
+        arch: "aarch64",
+        abi: Abi::Aapcs64,
+        format: ObjectFormat::Elf,
+        assembler: "clang",
+        assembler_args: &["-c", "--target=aarch64-linux-android"],
+        object_extension: ".o",
+        linker: "aarch64-linux-android-clang",
+    };
+
+    /// Android on x86_64 (emulator / Intel devices).
+    ///
+    /// ELF with SysV, like Linux; only the NDK sysroot and Bionic differ. Real
+    /// linking is deferred.
+    pub const X86_64_LINUX_ANDROID: Target = Target {
+        triple: "x86_64-linux-android",
+        os: "linux",
+        arch: "x86_64",
+        abi: Abi::SysV,
+        format: ObjectFormat::Elf,
+        assembler: "clang",
+        assembler_args: &["-c", "--target=x86_64-linux-android"],
+        object_extension: ".o",
+        linker: "x86_64-linux-android-clang",
+    };
+
     /// Every target with a complete backend.
     pub const ALL: &'static [Target] = &[
         Target::LINUX,
@@ -359,6 +486,10 @@ impl Target {
         Target::AARCH64_LINUX,
         Target::AARCH64_MACOS,
         Target::AARCH64_WINDOWS,
+        Target::AARCH64_APPLE_IOS,
+        Target::AARCH64_APPLE_IOS_SIM,
+        Target::AARCH64_LINUX_ANDROID,
+        Target::X86_64_LINUX_ANDROID,
     ];
 
     /// The name a symbol has in the object file.
@@ -389,20 +520,53 @@ impl Target {
     }
 
     /// Libraries a program's assembly needs beyond the C library, decided by the
-    /// external symbols it calls. A program that calls no `sqlite3_*` function
-    /// links exactly as before, so a machine without SQLite builds everything
-    /// else; one that does gets `-lsqlite3` without a flag or manifest key.
+    /// external symbols it calls. A program that calls none of these prefixes
+    /// links exactly as before, so a machine without SQLite/SDL3 builds
+    /// everything else; one that does gets the flag without a manifest key.
+    ///
+    /// Detection is a symbol-prefix scan over the emitted assembly, matching the
+    /// C callee name with and without Mach-O/COFF's leading underscore. It does
+    /// not query `pkg-config` or read a manifest: the same rule as the original
+    /// SQLite case, and the missing library's linker error names what to install.
+    ///
+    /// Every target gets the same flag, so this needs no target parameter:
+    ///
+    /// * Linux / macOS (x86_64 and AArch64): `-lSDL3`, the plain dylib name.
+    /// * Windows x86_64 (MinGW/llvm-mingw) and AArch64: `-lSDL3`, resolved from
+    ///   `libSDL3.dll.a`. An MSVC-built import library may spell it differently;
+    ///   this compiler links with the MinGW driver, so no extra guess is made.
+    ///
+    /// Deliberate limits: no rpath is added (the loader must find the dylib), no
+    /// macOS framework form (`-framework SDL3`) is used, static linking is not
+    /// handled, and duplicate prefixes collapse to one flag by construction.
+    ///
+    /// A GTK3/WebKit2GTK 4.1 webview (`gtk_*` / `webkit_*` callees) gets the full
+    /// `pkg-config --libs webkit2gtk-4.1` list below, hardcoded rather than
+    /// queried: the compiler never shells out to pkg-config at build time.
+    /// ponytail: `system_libraries` has no target parameter, so this flag list is
+    /// the Linux-gnu host's snapshot and is applied to any target whose assembly
+    /// names those callees. Upgrade path: make the lookup target-aware when a
+    /// macOS/Windows webview backend is added (cli.rs is out of scope here).
     pub fn system_libraries(assembly: &str) -> Vec<&'static str> {
-        // The C name, with and without Mach-O's leading underscore.
-        const BY_PREFIX: &[(&str, &str)] = &[("sqlite3_", "-lsqlite3")];
-        BY_PREFIX
+        // The C name, with and without Mach-O/COFF's leading underscore.
+        const BY_PREFIX: &[(&str, &str)] = &[("sqlite3_", "-lsqlite3"), ("SDL_", "-lSDL3")];
+        let mut libs: Vec<&'static str> = BY_PREFIX
             .iter()
-            .filter(|(prefix, _)| {
-                assembly.contains(&format!("call {prefix}"))
-                    || assembly.contains(&format!("call _{prefix}"))
-            })
+            .filter(|(prefix, _)| Self::calls_prefix(assembly, prefix))
             .map(|(_, lib)| *lib)
-            .collect()
+            .collect();
+        // WebKitGTK needs its whole transitive flag list, not one `-l`: every
+        // flag comes from the host's `pkg-config --libs webkit2gtk-4.1`.
+        if Self::calls_prefix(assembly, "gtk_") || Self::calls_prefix(assembly, "webkit_") {
+            libs.extend(WEBKIT2GTK_4_1_LIBS.iter().copied());
+        }
+        libs
+    }
+
+    /// True when the assembly calls a C symbol with this prefix, in either the
+    /// bare ELF spelling or the Mach-O/COFF underscore spelling.
+    fn calls_prefix(assembly: &str, prefix: &str) -> bool {
+        assembly.contains(&format!("call {prefix}")) || assembly.contains(&format!("call _{prefix}"))
     }
 
     /// The command that links this target's two objects into an executable.
@@ -429,23 +593,50 @@ impl Target {
         parts.join(" ")
     }
 
+    /// The SDK a real link for this target still needs, if it is a mobile one.
+    ///
+    /// Mobile targets assemble on this host but cannot be linked into an app:
+    /// iOS needs Xcode's SDK and a codesigning step, Android needs the NDK
+    /// sysroot and Bionic. The name lives in the triple, not in `os` (iOS
+    /// deliberately reports `macos` and Android `linux` so the existing platform
+    /// sources are chosen), so detection is by triple.
+    ///
+    /// `None` for desktop targets, whose link path is unchanged.
+    pub fn mobile_sdk_hint(&self) -> Option<&'static str> {
+        if self.triple.contains("ios") {
+            Some("Xcode + iOS SDK (codesign required)")
+        } else if self.triple.contains("android") {
+            Some("Android NDK sysroot + Bionic")
+        } else {
+            None
+        }
+    }
+
     /// What stands in the way of that command working here, if anything.
     ///
     /// Same rule as `link_unavailable`: the question is the named linker's format.
     /// The linker program being *present* is not enough -- the host's `cc` is here
     /// and still cannot produce Mach-O -- so the caveat names the format it would
-    /// have to write, not the program it would have to find.
+    /// have to write, not the program it would have to find. A mobile target adds
+    /// the SDK it still needs, so `asm --emit-object-only` is honest about the
+    /// last step rather than printing a command that cannot produce an app.
     pub fn link_command_caveat(&self) -> Option<String> {
-        if ObjectFormat::of_linker(self.linker) == self.format {
-            return None;
+        let format_caveat = if ObjectFormat::of_linker(self.linker) == self.format {
+            None
+        } else {
+            Some(format!(
+                "`{}` here links {}, not {}; this needs a linker that writes {}",
+                self.linker,
+                ObjectFormat::of_linker(self.linker).name(),
+                self.format.name(),
+                self.format.name(),
+            ))
+        };
+        match (self.mobile_sdk_hint(), format_caveat) {
+            (Some(sdk), Some(fmt)) => Some(format!("{sdk}; {fmt}")),
+            (Some(sdk), None) => Some(sdk.to_string()),
+            (None, fmt) => fmt,
         }
-        Some(format!(
-            "`{}` here links {}, not {}; this needs a linker that writes {}",
-            self.linker,
-            ObjectFormat::of_linker(self.linker).name(),
-            self.format.name(),
-            self.format.name(),
-        ))
     }
 
     /// The linker arguments that produce a runnable executable.
@@ -724,6 +915,32 @@ mod tests {
             vec!["-lsqlite3"]
         );
         assert!(Target::system_libraries("    call umay_println\n").is_empty());
+    }
+
+    #[test]
+    fn webview_callees_add_the_full_webkit_flag_list() {
+        let expected: Vec<&str> = WEBKIT2GTK_4_1_LIBS.to_vec();
+        assert_eq!(
+            Target::system_libraries("    call gtk_init\n    call webkit_web_view_new\n"),
+            expected
+        );
+        // The COFF/Mach-O underscore spelling matches the same way, and a
+        // second webview callee must not duplicate the list.
+        assert_eq!(
+            Target::system_libraries(
+                "    call _gtk_widget_destroy\n    call webkit_web_view_load_uri\n"
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn no_webview_callee_adds_no_webkit_flags() {
+        assert!(Target::system_libraries("    call umay_println\n").is_empty());
+        assert_eq!(
+            Target::system_libraries("    call sqlite3_open_v2\n    call SDL_Init\n"),
+            vec!["-lsqlite3", "-lSDL3"]
+        );
     }
 
     #[test]

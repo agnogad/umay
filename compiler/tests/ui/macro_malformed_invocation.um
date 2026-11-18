@@ -1,0 +1,2 @@
+macro_rules! a { (x) => { 1 } }
+fn main() { let _ = a!(1 }

@@ -46,7 +46,7 @@ fn load_modules_full(
         dependencies,
     };
     let items = loader.expand(program.items, base);
-    (Program { items, span: program.span }, loader.diagnostics)
+    (Program { items, features: program.features, span: program.span }, loader.diagnostics)
 }
 
 /// Loads modules for a program whose entry point is the file at `entry`.

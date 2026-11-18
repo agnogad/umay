@@ -125,6 +125,43 @@ pub static EXPLAIN: &[ExplainEntry] = &[
     e("E0123", "malformed attribute arguments", "Attribute argument lists must be closed with `)`.", None),
     e("E0124", "malformed attribute", "Attributes end with `]`.", None),
     e(
+        "E0125",
+        "malformed macro definition",
+        "A macro definition must be `macro_rules! name { (matcher) => { expansion } }` with at \
+         least one rule. Each rule pairs a matcher in delimiters with an expansion in braces, \
+         separated by `=>`.",
+        Some("macro_rules! twice { ($e) => { $e + $e } }"),
+    ),
+    e(
+        "E0126",
+        "malformed macro invocation",
+        "A macro is invoked as `name!(...)` with parentheses, brackets or braces and a closing \
+         delimiter. The argument tokens must match one of the macro's rules.",
+        Some("let x = twice!(21)  // not: twice!(21"),
+    ),
+    e(
+        "E0127",
+        "no macro rule matched the invocation",
+        "No rule's matcher accepted the tokens passed to the macro. Check the number and shape \
+         of the arguments against every `(matcher) => { expansion }` rule in the definition.",
+        Some("macro_rules! one { ($a) => { $a } }\none!(1, 2)  // two args, one matcher"),
+    ),
+    e(
+        "E0128",
+        "macro binding mismatch",
+        "A fragment was used with the wrong metavariable name, or a capture was referenced \
+         without its `$`. Captures are bound only inside the rule that declares them.",
+        Some("macro_rules! id { ($e) => { $e } }  // not `e` inside the expansion"),
+    ),
+    e(
+        "E0129",
+        "macro expansion failed",
+        "The matched expansion could not be produced — for example because a nested expansion \
+         recursed too deeply or a generated token could not be lowered. The error is reported at \
+         the original invocation and labelled `in expansion of <macro>`.",
+        None,
+    ),
+    e(
         "E0130",
         "expected a struct name",
         "A struct is declared as `struct Name { field: Type }`.",
@@ -149,6 +186,47 @@ pub static EXPLAIN: &[ExplainEntry] = &[
     e("E0151", "unexpected end of file in a trait body", "The trait body was opened with `{` but never closed.", None),
     e("E0152", "expected `fn` in a trait body", "Traits contain only function signatures (and, later, associated types and constants).", None),
     e("E0153", "malformed trait body", "The trait body must be a brace-delimited list of function signatures closed with `}`.", None),
+    e(
+        "E0154",
+        "Gated syntax used without its crate-level gate",
+        "This construct is still unstable and is hidden behind a crate-level `#![feature(name)]` gate. \
+         The parser recognises it on every channel so that tools such as the formatter and language \
+         server can read it, but analysis refuses to build it until the matching gate is written at \
+         the crate root. Add the gate shown in the help. Warnings never change the exit code, but \
+         this is an error: it must be fixed before the program can be checked or built.",
+        Some("// needs #![feature(closures)]\nlet f = |x: i64| x + 1"),
+    ),
+    e(
+        "E0155",
+        "Malformed, misplaced, unknown, duplicate or removed feature name",
+        "A feature gate is one exact, case-sensitive identifier from the reserved list. This name is \
+         unknown, written twice, or has been removed from the language. A removed name stays \
+         reserved forever so it is never silently reused. Gates are crate-level inner attributes: \
+         `#![feature(name)]` belongs at the top of the crate root, not inside a module or an item. \
+         This error wins over `E0154`, so fix the attribute before reading any gate errors on syntax.",
+        Some("#![feature(closures)]   // at the crate root, before any item"),
+    ),
+    e(
+        "E0156",
+        "A feature attribute or gated syntax on a stable compiler",
+        "This gate names a feature that has been reserved for a future version but has no syntax in \
+         the compiler yet. The attribute is accepted as a spelling so that source written today does \
+         not change meaning when the feature lands, but a build cannot promise anything about \
+         syntax that does not exist. Remove the gate until the feature is implemented, or use the \
+         matching nightly channel if one is available.",
+        Some("#![feature(gui)]   // reserved, gates no syntax yet"),
+    ),
+    e(
+        "E0157",
+        "variadic float arguments unsupported",
+        "A variadic `extern \"C\"` function accepts trailing integer and pointer arguments through \
+         its `...`, but a floating-point argument would have to be counted in `%al`, the number of \
+         vector registers used by the call. UMAY emits `%al = 0` for every external call, which is \
+         correct only while no float is passed. Rather than silently miscompile, the call is \
+         rejected. Declare the float as a named, fixed parameter of a non-variadic function, or \
+         pass an integer or pointer through `...`.",
+        Some("extern \"C\" {\n    fn log(fmt: *const u8, ...) -> i32\n}\nlog(fmt, 1)    // ok\nlog(fmt, 1.5)  // E0157"),
+    ),
     e("E0160", "expected a type after `impl`", "An impl block is `impl Type { ... }` or `impl Trait for Type { ... }`.", None),
     e("E0161", "unexpected end of file in an impl body", "The impl body was opened with `{` but never closed.", None),
     e("E0162", "expected `fn` in an impl body", "Impl blocks contain function definitions.", None),
@@ -395,6 +473,61 @@ pub static EXPLAIN: &[ExplainEntry] = &[
          visibility rather than an unknown name.",
         Some("mod util;\nfn main() { util::helper() }   // helper must be `pub fn` in util.um"),
     ),
+    e(
+        "E1019",
+        "closure parameter type cannot be inferred",
+        "A closure parameter without an annotation takes its type from the surrounding context: the \
+         compiler must know the closure is being used where a `fn(A) -> B` value is expected before \
+         it can give the parameter a type. When no such context exists the type has nothing to flow \
+         from and cannot be resolved. Annotate the parameter directly, as in `|x: i64| ...`, or bind \
+         the closure to a variable with an explicit `fn(A) -> B` type.",
+        Some("let f = |x: i64| x + 1\n// or: let f: fn(i64) -> i64 = |x| x + 1"),
+    ),
+    e(
+        "E1020",
+        "mutable closure captures are not supported yet",
+        "The first v2 slice cannot lower a closure that mutates a value it captured from its \
+         environment. This is a documented limitation of the current compiler, not a miscompile: the \
+         construct is refused rather than generated incorrectly. Capture the value by value instead \
+         of by mutable reference, or write a named function that takes the state as a parameter.",
+        Some("// instead of mutating a captured `count`:\nfn step(count: i64) -> i64 { count + 1 }"),
+    ),
+    e(
+        "E1021",
+        "closures are not supported in this position",
+        "Lowering a closure needs a function body for the compiler to turn it into. In a position \
+         where no body exists, such as a const initializer, there is nowhere to emit the closure's \
+         code, so it is rejected. Use a named function or a plain value in this position.",
+        None,
+    ),
+    e(
+        "E1022",
+        "unknown trait in a `dyn` bound",
+        "A `dyn` bound must name a trait that has been declared and is in scope. No trait with \
+         this name exists, so the compiler cannot build a vtable for the object. Check the \
+         spelling and any `use` needed to bring the trait into scope.",
+        Some("trait Draw { fn draw(&self) }\nfn f(d: &dyn Draw) { }   // not: &dyn Draww"),
+    ),
+    e(
+        "E1023",
+        "trait method is not object-safe",
+        "A `dyn Trait` value calls methods through a vtable with one fixed function pointer per \
+         method. A method with generic type parameters would need a separate slot for each \
+         instantiation, a method returning `Self` would have to name the concrete type hidden \
+         behind the object, and associated items (in particular generic associated types) are \
+         out of v2 scope (ADR 0018 §6). Such methods are rejected rather than miscompiled. Remove \
+         the generics, return a boxed value, or use `impl Trait` for static dispatch.",
+        Some("// not dyn-compatible:\ntrait Clone2 { fn duplicate(&self) -> Self }\n// use a boxed return or `impl Trait` instead"),
+    ),
+    e(
+        "E1024",
+        "a `dyn` bound has more than one trait",
+        "A trait object is a data pointer plus a single vtable pointer, so v2 allows one principal \
+         trait per object. Combine the traits into one trait (for example with a supertrait) and \
+         use `dyn Combined`, or use `impl Trait` when static dispatch is acceptable. Auto traits \
+         such as `Send` and `Sync` add no vtable methods and do not count toward the limit.",
+        Some("trait Base {}\ntrait Combined: Base {}\nfn f(x: &dyn Combined) { }   // not: &dyn Base + Combined"),
+    ),
     // ---- ownership and borrowing ------------------------------------------
     e(
         "E0201",
@@ -593,6 +726,15 @@ pub static EXPLAIN: &[ExplainEntry] = &[
          reported as a warning rather than silently ignored so that builds behave predictably across \
          compiler versions.",
         None,
+    ),
+    e(
+        "W0011",
+        "Gate written for a stabilized feature",
+        "The syntax behind this gate is now stable, so the gate is inert: the program builds the same \
+         way with or without it. The attribute is still accepted for one minor spec version so that \
+         downstream crates can delete it without a flag day. Remove the gate to silence this warning; \
+         warnings never change the exit code.",
+        Some("// #![feature(name)]   // inert, remove it"),
     ),
 ];
 

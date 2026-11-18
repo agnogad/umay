@@ -91,7 +91,18 @@ impl FnChecker<'_, '_> {
                 HirExpr { kind: HirExprKind::Sizeof { of }, ty: usize_ty, span }
             }
             ast::ExprKind::Cast { expr, ty } => self.check_cast(expr, ty, span),
-            ast::ExprKind::Call { callee, args, .. } => self.check_call(callee, args, span, hint),
+            ast::ExprKind::Call { callee, args, .. } => {
+                // `block_on(future)` is a compiler-provided bridge (ADR 0019 §8),
+                // not a name resolved from the prelude. Intercept it here so a
+                // generated async state is driven by its concrete helper without
+                // needing a generic stdlib declaration. Other `block_on` calls
+                // fall through to the ordinary call rules.
+                if let Some(e) = self.try_block_on_call(callee, args, span) {
+                    return e;
+                }
+                self.check_call(callee, args, span, hint)
+            }
+            ast::ExprKind::Await { base, .. } => self.check_await(base, span),
             ast::ExprKind::MethodCall { receiver, method, method_span, args } => {
                 self.check_method_call(receiver, method, *method_span, args, span, hint)
             }
@@ -155,6 +166,9 @@ impl FnChecker<'_, '_> {
                 self.unsafe_depth -= 1;
                 let ty = self.block_ty(&block);
                 HirExpr { kind: HirExprKind::Unsafe(block), ty, span }
+            }
+            ast::ExprKind::Closure { params, body, .. } => {
+                self.check_closure(params, body, hint, span)
             }
             ast::ExprKind::Range { .. } => {
                 self.push(

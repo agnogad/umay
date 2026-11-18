@@ -1,0 +1,9 @@
+error[E1022]: unknown trait `NoSuchTrait` in `dyn` bound
+   --> dyn_unknown_trait.um:1:10
+   |
+ 1 | fn f(s: &dyn NoSuchTrait) { }
+   |          ^^^^^^^^^^^^^^^
+ 2 |
+  = cause: no trait with this name is in scope
+
+dyn_unknown_trait.um: 1 error(s), 0 warning(s)

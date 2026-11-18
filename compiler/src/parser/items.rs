@@ -2,6 +2,7 @@
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
+use crate::source::Span;
 use crate::token::{Keyword, TokenKind};
 
 use super::Parser;
@@ -9,8 +10,26 @@ use super::Parser;
 impl Parser {
     pub fn parse_program(&mut self) -> Program {
         let start = self.span();
+        let mut features = Vec::new();
+        // Crate-level inner attributes must precede every item. Several
+        // `#![feature(...)]` attributes, and several names in each, are one
+        // enabled set; each name is stored separately so a gate diagnostic can
+        // point at the exact spelling.
+        while self.at(&TokenKind::Hash) && self.nth_kind(1) == &TokenKind::Bang {
+            match self.parse_feature_attr() {
+                Some(list) => features.extend(list),
+                None => continue, // the malformed attribute still consumed its `#!`
+            }
+        }
         let mut items = Vec::new();
-        while !self.at_eof() {
+        loop {
+            if self.at_eof() && self.pending_items.is_empty() {
+                break;
+            }
+            if !self.pending_items.is_empty() {
+                items.append(&mut self.pending_items);
+                continue;
+            }
             match self.parse_item() {
                 Some(item) => items.push(item),
                 None => {
@@ -19,14 +38,143 @@ impl Parser {
             }
         }
         let end = self.prev_span();
-        Program { items, span: start.to(end) }
+        Program { items, features, span: start.to(end) }
+    }
+
+    /// Parses one `#![feature(name, ...)]` at the crate root.
+    ///
+    /// Malformed input produces a diagnostic and consumes up to the next `]`
+    /// (or item boundary), so a missing bracket never desynchronises the item
+    /// loop. Unknown names are deliberately *not* validated here: gate
+    /// enforcement is a later pass and owns the `E0154`/`E0155`/`E0156` rules.
+    fn parse_feature_attr(&mut self) -> Option<Vec<FeatureAttr>> {
+        let hash = self.advance(); // #
+        self.advance(); // !
+        let start = hash.span;
+        if !self.eat(&TokenKind::LBracket) {
+            self.diagnostics.push(
+                Diagnostic::error("E0120", "expected `[` after `#!`")
+                    .at(self.span())
+                    .with_cause("a crate-level attribute is written `#![feature(name)]`"),
+            );
+            self.skip_inner_attr();
+            return None;
+        }
+        let (_name, _name_span) = match self.expect_ident("E0121", "for the inner attribute") {
+            Some(v) => v,
+            None => {
+                self.skip_inner_attr();
+                return None;
+            }
+        };
+        if !self.eat(&TokenKind::LParen) {
+            self.diagnostics.push(
+                Diagnostic::error("E0123", "expected `(` after `feature`")
+                    .at(self.span())
+                    .with_cause("write the gate name as `#![feature(name)]`"),
+            );
+            self.skip_inner_attr();
+            return None;
+        }
+        let mut out = Vec::new();
+        while !self.at(&TokenKind::RParen) {
+            if self.at_eof() || self.at(&TokenKind::RBracket) || self.at(&TokenKind::LBrace) {
+                break;
+            }
+            match self.expect_ident("E0121", "for a feature name") {
+                Some((fname, fspan)) => out.push(FeatureAttr {
+                    name: fname,
+                    name_span: fspan,
+                    span: start.to(fspan),
+                }),
+                None => break,
+            }
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenKind::RParen, "E0123", "feature name list");
+        if self.eat(&TokenKind::RBracket) {
+            let end = self.prev_span();
+            for f in &mut out {
+                f.span = start.to(end);
+            }
+        } else {
+            self.diagnostics.push(
+                Diagnostic::error("E0124", "malformed inner attribute: expected `]`")
+                    .at(self.span())
+                    .with_cause("the feature attribute was not closed with `]`"),
+            );
+            self.skip_inner_attr();
+        }
+        // An attribute with no names still parsed; nothing to enable.
+        Some(out)
+    }
+
+    /// Recovers from a broken `#![...]` by advancing to the next closing `]`,
+    /// `}` or EOF, whichever comes first.
+    fn skip_inner_attr(&mut self) {
+        while !self.at_eof() {
+            if self.at(&TokenKind::RBracket) {
+                self.advance();
+                return;
+            }
+            // Do not swallow the next attribute or item while looking for this
+            // one's `]`.
+            if self.at(&TokenKind::RBrace) || self.at(&TokenKind::LBrace) || self.at(&TokenKind::Hash) {
+                return;
+            }
+            if matches!(
+                self.kind(),
+                TokenKind::Keyword(
+                    Keyword::Fn
+                        | Keyword::Struct
+                        | Keyword::Enum
+                        | Keyword::Trait
+                        | Keyword::Impl
+                        | Keyword::Const
+                        | Keyword::Use
+                        | Keyword::Mod
+                        | Keyword::Type
+                        | Keyword::Extern
+                )
+            ) {
+                return;
+            }
+            self.advance();
+        }
+    }
+
+    /// Consumes a contextual `async` when it is immediately followed by `fn`.
+    ///
+    /// `async` is deliberately *not* in [`Keyword`]: every other use of it stays
+    /// an ordinary identifier, so v1 programs like `let async = 1` keep working.
+    fn eat_contextual_async(&mut self) -> bool {
+        if matches!(self.kind(), TokenKind::Ident(s) if s == "async")
+            && matches!(self.nth_kind(1), TokenKind::Keyword(Keyword::Fn))
+        {
+            self.advance();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn parse_item(&mut self) -> Option<Item> {
         let start = self.span();
-        // Attributes.
+        // Attributes. An inner `#![...]` is only legal at the crate root, where
+        // `parse_program` consumes it before reaching this loop.
         let mut attrs = Vec::new();
         while self.at(&TokenKind::Hash) {
+            if self.nth_kind(1) == &TokenKind::Bang {
+                self.error(
+                    "E0100",
+                    "an inner attribute is only allowed at the crate root",
+                    self.span(),
+                );
+                self.parse_feature_attr();
+                continue;
+            }
             match self.parse_attribute() {
                 Some(a) => attrs.push(a),
                 None => break,
@@ -45,6 +193,34 @@ impl Parser {
             None
         };
         let is_extern = extern_span.is_some();
+
+        // An ABI string may precede either a grouped block or a single
+        // declaration: `extern "C" { ... }` and `extern "C" fn f();`.
+        let abi_name = if is_extern {
+            if let TokenKind::Str(s) = self.kind().clone() {
+                let next_is_block = self.nth_kind(1) == &TokenKind::LBrace;
+                let next_is_fn = matches!(self.nth_kind(1), TokenKind::Keyword(Keyword::Fn));
+                if next_is_block || next_is_fn {
+                    self.advance();
+                    Some(s)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // v2 `extern "C" { ... }` (the ABI may be omitted, defaulting to "C").
+        // The block expands to several ordinary items; only the first is
+        // returned, the rest wait in `pending_items` for the item loop.
+        if is_extern && self.at(&TokenKind::LBrace) {
+            return self.parse_extern_block(extern_span, abi_name.unwrap_or_else(|| "C".into()), attrs, pub_keyword);
+        }
+
+        let is_async = self.eat_contextual_async();
 
         let item = match self.kind().clone() {
             TokenKind::Keyword(Keyword::Fn) => {
@@ -66,8 +242,9 @@ impl Parser {
                 } else {
                     None
                 };
-                let mut f = self.parse_fn_body(false)?;
+                let mut f = self.parse_fn_body(false, is_extern)?;
                 f.is_extern = is_extern;
+                f.is_async = is_async;
                 f.fn_span = fn_span;
                 f.extern_span = extern_span;
                 if let Some((symbol, span)) = link_name.clone() {
@@ -137,6 +314,13 @@ impl Parser {
         let mut item = item;
         // Attach attributes/visibility to the item that supports them.
         apply_attrs(&mut item, attrs, pub_keyword, self);
+        if let (Item::Fn(f), Some(abi)) = (&mut item, abi_name) {
+            f.attrs.push(Attribute {
+                name: "abi".into(),
+                args: vec![abi],
+                span: start,
+            });
+        }
         let _ = start;
         Some(item)
     }
@@ -188,17 +372,125 @@ impl Parser {
         Some(Attribute { name, args, span: start.to(end) })
     }
 
+    // ---- extern blocks -----------------------------------------------------
+
+    /// Parses the body of `extern "abi" { ... }` into ordinary items.
+    ///
+    /// `parse_item` returns one item, so the first declaration is returned and
+    /// the rest are queued on the parser for the enclosing item loop.
+    fn parse_extern_block(
+        &mut self,
+        extern_span: Option<Span>,
+        abi: String,
+        attrs: Vec<Attribute>,
+        pub_keyword: bool,
+    ) -> Option<Item> {
+        self.expect(TokenKind::LBrace, "E0110", "extern block");
+        let mut decls = Vec::new();
+        while !self.at(&TokenKind::RBrace) {
+            if self.at_eof() {
+                self.error("E0110", "unterminated extern block", self.span());
+                break;
+            }
+            match self.parse_extern_item(&abi, extern_span, &attrs, pub_keyword) {
+                Some(item) => decls.push(item),
+                None => self.recover_item_in_body(),
+            }
+        }
+        self.expect(TokenKind::RBrace, "E0110", "extern block");
+        if decls.is_empty() {
+            return None;
+        }
+        let first = decls.remove(0);
+        self.pending_items.extend(decls);
+        Some(first)
+    }
+
+    /// One declaration inside an extern block, mapped onto an existing item.
+    fn parse_extern_item(
+        &mut self,
+        abi: &str,
+        extern_span: Option<Span>,
+        attrs: &[Attribute],
+        pub_keyword: bool,
+    ) -> Option<Item> {
+        let start = self.span();
+        match self.kind().clone() {
+            TokenKind::Keyword(Keyword::Fn) => {
+                let fn_span = self.span();
+                self.advance();
+                let mut f = self.parse_fn_body(false, true)?;
+                f.is_extern = true;
+                f.fn_span = fn_span;
+                f.extern_span = extern_span;
+                f.is_pub = pub_keyword;
+                f.attrs.extend(attrs.iter().cloned());
+                f.attrs.push(Attribute {
+                    name: "abi".into(),
+                    args: vec![abi.into()],
+                    span: start,
+                });
+                Some(Item::Fn(f))
+            }
+            TokenKind::Keyword(Keyword::Type) => {
+                self.advance();
+                let (name, name_span) = self.expect_ident("E0195", "after `type` in an extern block")?;
+                self.eat_semi();
+                let end = self.prev_span();
+                // v1 has no opaque-type item. A fieldless struct is the
+                // smallest existing representation that analysis registers as a
+                // named type, which is all a pointer to it needs.
+                Some(Item::Struct(StructDecl {
+                    name,
+                    name_span,
+                    generics: Vec::new(),
+                    fields: Vec::new(),
+                    attrs: attrs.to_vec(),
+                    is_pub: pub_keyword,
+                    span: name_span.to(end),
+                }))
+            }
+            TokenKind::Keyword(Keyword::Static) => {
+                self.advance();
+                self.eat_keyword(Keyword::Mut);
+                let _ = self.expect_ident("E0110", "after `extern static`");
+                if self.eat(&TokenKind::Colon) {
+                    let _ = self.parse_type();
+                }
+                self.eat_semi();
+                self.error("E0110", "`extern static` declarations are not supported yet", start);
+                None
+            }
+            other => {
+                self.error("E0110", format!("unexpected {} in extern block", other.describe()), self.span());
+                None
+            }
+        }
+    }
+
     // ---- functions ---------------------------------------------------------
 
     /// Parses `name<...>(params) -> Ret { body }` after `fn` is consumed.
-    fn parse_fn_body(&mut self, method: bool) -> Option<FnDecl> {
+    fn parse_fn_body(&mut self, method: bool, allow_variadic: bool) -> Option<FnDecl> {
         let (name, name_span) = self.expect_ident("E0110", "after `fn`")?;
         let generics = self.parse_generic_params();
         let mut self_param = None;
         let mut params = Vec::new();
+        let mut variadic = false;
         if self.eat(&TokenKind::LParen) {
             if !self.at(&TokenKind::RParen) {
                 loop {
+                    // `...` lexes as `..` + `.`. It is terminal in an extern
+                    // declaration and needs at least one fixed parameter.
+                    if allow_variadic
+                        && self.at(&TokenKind::DotDot)
+                        && self.nth_kind(1) == &TokenKind::Dot
+                    {
+                        self.advance();
+                        self.advance();
+                        variadic = true;
+                        break;
+                    }
                     if self.at_keyword(Keyword::SelfValue) && self.nth_kind(1) == &TokenKind::RParen || self.at_keyword(Keyword::SelfValue) && self.nth_kind(1) == &TokenKind::Comma {
                         // `self`, `&self`, `&mut self`
                         let sp = self.span();
@@ -244,6 +536,10 @@ impl Parser {
             None
         };
         let end = if body.is_some() { self.prev_span() } else { self.span() };
+        let mut attrs = Vec::new();
+        if variadic {
+            attrs.push(Attribute { name: "variadic".into(), args: Vec::new(), span: name_span });
+        }
         Some(FnDecl {
             name,
             name_span,
@@ -252,9 +548,10 @@ impl Parser {
             self_param,
             ret,
             body,
-            attrs: Vec::new(),
+            attrs,
             is_extern: false,
             is_pub: false, // free functions are set by `apply_attrs`, methods by the impl parser
+            is_async: false, // set by the caller when a contextual `async` preceded `fn`
             link_name: None,
             link_name_span: None,
             fn_span: name_span,
@@ -453,11 +750,13 @@ impl Parser {
                 // A method may carry a visibility and attributes, the same as a
                 // free function.
                 let is_pub = self.skip_method_decorations();
+                let is_async = self.eat_contextual_async();
                 if self.at_keyword(Keyword::Fn) {
                     self.advance();
-                    match self.parse_fn_body(true) {
+                    match self.parse_fn_body(true, false) {
                         Some(mut f) => {
                             f.is_pub = is_pub;
+                            f.is_async = is_async;
                             methods.push(f);
                         }
                         None => break,
@@ -502,11 +801,13 @@ impl Parser {
                 // where a method is normally written `pub`, that made the
                 // ordinary way to write an `impl` unusable.
                 let is_pub = self.skip_method_decorations();
+                let is_async = self.eat_contextual_async();
                 if self.at_keyword(Keyword::Fn) {
                     self.advance();
-                    match self.parse_fn_body(true) {
+                    match self.parse_fn_body(true, false) {
                         Some(mut f) => {
                             f.is_pub = is_pub;
+                            f.is_async = is_async;
                             methods.push(f);
                         }
                         None => break,
@@ -565,7 +866,7 @@ impl Parser {
                     break;
                 }
                 match self.expect_ident("E0181", "in `use` list") {
-                    Some((name, sp)) => segs.push(PathSegment { name, span: sp, args: Vec::new() }),
+                    Some((name, sp)) => segs.push(PathSegment { name, span: sp, args: Vec::new(), bindings: Vec::new() }),
                     None => break,
                 }
                 if !self.eat(&TokenKind::Comma) {
@@ -590,8 +891,12 @@ impl Parser {
         if self.at(&TokenKind::LBrace) {
             self.advance();
             let mut list = Vec::new();
-            while !self.at(&TokenKind::RBrace) {
-                if self.at_eof() {
+            loop {
+                if !self.pending_items.is_empty() {
+                    list.append(&mut self.pending_items);
+                    continue;
+                }
+                if self.at(&TokenKind::RBrace) || self.at_eof() {
                     break;
                 }
                 match self.parse_item() {
@@ -749,6 +1054,39 @@ impl Parser {
         t
     }
 
+    /// Parses the contents of the `<…>` after a path segment name. The caller has
+    /// already consumed `<` and split any `>>`. Each entry is either a type
+    /// argument (`i64`) or an associated-type binding (`Item = u8`); both are
+    /// kept so neither is silently dropped.
+    fn parse_generic_args(&mut self, err_code: &'static str) -> (Vec<TypeExpr>, Vec<AssocTypeBinding>) {
+        let mut args = Vec::new();
+        let mut bindings = Vec::new();
+        while !self.at(&TokenKind::Gt) {
+            if self.at_eof() {
+                break;
+            }
+            if let TokenKind::Ident(name) = self.kind().clone() {
+                if self.nth_kind(1) == &TokenKind::Eq {
+                    let name_span = self.advance().span;
+                    self.advance(); // `=`
+                    let ty = self.parse_type();
+                    let span = name_span.to(ty.span());
+                    bindings.push(AssocTypeBinding { name, name_span, ty, span });
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            args.push(self.parse_type());
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenKind::Gt, err_code, "generic arguments");
+        (args, bindings)
+    }
+
     fn parse_type_path(&mut self) -> TypeExpr {
         let start = self.span();
         // Leading '::'
@@ -776,21 +1114,13 @@ impl Parser {
                 }
             };
             let mut args = Vec::new();
+            let mut bindings = Vec::new();
             if self.at(&TokenKind::Lt) {
                 self.advance();
                 self.split_closing_angles();
-        while !self.at(&TokenKind::Gt) {
-                    if self.at_eof() {
-                        break;
-                    }
-                    args.push(self.parse_type());
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
-                }
-                self.expect(TokenKind::Gt, "E0226", "generic arguments");
+                (args, bindings) = self.parse_generic_args("E0226");
             }
-            segments.push(PathSegment { name, span: sp, args });
+            segments.push(PathSegment { name, span: sp, args, bindings });
             if self.eat(&TokenKind::ColonColon) {
                 continue;
             }
@@ -814,21 +1144,13 @@ impl Parser {
                 _ => break,
             };
             let mut args = Vec::new();
+            let mut bindings = Vec::new();
             if self.at(&TokenKind::Lt) {
                 self.advance();
                 self.split_closing_angles();
-        while !self.at(&TokenKind::Gt) {
-                    if self.at_eof() {
-                        break;
-                    }
-                    args.push(self.parse_type());
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
-                }
-                self.expect(TokenKind::Gt, "E0230", "generic arguments");
+                (args, bindings) = self.parse_generic_args("E0230");
             }
-            segments.push(PathSegment { name, span: sp, args });
+            segments.push(PathSegment { name, span: sp, args, bindings });
             if self.eat(&TokenKind::ColonColon) {
                 continue;
             }
@@ -843,12 +1165,22 @@ impl Parser {
     }
 }
 
+/// A `derive` with only implemented traits is a real attribute, not a stub.
+/// Only `Copy` has semantic effect today; there are no `Send`/`Sync` traits in
+/// the UMAY source language, so they are deliberately not recognised here.
+fn recognized_derive(attr: &Attribute) -> bool {
+    attr.name == "derive" && !attr.args.is_empty() && attr.args.iter().all(|a| a == "Copy")
+}
+
 /// Attaches attributes and visibility onto an item. Visibility is kept so that
 /// semantic analysis can refuse a cross-module reference to a private item.
 fn apply_attrs(item: &mut Item, attrs: Vec<Attribute>, pub_keyword: bool, p: &mut Parser) {
-    // Phase 1 recognises attribute syntax but implements no attributes yet.
-    // Reporting W0010 keeps builds honest instead of silently dropping them.
+    // Implemented attributes are silent; everything else still warns so builds
+    // stay honest instead of silently dropping unknown attributes.
     for attr in &attrs {
+        if recognized_derive(attr) {
+            continue;
+        }
         p.diagnostics.push(
             Diagnostic::warning(
                 "W0010",

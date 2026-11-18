@@ -1,0 +1,4 @@
+trait Cloner {
+    fn duplicate(&self) -> Self
+}
+fn f(s: &dyn Cloner) { }

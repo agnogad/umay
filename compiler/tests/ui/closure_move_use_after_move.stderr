@@ -1,0 +1,12 @@
+error[E0201]: `p` is used here, after it was moved
+   --> closure_move_use_after_move.um:5:5
+   |
+ 4 |     let f = move || p.x
+ 5 |     let q = p
+   |     ^^^^^^^^^
+ 6 |     let _ = f
+  = cause: moving a value of a non-Copy type leaves the original unusable
+  = help: borrow `p` instead of moving it, or clone it (the replacement depends on what you meant to do)
+       closure_move_use_after_move.um:5:5  let q = p ->
+
+closure_move_use_after_move.um: 1 error(s), 0 warning(s)

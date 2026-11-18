@@ -53,6 +53,14 @@ target = "x86_64-linux"      # target triple: x86_64-linux, x86_64-macos
 
 [dependencies]
 # name = "1.0.0" or { path = "../lib", version = "1.0.0" }
+
+[mobile]                          # Phase 6; every key is optional
+app-id = "com.example.my-project" # reverse-DNS bundle id (lowercase, has a dot, no spaces)
+display-name = "My Project"       # human-readable app name
+target = "aarch64-apple-ios"      # target triple (see ADR 0021)
+permissions = ["camera", "android.permission.INTERNET"]
+assets = ["assets/icon.png"]      # bundle paths, relative to the project
+orientation = "portrait"          # portrait | landscape | any
 ```
 
 Validation rules (implemented gradually, all of them errors):
@@ -61,6 +69,17 @@ Validation rules (implemented gradually, all of them errors):
 - `name` must be a valid identifier package name.
 - `version` must parse as semver.
 - `edition` must be a known edition.
+- `app-id`, when present and non-empty, must be reverse-DNS-like: lowercase, at
+  least one dot, no spaces and no empty components.
+- `orientation`, when present, must be `portrait`, `landscape` or `any`.
+- `permissions` entries may not contain path separators (`/` or `\`) or whitespace.
+- `assets` entries must be relative to the project: no absolute paths and no `..`.
+
+All `[mobile]` fields are optional. A v1 manifest without `[mobile]` stays valid,
+and an empty `[mobile]` section emits no TOML on round-trip. This slice is
+**configuration only**: the manifest records the declared app metadata, but there
+is no code signing, Gradle/Xcode project generation or IPA/AAB packaging yet
+(see [ADR 0021](adr/0021-mobile-strategy.md)).
 
 ## 4. Cache location
 

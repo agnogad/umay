@@ -1,0 +1,72 @@
+// Async core types (ADR 0019), runtime-agnostic: no I/O, no timers, no executor.
+//
+// ADR 0019 writes `trait Future { type Output; ... }`. UMAY traits cannot
+// declare associated types, and `Self` in type position resolves to Error, so
+// that spelling cannot be written today. The output type is a generic parameter
+// instead, the same way `stdlib/iter.um` spells `Iterator<T>`. A consequence: a
+// generic `block_on`/`poll_ready` cannot name the output type through today's
+// trait method resolution, so `block_on` is compiler-generated per concrete
+// future type when async lowering lands (ADR 0019 section 1).
+
+// One poll step: either the value is ready, or it is not yet.
+enum Poll<T> {
+    Ready(T),
+    Pending,
+}
+
+// The handle a task hands back to the reactor so it can be rescheduled.
+//
+// `wake` is the address of a `fn(*mut u8)` stored as a byte pointer, the way
+// `stdlib/thread.um` stores call targets. `data` is the caller's opaque word.
+struct Waker {
+    wake: *const u8,
+    data: *mut u8,
+}
+
+// What `poll` receives: the waker it may save for later notification.
+struct Context {
+    waker: Waker,
+}
+
+// A future producing a `T`. Generic parameter, not an associated type: see the
+// note at the top of this file.
+trait Future<T> {
+    fn poll(&mut self, cx: &mut Context) -> Poll<T>
+}
+
+// A waker that does nothing. Stored as a byte pointer in `Waker`, the same way
+// function addresses are stored in `stdlib/thread.um`.
+fn noop_wake(_data: *mut u8) {}
+
+// A context carrying the no-op waker and a null data pointer.
+fn make_context() -> Context {
+    return Context {
+        waker: Waker {
+            wake: unsafe { noop_wake as *const u8 },
+            data: unsafe { 0usize as *mut u8 },
+        },
+    }
+}
+
+// A future that yields `Pending` exactly once, then `Ready(7)`.
+//
+// Pure stdlib UMAY: no compiler magic. The compiler's `block_on` path for
+// concrete user Futures (see `compiler/src/sema/async_lower.rs`) calls this
+// type's concrete `poll` in a bounded busy-poll loop, so the mutated `done`
+// flag is what makes the second call return `Ready`.
+//
+// ponytail ceiling: the busy-poll loop has no waker wake and no reactor; a
+// real async runtime would suspend here instead of re-polling immediately.
+struct PendingOnce {
+    done: bool,
+}
+
+impl Future<i64> for PendingOnce {
+    fn poll(&mut self, _cx: &mut Context) -> Poll<i64> {
+        if self.done {
+            return Poll::Ready(7i64)
+        }
+        self.done = true
+        return Poll::Pending
+    }
+}

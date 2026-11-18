@@ -614,7 +614,8 @@ fn unterminated_block_comment_reports_lex_error() {
 
 #[test]
 fn invalid_char_reports_lex_error() {
-    assert_codes("fn main() { let x = 1 $ 2 }\n", &["E0001"]);
+    // `$` is a valid token now (macro metavariables); use `~` as the invalid one.
+    assert_codes("fn main() { let x = 1 ~ 2 }\n", &["E0001"]);
 }
 
 #[test]
@@ -857,4 +858,97 @@ fn set(res: &mut i64, n: i64) {
 }
 "#,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Closures (v2 phase 1: AST + parser)
+// ---------------------------------------------------------------------------
+
+/// Initializer of the first `let` in the first function, for AST shape checks.
+fn first_let_init(src: &str) -> umayc::ast::Expr {
+    let (out, _) = parse_source("t.um", src);
+    let umayc::ast::Item::Fn(f) = &out.program.items[0] else {
+        panic!("expected a function")
+    };
+    let body = f.body.as_ref().expect("function has a body");
+    let umayc::ast::StmtKind::Let(l) = &body.stmts[0].kind else {
+        panic!("expected a let statement")
+    };
+    l.init.clone().expect("let has an initializer")
+}
+
+#[test]
+fn closures_with_varied_params_parse() {
+    assert_clean("fn f() { let c = || 1 }");
+    assert_clean("fn f() { let c = |x| x }");
+    assert_clean("fn f() { let c = |x, y| x + y }");
+    assert_clean("fn f() { let c = |x: i64| x }");
+    assert_clean("fn f() { let c = |x, y: i64| x }");
+    assert_clean("fn f() { let c = |x| { x } }");
+}
+
+#[test]
+fn move_closure_parses() {
+    assert_clean("fn f() { let c = move |x| x }");
+    assert_clean("fn f() { let c = move || 1 }");
+}
+
+#[test]
+fn closure_param_shapes() {
+    let e = first_let_init("fn f() { let c = |x, y: i64| x }");
+    let umayc::ast::ExprKind::Closure { params, .. } = &e.kind else {
+        panic!("expected a closure, got {e:?}")
+    };
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0].name, "x");
+    assert!(params[0].ty.is_none());
+    assert_eq!(params[1].name, "y");
+    assert!(params[1].ty.is_some());
+
+    let e = first_let_init("fn f() { let c = || 1 }");
+    let umayc::ast::ExprKind::Closure { params, .. } = &e.kind else {
+        panic!("expected a zero-param closure, got {e:?}")
+    };
+    assert!(params.is_empty());
+}
+
+#[test]
+fn move_closure_shape_wraps_the_closure() {
+    let e = first_let_init("fn f() { let c = move |x| x }");
+    let umayc::ast::ExprKind::Move(inner) = &e.kind else {
+        panic!("expected move, got {e:?}")
+    };
+    assert!(matches!(inner.kind, umayc::ast::ExprKind::Closure { .. }));
+}
+
+#[test]
+fn closure_body_extends_through_a_binary_operator() {
+    let e = first_let_init("fn f() { let c = |x| x + 1 }");
+    let umayc::ast::ExprKind::Closure { body, .. } = &e.kind else {
+        panic!("expected a closure, got {e:?}")
+    };
+    assert!(
+        matches!(body.kind, umayc::ast::ExprKind::Binary { .. }),
+        "body must be `x + 1`, got {body:?}"
+    );
+}
+
+#[test]
+fn bitwise_or_and_or_patterns_still_parse() {
+    assert_clean("fn f(a: i64, b: i64) -> i64 { return a | b }");
+    assert_clean("fn f(a: i64, b: i64) -> bool { return a || b }");
+    assert_clean(
+        "enum E { A, B }\nfn f(e: E) -> i64 { match e { E::A | E::B => 1 } }",
+    );
+}
+
+#[test]
+fn closure_parser_never_panics_on_truncated_input() {
+    let full = "fn main() { let c = move |x: i64, y| { x + y }; let z = || x | y }";
+    for i in 0..full.len() {
+        if !full.is_char_boundary(i) {
+            continue;
+        }
+        let _ = check_source("t.um", &full[..i]);
+    }
 }

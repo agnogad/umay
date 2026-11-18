@@ -1,0 +1,111 @@
+// Pure-UMAY JSON IPC codec for the mobile webview bridge (docs/v2/webview-decision.md).
+//
+// This file is SPLICED at crate root above the app body, the same way as
+// examples/v2/gui_core.um: no `extern`, no `#![feature]`, no `mod`. It assumes the
+// prelude is already in scope -- `json.um` (JsonOut, json_parse, json_get,
+// json_i64), `bytes.um` (Bytes), `string.um` (copy_bytes) and `prelude.um`
+// (write_byte). Everything it does is pure integer/boolean JSON, so it is fully
+// testable without a webview or any native shell.
+//
+// INTEGRITY OF THIS SLICE -- deliberate narrow version of the doc's envelope:
+// methods and events are INTEGER ids, not strings. Mapping names -> ids (the
+// per-window allowlist) is the host shell's job; this codec never sees a name.
+// Integers keep this file pure and deterministic. The full string-method
+// envelope from webview-decision.md section 2 lands when the webview shell does.
+//
+// ponytail: no string methods, no nested `params`/`result` objects, no `error`
+// object, and no native validation beyond the 1 MiB size cap. Upgrade path: all
+// of these belong in the full envelope that ships with the webview shell; until
+// then the host shell owns allowlists, schemas and error codes.
+
+// One decoded call. `-1` in any field means "missing or invalid" (the sentinel
+// the frozen interface asks for), so callers test for `-1` rather than 0.
+struct IpcRequest { id: i64, method: i64, arg: i64 }
+
+// One outbound reply. Kept as a named struct so the shared note core can build
+// a dispatch result without knowing how the JSON encoder lays out fields.
+struct IpcReply { id: i64, ok: bool, result: i64 }
+
+// 1 MiB inbound cap, from webview-decision.md section 4.
+// ponytail: size is the only native-side validation here; method allowlist,
+// params schema and the integer check on `id` stay in the host shell.
+const IPC_MAX_BYTES: usize = 1048576usize
+
+// Rejects empty and oversized messages before any parsing. Zero length and
+// anything past the cap are both refused.
+fn ipc_valid_size(len: usize) -> bool {
+    return len > 0usize && len <= IPC_MAX_BYTES
+}
+
+// An i64 field, or -1 when it is absent or not a JSON number. A bool or a string
+// is rejected rather than coerced, so "invalid" cannot look like a real id.
+fn ipc_i64_field(value: Json) -> i64 {
+    return match value {
+        Json::Number(text) => json_i64(Json::Number(text)),
+        _ => - 1i64,
+    }
+}
+
+// Parses an inbound call envelope `{"id":n,"method":n,"arg":n}` and returns its
+// three numeric fields. Unknown fields are skipped by `json_get`, so extra keys
+// are forward-compatible. A null pointer, an empty/oversized message or a
+// non-object document returns the all--1 sentinel. No panics: the JSON parser
+// reads through `Bytes`, which is bounds-safe.
+fn ipc_decode_request(text: *const u8, len: usize) -> IpcRequest {
+    let missing = IpcRequest { id: -1i64, method: -1i64, arg: -1i64 }
+    if !ipc_valid_size(len) {
+        return missing
+    }
+    if unsafe { text as usize } == 0 {
+        return missing
+    }
+    let doc = Bytes::view(text, len)
+    let body = match json_parse(&doc) {
+        Json::Object(fields) => fields,
+        _ => return missing,
+    }
+    let id = ipc_i64_field(json_get(&body, "id"))
+    let method = ipc_i64_field(json_get(&body, "method"))
+    let arg = ipc_i64_field(json_get(&body, "arg"))
+    return IpcRequest { id: id, method: method, arg: arg }
+}
+
+// Copies a JsonOut's finished bytes into `out`, writes the NUL terminator and
+// returns the byte length (excluding the NUL). `out` must have room for the
+// bytes plus one; all messages here are a few integers, far under the cap.
+// ponytail: no capacity argument, the caller owns the buffer. Add one when a
+// variable-length `result`/`error` string makes bounds a real concern.
+fn ipc_flush(j: JsonOut, out: *mut u8) -> usize {
+    let bytes = j.bytes()
+    let n = bytes.len
+    copy_bytes(bytes.data, out, n)
+    j.free()
+    unsafe { write_byte((out as usize + n) as *mut u8, 0u8) }
+    return n
+}
+
+// Encodes a reply. `ok:true` writes `{"id":n,"ok":true,"result":n}`; `ok:false`
+// forces `result:-1`, giving `{"id":n,"ok":false,"result":-1}`.
+// ponytail: the doc's error object `{"code":..,"message":".."}` has no field
+// here; an error is just ok:false + result:-1 until the full shell lands.
+fn ipc_encode_reply(id: i64, ok: bool, result: i64, out: *mut u8) -> usize {
+    let value = if ok { result } else { -1i64 }
+    let j = JsonOut::new().begin_object().key("id").int(id).key("ok").boolean(ok).key("result").int(value).end_object()
+    return ipc_flush(j, out)
+}
+
+// Encodes an out-of-band event `{"event":n,"arg":n}` (no id).
+// ponytail: the doc's event uses a string name and a nested `params` object;
+// both collapse to integers here, to be expanded when the webview shell lands.
+fn ipc_encode_event(event: i64, arg: i64, out: *mut u8) -> usize {
+    let j = JsonOut::new().begin_object().key("event").int(event).key("arg").int(arg).end_object()
+    return ipc_flush(j, out)
+}
+
+// Native-side monotonic counter: increments by one and returns the new id.
+// Wrapping at i64's edge is acceptable (ids only need to differ within a
+// connection's lifetime).
+fn ipc_next_id(state: &mut i64) -> i64 {
+    *state = *state + 1
+    return *state
+}

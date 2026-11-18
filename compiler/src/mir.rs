@@ -187,6 +187,10 @@ pub enum Constant {
     Unit,
     /// A function pointer.
     Fn(FnId),
+    /// The address of a statically emitted vtable in `.rodata`, named by its
+    /// index into the program's vtable table. Like `Str`, this names an address,
+    /// not a value read from one.
+    VTable(VTableId),
     /// A call to a library function whose symbol is known by name.
     ///
     /// A language-level construct that lowers to a call needs a callee, and a
@@ -203,6 +207,25 @@ pub enum Constant {
 /// Index into a program-wide string table.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
 pub struct StringId(pub u32);
+
+/// Index into a program-wide vtable table.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
+pub struct VTableId(pub u32);
+
+/// A statically emitted dispatch table.
+#[derive(Debug, Clone)]
+pub struct VTable {
+    /// Size of the concrete object in bytes (prefix word 0).
+    pub size: u64,
+    /// Alignment of the concrete object in bytes (prefix word 1).
+    pub align: u64,
+    /// Deallocation shim for an owned object (prefix word 2), if one was
+    /// generated. Emitted as the same symbol a direct call would use.
+    pub drop: Option<FnId>,
+    /// Function pointers, in dispatch order starting at word 3. Each is emitted
+    /// as the very same symbol a direct call to that `FnId` uses.
+    pub entries: Vec<FnId>,
+}
 
 /// A computation that produces a value.
 #[derive(Debug, Clone, PartialEq)]
@@ -376,6 +399,8 @@ pub struct MirProgram {
     pub bodies: Vec<Body>,
     /// String literals, in a deterministic order.
     pub strings: Vec<String>,
+    /// Statically emitted vtables, in a deterministic order.
+    pub vtables: Vec<VTable>,
 }
 
 impl MirProgram {
@@ -392,7 +417,52 @@ impl MirProgram {
         StringId((self.strings.len() - 1) as u32)
     }
 
+    /// Interns a vtable by its whole layout, returning its table index.
+    ///
+    /// Two trait objects with the same prefix and method set share one table,
+    /// so emitting one `.quad` row per interned entry cannot duplicate a symbol.
+    pub fn intern_vtable(
+        &mut self,
+        size: u64,
+        align: u64,
+        drop: Option<FnId>,
+        entries: Vec<FnId>,
+    ) -> VTableId {
+        if let Some(i) = self.vtables.iter().position(|v| {
+            v.size == size && v.align == align && v.drop == drop && v.entries == entries
+        }) {
+            return VTableId(i as u32);
+        }
+        self.vtables.push(VTable { size, align, drop, entries });
+        VTableId((self.vtables.len() - 1) as u32)
+    }
+
     pub fn body_named(&self, name: &str) -> Option<&Body> {
         self.bodies.iter().find(|b| b.name == name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intern_vtable_deduplicates_identical_entries() {
+        let mut program = MirProgram::default();
+        let a = program.intern_vtable(8, 8, None, vec![FnId(1), FnId(2)]);
+        let b = program.intern_vtable(8, 8, None, vec![FnId(1), FnId(2)]);
+        assert_eq!(a, b);
+        assert_eq!(program.vtables.len(), 1);
+        assert_eq!(program.vtables[a.0 as usize].entries, vec![FnId(1), FnId(2)]);
+    }
+
+    #[test]
+    fn intern_vtable_keeps_distinct_tables_and_order() {
+        let mut program = MirProgram::default();
+        let a = program.intern_vtable(8, 8, None, vec![FnId(1), FnId(2)]);
+        let b = program.intern_vtable(8, 8, None, vec![FnId(2), FnId(1)]);
+        let c = program.intern_vtable(8, 8, None, vec![FnId(3)]);
+        assert_eq!((a.0, b.0, c.0), (0, 1, 2));
+        assert_eq!(program.vtables.len(), 3);
     }
 }

@@ -15,6 +15,8 @@ Usage:
     scripts/bench.py                 # run everything, print tables
     scripts/bench.py --json          # machine-readable
     scripts/bench.py --only compute  # one workload (substring match)
+    scripts/bench.py --baseline docs/measurements.baseline.json
+                                     # also print a ratio table vs a recording
 """
 
 import json
@@ -544,11 +546,83 @@ def last_integer(*texts):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Optional baseline comparison. ratios are portable across hosts; the warn /
+# hard-fail ratios mirror the budget in docs/v2/performance-budget.md (runtime
+# kernels +5/+10%, size and compile metrics +15/+30%).
+# ---------------------------------------------------------------------------
+
+BASELINE_METRICS = (
+    ("build_median_s", "build", 1.15, 1.30),
+    ("build_rss_kb", "bld RSS", 1.15, 1.30),
+    ("binary_bytes", "binary", 1.15, 1.30),
+    ("run_median_s", "run", 1.05, 1.10),
+    ("run_rss_kb", "run RSS", 1.15, 1.30),
+)
+
+
+def _fmt_metric(key, value):
+    return f"{value:.3f}s" if key.endswith("_s") else f"{value:.0f}"
+
+
+def compare_baseline(results, baseline, path):
+    """Print a current-vs-baseline ratio table; informational unless opted in."""
+    print(f"\n=== Baseline comparison: {path} ===")
+    print(f"  {'workload/lang':<20} {'metric':<9} {'current':>10} "
+          f"{'baseline':>10} {'ratio':>7}  status")
+    warns, hards = [], []
+    base_workloads = baseline.get("workloads", {})
+    for wname in sorted(results["workloads"]):
+        base_workload = base_workloads.get(wname, {})
+        for lang in sorted(results["workloads"][wname]):
+            cur = results["workloads"][wname][lang]
+            base = base_workload.get(lang, {})
+            if not base:
+                print(f"  {wname + '/' + lang:<20} {'(no baseline)':<9}")
+                continue
+            for key, label, warn, hard in BASELINE_METRICS:
+                a, b = cur.get(key), base.get(key)
+                if not a or not b:  # 0/None means the metric was not recorded
+                    continue
+                ratio = a / b
+                status = "OK"
+                if ratio > hard:
+                    status = "HARD-FAIL"
+                    hards.append(f"{wname}/{lang} {label} {ratio:.3f}x")
+                elif ratio > warn:
+                    status = "WARN"
+                    warns.append(f"{wname}/{lang} {label} {ratio:.3f}x")
+                print(f"  {wname + '/' + lang:<20} {label:<9} "
+                      f"{_fmt_metric(key, a):>10} {_fmt_metric(key, b):>10} "
+                      f"{ratio:>7.3f}  {status}")
+    for item in hards:
+        print(f"HARD-FAIL: {item}")
+    for item in warns:
+        print(f"WARN: {item}")
+    print(f"Baseline comparison: {len(warns)} WARN, {len(hards)} HARD-FAIL "
+          "(ratios; thresholds from performance-budget.md)")
+
+
 def main():
     json_out = "--json" in sys.argv
     only = None
     if "--only" in sys.argv:
         only = sys.argv[sys.argv.index("--only") + 1]
+
+    baseline_path = None
+    baseline = None
+    if "--baseline" in sys.argv:
+        i = sys.argv.index("--baseline")
+        if i + 1 >= len(sys.argv):
+            print("error: --baseline needs a path", file=sys.stderr)
+            return
+        baseline_path = sys.argv[i + 1]
+        try:
+            with open(baseline_path) as f:
+                baseline = json.load(f)
+        except (OSError, ValueError) as e:
+            print(f"error: cannot read baseline {baseline_path}: {e}", file=sys.stderr)
+            return
 
     results = {"toolchains": {}, "workloads": {}}
     for name, tool in [("umay", UMAY), ("rustc", "rustc"), ("gcc", "gcc"),
@@ -606,6 +680,8 @@ def main():
 
     if json_out:
         print(json.dumps(results, indent=2))
+        if baseline is not None:
+            compare_baseline(results, baseline, baseline_path)
         return
 
     print("\n=== Toolchains ===")
@@ -641,6 +717,9 @@ def main():
             print(f"  !! outputs differ across languages: {outputs}")
         elif outputs:
             print(f"  (all languages printed: {next(iter(outputs))})")
+
+    if baseline is not None:
+        compare_baseline(results, baseline, baseline_path)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,35 @@
+// Application body for the visible UMAY GUI demo.
+// Build: splice gtk_gen.um + stdlib/ipc.um + this file into one main.um.
+
+const VISIBLE_MS: i64 = 6000i64
+
+fn main() -> i32 {
+    unsafe { gtk_init(0 as *mut i32, 0 as *mut *mut *mut i8) }
+    let window = unsafe { gtk_window_new(0i32) }
+    unsafe { gtk_window_set_title(window, "UMAY Notlar" as *const u8 as *const i8) }
+    unsafe { gtk_window_set_default_size(window, 800i32, 620i32) }
+    let webview = unsafe { webkit_web_view_new() }
+    unsafe { gtk_container_add(window, webview) }
+
+    // Demo-only absolute asset path; a packaged app would resolve this from
+    // its bundle and go through the umay://app/ scheme handler.
+    let url = "file:///home/cachy/projects/umay/examples/v2/gui_app/app.html" as *const u8 as *const i8
+    unsafe { webkit_web_view_load_uri(webview, url) }
+    unsafe { gtk_widget_show_all(window) }
+
+    let started = monotonic_ms()
+    while monotonic_ms() - started < VISIBLE_MS {
+        if unsafe { gtk_events_pending() } != 0 {
+            let _pumped = unsafe { gtk_main_iteration() }
+        } else {
+            unsafe { usleep(20000u32) }
+        }
+    }
+
+    let out = alloc(256usize)
+    let n = ipc_encode_reply(7i64, true, 4i64, out)
+    println(out as *const u8)
+    dealloc(out)
+    unsafe { gtk_widget_destroy(window) }
+    return 0i32
+}

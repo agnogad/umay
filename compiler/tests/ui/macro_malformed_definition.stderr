@@ -1,0 +1,9 @@
+error[E0125]: malformed macro definition: unterminated expansion
+   --> macro_malformed_definition.um:1:1
+   |
+ 1 | macro_rules! broken { () => { 42
+   | ^^^^^^^^^^^
+ 2 |
+  = cause: malformed macro definition
+
+macro_malformed_definition.um: 1 error(s), 0 warning(s)

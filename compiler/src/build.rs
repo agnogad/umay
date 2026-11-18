@@ -54,6 +54,8 @@ pub enum Artifact {
     RuntimeAsm,
     /// The linked executable.
     LinkedExe,
+    /// The macro-expanded source text.
+    MacroExpansion,
 }
 
 impl Artifact {
@@ -62,6 +64,7 @@ impl Artifact {
             Artifact::ProgramAsm => "program.s",
             Artifact::RuntimeAsm => "runtime.s",
             Artifact::LinkedExe => "exe",
+            Artifact::MacroExpansion => "expand.um",
         }
     }
 }
@@ -138,6 +141,9 @@ impl CacheKey {
     }
 
     /// The inputs this key is derived from, for `umay doctor` to print.
+    ///
+    /// This lists input *categories*, not artifact tags. The concrete tags are
+    /// documented on the [`Artifact`] variants and in `Artifact::tag`.
     pub fn derivation() -> Vec<&'static str> {
         vec![
             "compiler version",
@@ -150,6 +156,21 @@ impl CacheKey {
             "named extra inputs (the runtime's source, for a link)",
         ]
     }
+}
+
+/// Cache key for the macro-expanded text of `source`.
+///
+/// Expansion does not depend on the optimisation level (it is the same source at
+/// every `-O`), so O0 is used as a fixed stand-in; the artifact tag keeps it in
+/// its own namespace, separate from assembly and executables.
+pub fn expansion_cache_key(source: &[u8]) -> CacheKey {
+    CacheKey::derive_for(
+        Artifact::MacroExpansion,
+        "O0",
+        source,
+        &[],
+        crate::target::Target::host(),
+    )
 }
 
 /// A fingerprint of the running compiler binary.
@@ -389,6 +410,17 @@ mod tests {
         let a = CacheKey::derive(Artifact::ProgramAsm, "O2", b"same", &[]);
         let b = CacheKey::derive(Artifact::RuntimeAsm, "O2", b"same", &[]);
         assert_ne!(a.hash, b.hash);
+    }
+
+    #[test]
+    fn expansion_cache_key_is_deterministic_and_source_sensitive() {
+        // Expansion is cached by its exact input bytes: the same source must
+        // reuse the entry, a different source must miss it.
+        let a = expansion_cache_key(b"macro_rules! answer { () => { 42 } }");
+        let b = expansion_cache_key(b"macro_rules! answer { () => { 42 } }");
+        assert_eq!(a.hash, b.hash, "the same bytes must give the same key");
+        let c = expansion_cache_key(b"fn main() {}");
+        assert_ne!(a.hash, c.hash, "different bytes must give a different key");
     }
 
     #[test]

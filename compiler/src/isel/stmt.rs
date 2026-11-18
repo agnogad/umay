@@ -603,7 +603,9 @@ impl<'a, 't> Isel<'a, 't> {
         // to a byte.
         let from_width = if matches!(
             operand,
-            Operand::Constant(Constant::Str(_)) | Operand::Constant(Constant::Fn(_))
+            Operand::Constant(Constant::Str(_))
+                | Operand::Constant(Constant::Fn(_))
+                | Operand::Constant(Constant::VTable(_))
         ) {
             RegWidth::W64
         } else {
@@ -651,8 +653,9 @@ impl<'a, 't> Isel<'a, 't> {
                 Constant::Bool(_) | Constant::Char(_) | Constant::Unit => self.width_probe_ty(c),
                 // A string literal becomes the address of its bytes, so it is a
                 // pointer for width purposes; treating it as `()` would truncate
-                // the address to a byte when it is cast.
-                Constant::Str(_) => self.types().cached_usize(),
+                // the address to a byte when it is cast. A vtable is an address
+                // for the same reason.
+                Constant::Str(_) | Constant::VTable(_) => self.types().cached_usize(),
                 _ => self.types().cached_unit(),
             },
         }
@@ -788,6 +791,8 @@ impl<'a, 't> Isel<'a, 't> {
                 Ok((0..len).map(|i| l.size * i).collect())
             }
             TyKind::Adt { def, args } => self.layouts.field_offsets(def, &args).map_err(|e| format!("{e:?}")),
+            // A trait object is two pointer words: data then vtable.
+            TyKind::DynTrait { .. } => Ok(vec![0, 8]),
             other => Err(format!("no fields for {other:?}")),
         }
     }
@@ -801,6 +806,11 @@ impl<'a, 't> Isel<'a, 't> {
                 .layouts
                 .struct_field_tys(def, &args)
                 .map_err(|e| format!("{e:?}")),
+            TyKind::DynTrait { .. } => {
+                let byte = self.types().cached_u8();
+                let ptr = self.layouts.types_mut().raw_ptr(byte);
+                Ok(vec![ptr, ptr])
+            }
             other => Err(format!("no fields for {other:?}")),
         }
     }

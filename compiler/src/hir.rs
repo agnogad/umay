@@ -187,6 +187,10 @@ pub struct HirFn {
     pub params: Vec<TyId>,
     /// Resolved return type. `()` when omitted.
     pub ret: TyId,
+    /// True for a `fn f(fixed..., ...) -> R` declared inside `extern "C"`.
+    /// Trailing variadic arguments have no declared type; sema rejects the
+    /// floating-point ones with E0157 while `%al` is emitted as 0.
+    pub variadic: bool,
     /// Whether this is a method (`self` receiver present).
     pub has_self: bool,
     pub self_mutable: bool,
@@ -195,6 +199,8 @@ pub struct HirFn {
     pub locals: Vec<LocalInfo>,
     pub body: Option<HirBlock>,
     pub is_pub: bool,
+    /// Whether the declaration was written `async fn`.
+    pub is_async: bool,
     /// The type a method belongs to, when it was declared in an `impl` block.
     ///
     /// Two types may each have a `read` method and a C library may export `read`
@@ -298,6 +304,8 @@ pub enum HirExprKind {
     Deref(Box<HirExpr>),
     /// `move expr`
     Move(Box<HirExpr>),
+    /// `expr.await` — lowered to a poll loop in a later phase.
+    Await { base: Box<HirExpr> },
     /// `expr as Ty`
     /// `sizeof(Type)` — the size of a type in bytes, known at compile time.
     Sizeof { of: TyId },
@@ -311,6 +319,13 @@ pub enum HirExprKind {
 
     // ---- calls & projections ----
     Call { callee: Box<HirExpr>, args: Vec<HirExpr> },
+    /// The address of a compiler-generated vtable static. A three-word prefix
+    /// (`size`, `align`, `drop`) precedes the method shims, each of which uses
+    /// the uniform `(data: *mut u8, args...) -> ret` ABI.
+    VTable { size: u64, align: u64, drop: Option<FnId>, entries: Vec<FnId> },
+    /// A `dyn Trait` fat pointer: the data pointer plus the vtable address.
+    /// Lowers to a two-element aggregate so no backend needs a new place kind.
+    DynCast { value: Box<HirExpr>, vtable: Box<HirExpr> },
     /// Struct literal, with generic args already substituted.
     StructLit { def: DefId, fields: Vec<HirFieldInit>, base: Option<Box<HirExpr>> },
     /// Tuple variant construction: `Some(1)`.
@@ -638,6 +653,7 @@ fn rewrite_expr(e: &mut HirExpr, map: &std::collections::HashMap<TyId, TyId>) {
         | HirExprKind::Deref(operand)
         | HirExprKind::Move(operand)
         | HirExprKind::Try(operand) => rewrite_expr(operand, map),
+        HirExprKind::Await { base } => rewrite_expr(base, map),
         HirExprKind::Binary { lhs, rhs, .. }
         | HirExprKind::Assign { place: lhs, value: rhs }
         | HirExprKind::AssignOp { place: lhs, value: rhs, .. } => {
@@ -664,6 +680,11 @@ fn rewrite_expr(e: &mut HirExpr, map: &std::collections::HashMap<TyId, TyId>) {
             for a in args {
                 rewrite_expr(a, map);
             }
+        }
+        HirExprKind::VTable { .. } => {}
+        HirExprKind::DynCast { value, vtable } => {
+            rewrite_expr(value, map);
+            rewrite_expr(vtable, map);
         }
         HirExprKind::StructLit { fields, base, .. } => {
             for f in fields {
@@ -788,6 +809,7 @@ pub fn child_exprs_mut(e: &mut HirExpr) -> Vec<&mut HirExpr> {
         HirExprKind::Deref(inner) | HirExprKind::Move(inner) | HirExprKind::Try(inner) => {
             out.push(inner)
         }
+        HirExprKind::Await { base } => out.push(base),
         HirExprKind::Cast { expr, .. } => out.push(expr),
         HirExprKind::PtrOffset { ptr, count } => {
             out.push(ptr);
@@ -798,6 +820,10 @@ pub fn child_exprs_mut(e: &mut HirExpr) -> Vec<&mut HirExpr> {
             for a in args.iter_mut() {
                 out.push(a);
             }
+        }
+        HirExprKind::DynCast { value, vtable } => {
+            out.push(value);
+            out.push(vtable);
         }
         HirExprKind::MethodCall { receiver, args, .. }
         | HirExprKind::TraitMethodCall { receiver, args, .. } => {
@@ -914,7 +940,8 @@ pub fn child_exprs(e: &HirExpr) -> Vec<&HirExpr> {
         | HirExprKind::Deref(base)
         | HirExprKind::Move(base)
         | HirExprKind::Cast { expr: base, .. }
-        | HirExprKind::Try(base) => out.push(base),
+        | HirExprKind::Try(base)
+        | HirExprKind::Await { base } => out.push(base),
         HirExprKind::Unary { operand, .. } => out.push(operand),
         HirExprKind::Assign { place, value } => {
             out.push(place);
@@ -942,6 +969,10 @@ pub fn child_exprs(e: &HirExpr) -> Vec<&HirExpr> {
         HirExprKind::Call { callee, args } => {
             out.push(callee);
             out.extend(args.iter());
+        }
+        HirExprKind::DynCast { value, vtable } => {
+            out.push(value);
+            out.push(vtable);
         }
         HirExprKind::StructLit { fields, base, .. } => {
             for f in fields {

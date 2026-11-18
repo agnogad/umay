@@ -1,0 +1,21 @@
+// The call traits: `Fn`, `FnMut`, `FnOnce`.
+//
+// A closure's impl of one of these is synthesized by the compiler; an ordinary
+// struct may also write `impl Fn<A, R> for T` with a normal method body. The
+// parser does not support `Fn(A) -> B` sugar yet, so each trait is declared with
+// plain generic parameters: `A` is the argument, `R` the return type.
+//
+// Scope: only the one-argument call form is declared here. Zero-parameter and
+// multi-parameter call forms are out of scope for this slice.
+
+trait Fn<A, R> {
+    fn call(self, a: A) -> R
+}
+
+trait FnMut<A, R> {
+    fn call_mut(self, a: A) -> R
+}
+
+trait FnOnce<A, R> {
+    fn call_once(self, a: A) -> R
+}

@@ -10,8 +10,10 @@ zip.
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import shutil
+import stat
 import subprocess
 import tarfile
 import zipfile
@@ -27,6 +29,12 @@ DOCUMENTS = [
 ]
 
 
+# Fixed timestamps and ownership so a second packaging run of the same inputs
+# yields a byte-identical archive (no source-file mtimes leaking into the bytes).
+FIXED_DATE_TIME = (1980, 1, 1, 0, 0, 0)  # ZIP's earliest representable time
+FIXED_MTIME = 0                          # UNIX epoch, for tar and the gzip header
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -40,13 +48,41 @@ def archive_directory(directory: Path, windows: bool) -> Path:
         archive = Path(f"{directory}.zip")
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
             for path in sorted(directory.rglob("*")):
-                if path.is_file():
-                    bundle.write(path, path.relative_to(directory.parent).as_posix())
+                if not path.is_file():
+                    continue
+                info = zipfile.ZipInfo(path.relative_to(directory.parent).as_posix())
+                info.date_time = FIXED_DATE_TIME
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = (stat.S_IMODE(path.stat().st_mode) & 0xFFFF) << 16
+                with path.open("rb") as src, bundle.open(info, "w") as dst:
+                    shutil.copyfileobj(src, dst)
         return archive
 
     archive = Path(f"{directory}.tar.gz")
-    with tarfile.open(archive, "w:gz") as bundle:
-        bundle.add(directory, arcname=directory.name)
+    # GzipFile(mtime=0) fixes the gzip header; member metadata is set explicitly
+    # below because tarfile.add() would otherwise copy filesystem mtimes/owners.
+    with gzip.GzipFile(filename=str(archive), mode="wb", mtime=FIXED_MTIME) as gz:
+        with tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as bundle:
+            def add(path: Path, arcname: str) -> None:
+                mode = stat.S_IMODE(path.stat().st_mode)
+                info = tarfile.TarInfo(arcname)
+                info.mtime = FIXED_MTIME
+                info.uid = info.gid = 0
+                info.uname = info.gname = ""
+                info.mode = mode
+                if path.is_dir():
+                    info.type = tarfile.DIRTYPE
+                    info.size = 0
+                    bundle.addfile(info)
+                else:
+                    info.type = tarfile.REGTYPE
+                    info.size = path.stat().st_size
+                    with path.open("rb") as src:
+                        bundle.addfile(info, src)
+
+            add(directory, directory.name)
+            for path in sorted(directory.rglob("*")):
+                add(path, f"{directory.name}/{path.relative_to(directory).as_posix()}")
     return archive
 
 

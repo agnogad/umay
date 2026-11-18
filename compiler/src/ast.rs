@@ -11,6 +11,17 @@ use crate::token::StrPart;
 #[derive(Debug, Clone)]
 pub struct Program {
     pub items: Vec<Item>,
+    /// Crate-level `#![feature(name)]` gates, in source order. Empty for v1
+    /// programs. Gate *enforcement* is a later pass; parsing only records them.
+    pub features: Vec<FeatureAttr>,
+    pub span: Span,
+}
+
+/// One name from a crate-level `#![feature(...)]` attribute.
+#[derive(Debug, Clone)]
+pub struct FeatureAttr {
+    pub name: String,
+    pub name_span: Span,
     pub span: Span,
 }
 
@@ -73,6 +84,9 @@ pub struct FnDecl {
     /// Whether the declaration was written `pub`. A non-`pub` item is reachable
     /// only inside the module that declares it.
     pub is_pub: bool,
+    /// Whether the declaration was written `async fn`. `async` is a contextual
+    /// keyword, so this is only true when it immediately preceded `fn`.
+    pub is_async: bool,
     pub span: Span,
 }
 
@@ -80,6 +94,25 @@ impl FnDecl {
     /// True when the function has no body, so it can only be called.
     pub fn is_declaration(&self) -> bool {
         self.body.is_none()
+    }
+
+    /// ABI of a function declared inside `extern "abi" { ... }`.
+    ///
+    /// The parser cannot add a field to `FnDecl` without breaking the struct
+    /// literals in later phases, so the block's ABI string is carried as a
+    /// synthetic attribute. `None` means the v1 spelling (`extern fn`), which
+    /// is exactly `extern "C" fn`.
+    pub fn abi(&self) -> Option<&str> {
+        self.attrs
+            .iter()
+            .find(|a| a.name == "abi")
+            .and_then(|a| a.args.first())
+            .map(String::as_str)
+    }
+
+    /// Whether the parameter list ended in a C-style `...`.
+    pub fn is_variadic(&self) -> bool {
+        self.attrs.iter().any(|a| a.name == "variadic")
     }
 }
 
@@ -99,6 +132,14 @@ pub struct Param {
     pub name_span: Span,
     pub ty: TypeExpr,
     pub span: Span,
+}
+
+/// A parameter of a closure: `x` or `x: i64` in `|x, y: i64| ...`.
+#[derive(Debug, Clone)]
+pub struct ClosureParam {
+    pub name: String,
+    pub name_span: Span,
+    pub ty: Option<TypeExpr>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,19 +275,83 @@ pub struct Path {
 }
 
 #[derive(Debug, Clone)]
+pub struct AssocTypeBinding {
+    pub name: String,
+    pub name_span: Span,
+    pub ty: TypeExpr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct PathSegment {
     pub name: String,
     pub span: Span,
     pub args: Vec<TypeExpr>,
+    pub bindings: Vec<AssocTypeBinding>,
+}
+
+impl PathSegment {
+    /// `Pair<i64, Item = u8>` — args and associated-type bindings share one `<…>`.
+    fn text(&self) -> String {
+        let mut out = self.name.clone();
+        if !self.args.is_empty() || !self.bindings.is_empty() {
+            let mut listed: Vec<String> = self.args.iter().map(type_text).collect();
+            listed.extend(
+                self.bindings
+                    .iter()
+                    .map(|b| format!("{} = {}", b.name, type_text(&b.ty))),
+            );
+            out.push('<');
+            out.push_str(&listed.join(", "));
+            out.push('>');
+        }
+        out
+    }
 }
 
 impl Path {
     pub fn is_simple(&self) -> bool {
-        self.segments.len() == 1 && self.segments[0].args.is_empty()
+        self.segments.len() == 1
+            && self.segments[0].args.is_empty()
+            && self.segments[0].bindings.is_empty()
     }
 
     pub fn as_string(&self) -> String {
-        self.segments.iter().map(|s| s.name.clone()).collect::<Vec<_>>().join("::")
+        self.segments.iter().map(PathSegment::text).collect::<Vec<_>>().join("::")
+    }
+}
+
+/// Best-effort textual form of a type expression for names and diagnostics.
+/// Array lengths are not recoverable without a source map, so they render as `_`.
+fn type_text(ty: &TypeExpr) -> String {
+    match ty {
+        TypeExpr::Path(p) => p.as_string(),
+        TypeExpr::Ref { mutable, inner, .. } => {
+            format!("&{}{}", if *mutable { "mut " } else { "" }, type_text(inner))
+        }
+        TypeExpr::Ptr { mutable, inner, .. } => {
+            format!("*{} {}", if *mutable { "mut" } else { "const" }, type_text(inner))
+        }
+        TypeExpr::Array { elem, .. } => format!("[{}; _]", type_text(elem)),
+        TypeExpr::Slice { elem, .. } => format!("[{}]", type_text(elem)),
+        TypeExpr::Tuple { elems, .. } => {
+            format!("({})", elems.iter().map(type_text).collect::<Vec<_>>().join(", "))
+        }
+        TypeExpr::Fn { params, ret, .. } => {
+            let ps = params.iter().map(type_text).collect::<Vec<_>>().join(", ");
+            match ret {
+                Some(r) => format!("fn({ps}) -> {}", type_text(r)),
+                None => format!("fn({ps})"),
+            }
+        }
+        TypeExpr::ImplTrait { bounds, .. } => {
+            format!("impl {}", bounds.iter().map(Path::as_string).collect::<Vec<_>>().join(" + "))
+        }
+        TypeExpr::DynTrait { bounds, .. } => {
+            format!("dyn {}", bounds.iter().map(Path::as_string).collect::<Vec<_>>().join(" + "))
+        }
+        TypeExpr::Infer { .. } => "_".into(),
+        TypeExpr::Never { .. } => "!".into(),
     }
 }
 
@@ -380,6 +485,10 @@ pub enum ExprKind {
     MethodCall { receiver: Box<Expr>, method: String, method_span: Span, args: Vec<Expr> },
     /// `expr.field`
     FieldAccess { base: Box<Expr>, field: String, field_span: Span },
+    /// `expr.await` — contextual postfix await. `async`/`await` are not reserved
+    /// keywords, so this is only produced after a dot and without a following `(`;
+    /// `obj.await()` stays a method call.
+    Await { base: Box<Expr>, span: Span },
     /// `expr[index]`
     Index { base: Box<Expr>, index: Box<Expr> },
     /// `Type { field: value, .. }`
@@ -414,6 +523,8 @@ pub enum ExprKind {
     Defer(Block),
     /// `move expr` — explicit ownership transfer
     Move(Box<Expr>),
+    /// `|x| body`, `|| body`, `|x: i64| { ... }`
+    Closure { params: Vec<ClosureParam>, body: Box<Expr>, pipe_span: Span },
     /// `unsafe { .. }`
     Unsafe(Block),
     /// `range`: `a..b`, `a..=b`, `..b`, `a..`

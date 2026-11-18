@@ -246,6 +246,17 @@ impl<'c, 's> FnChecker<'c, 's> {
             let hint = annotation.filter(|a| !self.cx.cx.is_error(*a));
             Box::new(self.check_expr_hinted(e, hint))
         });
+        // A `dyn Trait` binding takes a trait object built from a reference to a
+        // concrete implementor. Do this before the compatibility check so the
+        // binding sees its annotated type, not the source type of the reference.
+        if let (Some(target), Some(value)) = (annotation, init.as_mut()) {
+            if matches!(self.cx.cx.kind(target), crate::types::TyKind::DynTrait { .. }) {
+                let checked = (**value).clone();
+                if !self.cx.cx.is_error(checked.ty) {
+                    **value = self.coerce_to_dyn(checked, target, l.span);
+                }
+            }
+        }
 
         // Unify the initializer's type with the annotation.
         let binding_ty = match (annotation, &init) {

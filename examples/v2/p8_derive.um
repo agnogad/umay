@@ -1,0 +1,16 @@
+// Phase 8 slice: a real `#[derive(Copy)]` plus a declarative macro.
+// `Answer` stays usable after it is copied into `b` only because it is Copy;
+// the macro supplies the value that gets printed.
+#[derive(Copy)]
+struct Answer { n: i64 }
+
+macro_rules! forty_two { () => { 42 } }
+
+fn value(a: Answer) -> i64 { return a.n }
+
+fn main() -> i32 {
+  let a = Answer { n: forty_two!() }
+  let b = a
+  println_i64(value(a))
+  return 0
+}

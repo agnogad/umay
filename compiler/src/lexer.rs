@@ -615,6 +615,7 @@ impl<'a> Lexer<'a> {
             '?' => TokenKind::Question,
             '@' => TokenKind::At,
             '#' => TokenKind::Hash,
+            '$' => TokenKind::Dollar,
             '_' => TokenKind::Underscore,
             other => {
                 self.error("E0001", format!("unexpected character `{other}`"), start);
@@ -871,7 +872,9 @@ mod tests {
 
     #[test]
     fn unexpected_character_reports_error() {
-        let (_, errs) = lex("let $x = 1");
+        // `$` is a real token now (macro metavariable sigil), so use `~`, which
+        // is still outside the punctuation set.
+        let (_, errs) = lex("let ~x = 1");
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].code, "E0001");
     }

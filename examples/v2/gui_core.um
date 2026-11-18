@@ -1,0 +1,130 @@
+// Pure-UMAY immediate-mode core for the Phase 5 SDL todo app (ADR 0020).
+//
+// This file is SPLICED at crate root above a generated SDL binding and the app
+// body, so it must stay pure UMAY: no `extern`, no `#![feature]`, no `mod`. The
+// splice (rather than a module) is needed because a declaration inside a module
+// is private to that module and codegen spells module items with `::`, which the
+// assembler rejects -- the same gap documented in examples/v2/sqlite_spike/main.um.
+//
+// Only the prelude is used: `Vec<T>` from stdlib/vec.um, `sizeof`, and
+// `write_byte` from stdlib/prelude.um. No strings, no FFI, no allocation beyond
+// what Vec already does.
+
+// One todo row. UMAY lays structs out packed, so this is 9 bytes: `id` at
+// offset 0 (8 bytes) and `done` at offset 8 (1 byte).
+struct TodoItem { id: i64, done: bool }
+
+// Appends a new undone item. This is a plain append with no de-duplication
+// pass, so duplicate ids are allowed naturally; the first match is what the
+// toggle/delete helpers act on.
+fn todo_add(items: &mut Vec<TodoItem>, id: i64) {
+    if items.len >= items.cap {
+        let grown = items.grow()
+        items.ptr = grown.ptr
+        items.cap = grown.cap
+        // `grow` keeps `len`, so there is nothing to restore here.
+    }
+    let n = items.len
+    let slot = unsafe { (items.ptr as usize + n * sizeof(TodoItem)) as *mut TodoItem }
+    unsafe { *slot = TodoItem { id: id, done: false } }
+    items.len = n + 1
+}
+
+// Flips `done` on the first item with `id`. A missing id is a no-op.
+fn todo_toggle(items: &mut Vec<TodoItem>, id: i64) {
+    let n = items.len
+    let mut i: usize = 0
+    while i < n {
+        let slot = unsafe { (items.ptr as usize + i * sizeof(TodoItem)) as *mut TodoItem }
+        if unsafe { (*slot).id } == id {
+            let was = unsafe { (*slot).done }
+            unsafe { (*slot).done = if was { false } else { true } }
+            return
+        }
+        i = i + 1
+    }
+}
+
+// Removes the first item with `id` by shifting the tail left one slot. A
+// missing id is a no-op. The stale last slot is harmless: `len` is what counts.
+fn todo_delete(items: &mut Vec<TodoItem>, id: i64) {
+    let n = items.len
+    let stride = sizeof(TodoItem)
+    let mut i: usize = 0
+    while i < n {
+        let slot = unsafe { (items.ptr as usize + i * stride) as *const TodoItem }
+        if unsafe { (*slot).id } == id {
+            let mut j = i
+            while j + 1 < n {
+                let dst = unsafe { (items.ptr as usize + j * stride) as *mut TodoItem }
+                let src = unsafe { (items.ptr as usize + (j + 1) * stride) as *const TodoItem }
+                unsafe { *dst = *src }
+                j = j + 1
+            }
+            items.len = n - 1
+            return
+        }
+        i = i + 1
+    }
+}
+
+// The number of live items, as a plain i64.
+fn todo_count(items: &Vec<TodoItem>) -> i64 {
+    return items.len as i64
+}
+
+// Fills the clipped rectangle [x, x+w) x [y, y+h) with `color`.
+//
+// Clipping: UMAY cannot write through a computed pointer offset (`*(p + n)` or
+// `*(p.offset(n))` is rejected), so each byte goes through `write_byte` from
+// the prelude, which is that gap's home until the syntax covers it. The byte
+// address is built by turning the pointer into `usize`, adding the offset, and
+// casting back -- the same trick stdlib/vec.um and stdlib/hashmap.um use.
+//
+// The frozen interface has no `height` parameter, so horizontal clipping is to
+// `width` here and vertical clipping is the caller's responsibility:
+// `todo_draw` clamps its stripes to `height` before calling this. `y` and `h`
+// are still clamped non-negative so a negative origin cannot wrap an offset.
+fn gui_fill_rect(buf: *mut u8, width: i64, x: i64, y: i64, w: i64, h: i64, color: u8) {
+    if unsafe { buf as usize } == 0 { return }
+    if width <= 0 { return }
+    let mut left = x
+    let mut right = x + w
+    let mut top = y
+    let bottom = y + h
+    if left < 0 { left = 0 }
+    if right > width { right = width }
+    if right < left { right = left }
+    if top < 0 { top = 0 }
+    let mut row = top
+    while row < bottom {
+        let mut col = left
+        while col < right {
+            let at = unsafe { (buf as usize + (row * width + col) as usize) as *mut u8 }
+            write_byte(at, color)
+            col = col + 1
+        }
+        row = row + 1
+    }
+}
+
+// Draws one horizontal stripe per item: undone is colour 1, done is colour 2,
+// each one row high. Rows past `height` are skipped, and a null buffer or a
+// non-positive size is a no-op.
+fn todo_draw(items: &Vec<TodoItem>, buf: *mut u8, width: i64, height: i64) {
+    if unsafe { buf as usize } == 0 { return }
+    if width <= 0 { return }
+    if height <= 0 { return }
+    let n = items.len
+    let stride = sizeof(TodoItem)
+    let mut i: usize = 0
+    while i < n {
+        let y = i as i64
+        if y >= height { return }
+        let slot = unsafe { (items.ptr as usize + i * stride) as *const TodoItem }
+        let done = unsafe { (*slot).done }
+        let color: u8 = if done { 2u8 } else { 1u8 }
+        gui_fill_rect(buf, width, 0, y, width, 1, color)
+        i = i + 1
+    }
+}

@@ -1,0 +1,79 @@
+# Mobile workflow — INFORMATIONAL ONLY. Never a push/PR merge gate.
+#
+# Triggers are workflow_dispatch + nightly schedule only. The simulator/emulator
+# tracks need Xcode, an Android SDK/AVD, and (for devices or signed artifacts) a
+# paid Apple Developer account plus secrets. See docs/v2/ci-matrix.md §6.
+name: Mobile (informational)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly 03:17 UTC — off-peak, so a slow emulator run never stalls a PR.
+    - cron: '17 3 * * *'
+
+jobs:
+  ios-simulator:
+    # Needs: macos-15-intel ships Xcode + an installed simulator runtime.
+    # Simulator builds need no Apple Developer account; a real device or a
+    # signed .ipa needs a paid membership + signing certs in Actions secrets.
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the compiler
+        run: cargo build --release --locked --manifest-path compiler/Cargo.toml
+      # PLACEHOLDER: wire up when the generated UmayTodo Xcode project exists.
+      # Real command once it does:
+      #   xcodebuild -scheme UmayTodo -configuration Debug -sdk iphonesimulator \
+      #     -destination 'platform=iOS Simulator,name=iPhone 16' test
+      - name: xcodebuild (placeholder)
+        run: |
+          echo "INFO: simulator build/test pending the generated Xcode project."
+          echo "INFO: would run xcodebuild -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16' test"
+
+  android-emulator:
+    # Needs: Android SDK + JDK + an emulator image. GitHub-hosted ubuntu-latest
+    # has NO KVM, so a real AVD needs a self-hosted KVM runner (or slow software
+    # rendering). The Android NDK sysroot is only needed for linking, not for
+    # the object-only job below.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the compiler
+        run: cargo build --release --locked --manifest-path compiler/Cargo.toml
+      # PLACEHOLDER: android-actions/setup-android, then ./gradlew
+      # connectedAndroidTest (or adb shell am instrument) on a KVM-capable host.
+      - name: gradle connectedAndroidTest (placeholder)
+        run: |
+          echo "INFO: emulator instrumentation pending a KVM-capable self-hosted runner."
+          echo "INFO: would run android-actions/setup-android then ./gradlew connectedAndroidTest"
+
+  compile-only-objects:
+    # Runnable today on ubuntu: `asm --emit-object-only` only assembles, using
+    # clang (preinstalled). No simulator, NDK sysroot, or account required.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the compiler
+        run: cargo build --release --locked --manifest-path compiler/Cargo.toml
+      - name: Assemble iOS + Android objects and check their magic
+        run: |
+          dir="$RUNNER_TEMP/umay-mobile-objects"
+          mkdir -p "$dir"
+          cd "$dir"
+          cat > main.um <<'EOF'
+          fn add(a: i64, b: i64) -> i64 { return a + b }
+          fn main() -> i32 { return add(1i64, 2i64) as i32 }
+          EOF
+          for triple in aarch64-apple-ios aarch64-linux-android; do
+            rm -rf dist
+            "$GITHUB_WORKSPACE/target/release/umay" asm --emit-object-only --target "$triple" main.um > /dev/null
+            file dist/main.o
+            if [ "$triple" = aarch64-apple-ios ]; then
+              file dist/main.o | grep -q "Mach-O.*arm64"
+            else
+              file dist/main.o | grep -q "ELF.*aarch64"
+            fi
+          done

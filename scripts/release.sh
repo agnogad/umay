@@ -76,11 +76,40 @@ fi
 # 5. Package and checksum. One script does this on every host, so the
 # documents and the checksum layout cannot drift between systems.
 echo "==> packaging"
-python3 scripts/package.py \
+archive="$(python3 scripts/package.py \
     --version "$version" \
     --label "$host" \
     --binary "$binary" \
     --out "$out_dir" \
-    --strip
+    --strip | head -n1)"
+
+# 6. On an exact tag only, verify the archive is byte-reproducible by packaging
+# the same binaries a second time into a scratch dir and comparing the two
+# checksum files. A second full `cargo build --release` would be the stronger
+# check but costs another multi-minute build on every tag; package.py now pins
+# gzip/zip timestamps and member modes, so two packaging runs of identical
+# inputs exercise the determinism the release claim rests on. This is a tag
+# check only -- it never runs on (and never gates) a PR.
+if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
+    echo "==> verifying reproducible packaging (tag build)"
+    verify_out="$(mktemp -d)"
+    second_archive="$(python3 scripts/package.py \
+        --version "$version" \
+        --label "$host" \
+        --binary "$binary" \
+        --out "$verify_out" \
+        --strip | head -n1)"
+    if cmp -s "$archive.sha256" "$second_archive.sha256"; then
+        echo "==> archives are byte-identical across packaging runs"
+    else
+        echo "error: archive is not reproducible across packaging runs" >&2
+        echo "  $archive" >&2
+        echo "  $second_archive" >&2
+        rm -rf "$verify_out"
+        exit 1
+    fi
+    rm -rf "$verify_out"
+fi
+
 echo
 echo "verify with:  sha256sum -c <archive>.sha256"

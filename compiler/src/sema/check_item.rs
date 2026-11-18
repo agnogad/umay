@@ -49,13 +49,19 @@ impl<'a> Checker<'a> {
                     // makes its length the shared counter.
                     let def = DefId(self.next_def_id());
                     self.register_type_name(&s.name, s.name_span, def, ItemKind::Struct, DefKind::Struct, s.is_pub);
+                    let is_copy = has_derive(&s.attrs, "Copy");
+                    if is_copy {
+                        // Bridge HIR `StructInfo.is_copy` into `TyCtxt` so that
+                        // `is_copy` can answer for this ADT in every later phase.
+                        self.cx.mark_copy(def);
+                    }
                     self.hir.structs.push(StructInfo {
                         name: s.name.clone(),
                         span: s.name_span,
                         def_id: def,
                         generics: s.generics.iter().map(|g| g.name.clone()).collect(),
                         fields: Vec::new(),
-                        is_copy: has_derive(&s.attrs, "Copy"),
+                        is_copy,
                     });
                     self.hir.defs.push(DefInfo {
                         name: s.name.clone(),
@@ -374,6 +380,8 @@ impl<'a> Checker<'a> {
             is_pub,
             owner: None,
             link_name: None,
+            variadic: false,
+            is_async: false,
             declared_local_tys: Default::default(),
         });
         id
@@ -386,6 +394,57 @@ impl<'a> Checker<'a> {
                 .with_label(first_span, format!("first defined here as a {}", first_kind.describe()))
                 .with_cause("names in the same scope must be unique"),
         );
+    }
+
+    /// Registers a compiler-synthesized trait impl for a named type.
+    ///
+    /// Used for the closure call traits: the `FnId` is an already-created
+    /// function (the closure trampoline), and this records the same evidence a
+    /// user-written `impl Trait for Type` would -- the trait's `impls` list and
+    /// the method maps that drive method resolution. No new function is created
+    /// and no bound-checking semantics change.
+    pub(crate) fn register_synthetic_impl(
+        &mut self,
+        trait_name: &str,
+        type_name: &str,
+        method: &str,
+        impl_fn: FnId,
+    ) {
+        self.record_trait_impl(trait_name, type_name, Vec::new(), false, Span::DUMMY);
+        // A synthesized method is compiler-generated, so it is visible from
+        // every module: there is no source-level `pub` to consult.
+        self.register_impl_method(type_name, method, impl_fn, true);
+    }
+
+    /// Appends one `impl Trait for Type` entry to the named trait.
+    ///
+    /// Shared with `collect_impl` so a synthesized impl and a source impl are
+    /// recorded identically.
+    fn record_trait_impl(
+        &mut self,
+        trait_name: &str,
+        type_name: &str,
+        params: Vec<String>,
+        bounded_all: bool,
+        span: Span,
+    ) {
+        if let Some(info) = self.hir.traits.iter_mut().find(|t| t.name == trait_name) {
+            info.impls.push(crate::hir::TraitImplInfo {
+                type_name: type_name.to_string(),
+                generics: params,
+                bounded_all,
+                span,
+            });
+        }
+    }
+
+    /// Filed a method under its owner type the same way for source and
+    /// synthesized impls.
+    fn register_impl_method(&mut self, type_name: &str, method: &str, id: FnId, is_pub: bool) {
+        let method_key = (type_name.to_string(), method.to_string());
+        self.methods.insert(method_key.clone(), id);
+        self.method_visibility.insert(method_key, (is_pub, self.module_prefix.clone()));
+        self.methods_of_type.entry(type_name.to_string()).or_default().push(method.to_string());
     }
 
     fn collect_impl(&mut self, block: &ast::ImplBlock) {
@@ -410,22 +469,11 @@ impl<'a> Checker<'a> {
                         .map(|g| g.bounds.iter().any(|b| b.segments.last().map(|s| s.name == trait_name.name).unwrap_or(false)))
                         .unwrap_or(false)
                 });
-            if let Some(info) = self.hir.traits.iter_mut().find(|t| t.name == trait_name.name) {
-                info.impls.push(crate::hir::TraitImplInfo {
-                    type_name: self_ty_name.clone(),
-                    generics: params,
-                    bounded_all,
-                    span: block.span,
-                });
-            }
+            self.record_trait_impl(&trait_name.name, &self_ty_name, params, bounded_all, block.span);
         }
         for method in &block.methods {
             let id = FnId(self.hir.fns.len() as u32);
-            let method_key = (self_ty_name.clone(), method.name.clone());
-            self.methods.insert(method_key.clone(), id);
-            self.method_visibility
-                .insert(method_key, (method.is_pub, self.module_prefix.clone()));
-            self.methods_of_type.entry(self_ty_name.clone()).or_default().push(method.name.clone());
+            self.register_impl_method(&self_ty_name, &method.name, id, method.is_pub);
             self.hir.fns.push(HirFn {
                 id,
                 name: method.name.clone(),
@@ -441,6 +489,8 @@ impl<'a> Checker<'a> {
                 is_pub: method.is_pub,
                 owner: Some(self_ty_name.clone()),
                 link_name: None,
+                variadic: false,
+                is_async: false,
                 declared_local_tys: Default::default(),
             });
             }
@@ -680,7 +730,7 @@ impl<'a> Checker<'a> {
             params.push(self.resolve_type(&p.ty, &generics));
         }
         let ret = match &f.ret {
-            Some(t) => self.resolve_type(t, &generics),
+            Some(t) => self.resolve_return_type(t, &generics, slot),
             None => self.cx.unit(),
         };
         if let Some(id) = slot {
@@ -693,8 +743,34 @@ impl<'a> Checker<'a> {
                 info.self_mutable = self_mutable;
                 info.self_by_ref = self_by_ref;
                 info.link_name = f.link_name.clone();
+                info.variadic = f.is_variadic();
             }
         }
+    }
+
+    /// Resolves a declared return type.
+    ///
+    /// `-> impl Trait` is the only position where `impl Trait` is accepted: it
+    /// has no representation of its own, so it resolves to an `Error`
+    /// placeholder and its bounds are recorded against the owning function.
+    /// `check_one_body` later infers the concrete type from the body and writes
+    /// it back to `hir.fns[id].ret`. Every other position still rejects
+    /// `impl Trait` through `resolve_type` (argument position stays E1003).
+    fn resolve_return_type(
+        &mut self,
+        ty: &ast::TypeExpr,
+        generics: &[String],
+        owner: Option<FnId>,
+    ) -> TyId {
+        if let ast::TypeExpr::ImplTrait { bounds, .. } = ty {
+            if let Some(id) = owner {
+                self.opaque_return_bounds.insert(id, bounds.clone());
+            }
+            // Placeholder: `Error` also suppresses the declared-vs-body return
+            // check in `check_one_body` until the body supplies the real type.
+            return self.cx.error();
+        }
+        self.resolve_type(ty, generics)
     }
 
     /// Resolves an AST type expression to an interned type.
@@ -810,10 +886,11 @@ impl<'a> Checker<'a> {
                 };
                 self.cx.fn_ptr(params, ret)
             }
-            ast::TypeExpr::ImplTrait { span, .. } | ast::TypeExpr::DynTrait { span, .. } => {
-                self.error("E1003", *span, "`impl Trait` and `dyn Trait` are not supported yet");
+            ast::TypeExpr::ImplTrait { span, .. } => {
+                self.error("E1003", *span, "`impl Trait` is only supported as a function return type");
                 self.cx.error()
             }
+            ast::TypeExpr::DynTrait { bounds, span } => self.resolve_dyn_trait(bounds, *span),
             ast::TypeExpr::Infer { span } => {
                 self.error("E1002", *span, "`_` is not allowed in a type position here");
                 self.cx.error()
@@ -1054,6 +1131,10 @@ impl<'a> Checker<'a> {
         let params: Vec<TyId> = self.hir.fns.iter().find(|x| x.id == id).map(|x| x.params.clone()).unwrap_or_default();
         let declared_ret = self.hir.fns.iter().find(|x| x.id == id).map(|x| x.ret).unwrap_or_else(|| self.cx.unit());
         let has_self = f.self_param.is_some();
+        // A return-position `impl Trait` has no declared type: its concrete type
+        // is inferred from the body. Capture the marker before `fcx` borrows
+        // `self` mutably.
+        let opaque_bounds = self.opaque_return_bounds.get(&id).cloned();
 
         let mut fcx = self.fn_context(Some(id));
         // The body may name the declaration's parameters: inside `impl<T> Vec<T>`
@@ -1074,8 +1155,21 @@ impl<'a> Checker<'a> {
         let block = fcx.check_block(&body);
         let block_ty = fcx.block_ty(&block);
 
-        // Return type check: the body must produce the declared type.
-        if !fcx.cx.cx.is_error(declared_ret) && !fcx.cx.cx.is_error(block_ty) {
+        // For `-> impl Trait`, the body supplies the hidden type. A tail
+        // expression gives it directly; `{ return v }` has block type `!`, so
+        // fall back to the value the return carries.
+        let hidden_ty = opaque_bounds.as_ref().map(|_| {
+            if matches!(fcx.cx.cx.kind(block_ty), TyKind::Never) {
+                returned_value_ty(&block).unwrap_or(block_ty)
+            } else {
+                block_ty
+            }
+        });
+
+        // Return type check: the body must produce the declared type. An opaque
+        // return has no declared type to compare against (`declared_ret` is the
+        // `Error` placeholder), so its consistency is left to the flow rules.
+        if opaque_bounds.is_none() && !fcx.cx.cx.is_error(declared_ret) && !fcx.cx.cx.is_error(block_ty) {
             let compatible = match (fcx.cx.cx.kind(declared_ret).clone(), fcx.cx.cx.kind(block_ty).clone()) {
                 (TyKind::Unit, _) if block_reaches_end_without_value(&block) => true,
                 // A body that diverges (`{ return 1 }`, `{ panic!() }`) never
@@ -1103,6 +1197,9 @@ impl<'a> Checker<'a> {
         }
 
         let defaults = fcx.literal_defaults();
+        // An opaque return can be a bare literal (`-> impl Trait { 1 }`); settle
+        // its width with the same defaults applied to the body's locals.
+        let hidden_ty = hidden_ty.map(|t| defaults.get(&t).copied().unwrap_or(t));
         let declared_local_tys = fcx.declared_local_tys.clone();
         let mut locals = fcx.finish_locals();
         let mut body_hir = block;
@@ -1114,10 +1211,109 @@ impl<'a> Checker<'a> {
                 l.ty = *t;
             }
         }
-        if let Some(info) = self.hir.fns.iter_mut().find(|x| x.id == id) {
+        if f.is_async {
+            // The body was checked against the declared `T` above. It now moves
+            // into the generated thunk; this function becomes a constructor for
+            // the generated state struct (ADR 0019 section 1).
+            // ponytail: only parameters are state fields; locals that live across
+            // an await are not captured yet. Upgrade: reuse ADR 0017 capture
+            // analysis to add the locals that cross a suspension point.
+            let body_span = body_hir.span;
+            let (state_ty, state_def) = self.lower_async_fn(
+                id,
+                &f,
+                body_hir,
+                locals.clone(),
+                declared_local_tys,
+                declared_ret,
+                body_span,
+            );
+            let (param_tys, field_names) = {
+                let decl = self.hir.fns.iter().find(|x| x.id == id);
+                let tys = decl.map(|d| d.params.clone()).unwrap_or_default();
+                let names = self.hir.structs.iter().find(|s| s.def_id == state_def)
+                    .map(|s| s.fields.iter().map(|fld| fld.name.clone()).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                (tys, names)
+            };
+            let fields = field_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| crate::hir::HirFieldInit {
+                    name: name.clone(),
+                    span: f.name_span,
+                    index: i as u32,
+                    value: crate::hir::HirExpr {
+                        kind: crate::hir::HirExprKind::Local(crate::hir::LocalId(i as u32)),
+                        ty: param_tys.get(i).copied().unwrap_or_else(|| self.cx.error()),
+                        span: f.name_span,
+                    },
+                })
+                .collect();
+            let state_lit = crate::hir::HirExpr {
+                kind: crate::hir::HirExprKind::StructLit { def: state_def, fields, base: None },
+                ty: state_ty,
+                span: f.name_span,
+            };
+            let param_count = field_names.len();
+            let ctor_body = crate::hir::HirBlock {
+                stmts: Vec::new(),
+                tail: Some(Box::new(state_lit)),
+                span: body_span,
+                locals_introduced: 0,
+            };
+            if let Some(info) = self.hir.fns.iter_mut().find(|x| x.id == id) {
+                info.body = Some(ctor_body);
+                info.locals = locals;
+                info.locals.truncate(param_count);
+                info.declared_local_tys.clear();
+                info.ret = state_ty;
+                info.is_async = true;
+            }
+        } else if let Some(info) = self.hir.fns.iter_mut().find(|x| x.id == id) {
             info.body = Some(body_hir);
             info.locals = locals;
             info.declared_local_tys = declared_local_tys;
+            if let Some(ty) = hidden_ty {
+                // Body-inferred hidden type replaces the placeholder. From here
+                // on `fn_type`, `check_call`, mono and the backends all see this
+                // ordinary concrete type — there is no opaque `TyKind`.
+                info.ret = ty;
+            }
+        }
+
+        // Marker bounds on `-> impl Trait` are checked against the hidden type,
+        // mirroring the existing rule in `check_call`: only traits with no
+        // methods (markers) are enforced. A hidden type naming a generic
+        // parameter is checked at the call site through monomorphisation instead.
+        if let (Some(bounds), Some(ty)) = (opaque_bounds, hidden_ty) {
+            if self.cx.first_param(ty).is_none() {
+                let span = f.ret.as_ref().map(|r| r.span()).unwrap_or(f.name_span);
+                self.check_opaque_return_bounds(&bounds, ty, span);
+            }
+        }
+    }
+
+    /// Checks marker bounds written on a `-> impl Trait` against its hidden type.
+    fn check_opaque_return_bounds(&mut self, bounds: &[ast::Path], ty: TyId, span: Span) {
+        let name = match self.cx.kind(ty).clone() {
+            TyKind::Adt { def, .. } => self.hir.def_name(def),
+            _ => self.ty_name(ty),
+        };
+        for bound in bounds {
+            let Some(trait_name) = bound.segments.last().map(|s| s.name.clone()) else { continue };
+            let Some(info) = self.hir.traits.iter().find(|t| t.name == trait_name) else { continue };
+            if !info.methods.is_empty() {
+                continue; // only markers are enforced; see check_call
+            }
+            let ok = info.impls.iter().any(|i| i.type_name == name);
+            if !ok {
+                self.error(
+                    "E1017",
+                    span,
+                    format!("hidden type `{name}` does not implement `{trait_name}`"),
+                );
+            }
         }
     }
 }
@@ -1126,6 +1322,26 @@ impl<'a> Checker<'a> {
 /// used to avoid a spurious "returns unit" error.
 fn block_reaches_end_without_value(block: &crate::hir::HirBlock) -> bool {
     block.tail.is_none()
+}
+
+/// The type of the first `return v` in `block`, if any. Used to infer the hidden
+/// type of `-> impl Trait` when the body's block type is `!` (a body that ends
+/// with `return v` rather than a tail expression).
+fn returned_value_ty(block: &crate::hir::HirBlock) -> Option<TyId> {
+    fn in_expr(e: &crate::hir::HirExpr) -> Option<TyId> {
+        if let crate::hir::HirExprKind::Return(Some(v)) = &e.kind {
+            return Some(v.ty);
+        }
+        crate::hir::child_exprs(e).into_iter().find_map(in_expr)
+    }
+    for stmt in &block.stmts {
+        if let crate::hir::HirStmtKind::Expr(e) = &stmt.kind {
+            if let Some(ty) = in_expr(e) {
+                return Some(ty);
+            }
+        }
+    }
+    block.tail.as_deref().and_then(in_expr)
 }
 
 fn has_derive(attrs: &[ast::Attribute], name: &str) -> bool {

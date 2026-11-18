@@ -1,0 +1,109 @@
+// Pure-UMAY PCM WAV generator for the Phase 7 audio slice.
+//
+// Like `gui_core.um` / `game_core.um`, this file is SPLICED at crate root above
+// an app body, so it must stay pure UMAY: no `extern`, no `#![feature]`, no
+// `mod`, nothing outside the prelude. It writes a valid mono 16-bit PCM
+// RIFF/WAVE file into a caller-owned buffer using only `write_byte` from
+// `stdlib/prelude.um`; `stdlib/fs.um` is what the app uses to save the bytes.
+//
+// ponytail: integer sine is a 64-entry LUT normalised to +/-1000, not a float
+// `sin`. Upgrade path: a real SDL3 audio binding once struct-by-value
+// `SDL_AudioSpec` and C function-pointer callbacks are supported by bindgen.
+// Device playback, stereo and streaming are deliberately out of scope here.
+
+const SAMPLE_RATE: i64 = 8000
+const AUDIO_MAX_SAMPLES: i64 = 80000
+
+const SINE_SCALE: i64 = 1000
+
+// sin(2*pi*i/64) * 1000, rounded to the nearest integer.
+const SINE_LUT: [i64; 64] = [
+    0i64, 98i64, 195i64, 290i64, 383i64, 471i64, 556i64, 634i64,
+    707i64, 773i64, 831i64, 882i64, 924i64, 957i64, 981i64, 995i64,
+    1000i64, 995i64, 981i64, 957i64, 924i64, 882i64, 831i64, 773i64,
+    707i64, 634i64, 556i64, 471i64, 383i64, 290i64, 195i64, 98i64,
+    0i64, -98i64, -195i64, -290i64, -383i64, -471i64, -556i64, -634i64,
+        -707i64, -773i64, -831i64, -882i64, -924i64, -957i64, -981i64, -995i64,
+        -1000i64, -995i64, -981i64, -957i64, -924i64, -882i64, -831i64, -773i64,
+        -707i64, -634i64, -556i64, -471i64, -383i64, -290i64, -195i64, -98i64,
+]
+
+// Writes four raw ASCII bytes at `off` (e.g. "RIFF", "WAVE", "fmt ", "data").
+fn wav_write_tag(buf: *mut u8, off: i64, a: i64, b: i64, c: i64, d: i64) {
+    let p = buf.offset(off as isize)
+    write_byte(p, a as u8)
+    write_byte(p.offset(1), b as u8)
+    write_byte(p.offset(2), c as u8)
+    write_byte(p.offset(3), d as u8)
+}
+
+// Writes a signed 16-bit little-endian value at byte offset `off`.
+fn wav_write_i16_le(buf: *mut u8, off: i64, value: i64) {
+    let p = buf.offset(off as isize)
+    write_byte(p, value as u8)
+    write_byte(p.offset(1), (value >> 8) as u8)
+}
+
+// Writes a signed 32-bit little-endian value at byte offset `off`.
+fn wav_write_i32_le(buf: *mut u8, off: i64, value: i64) {
+    let p = buf.offset(off as isize)
+    write_byte(p, value as u8)
+    write_byte(p.offset(1), (value >> 8) as u8)
+    write_byte(p.offset(2), (value >> 16) as u8)
+    write_byte(p.offset(3), (value >> 24) as u8)
+}
+
+// Integer sine over a 64-step phase of one cycle. `sample` indexes the sample
+// clock at `SAMPLE_RATE`; `phase = sample * freq * 64 / SAMPLE_RATE`. The result
+// is scaled to -amplitude..amplitude. ponytail: phase advances in whole LUT
+// steps, so higher frequencies are coarser; a real binding removes the LUT.
+fn tone_sine(sample: i64, freq: i64, amplitude: i64) -> i64 {
+    let phase = (sample * freq * 64 / SAMPLE_RATE) & 63
+    let v = SINE_LUT[phase]
+    return v * amplitude / SINE_SCALE
+}
+
+// Renders `samples` mono 16-bit PCM frames of a sine at `freq` Hz and
+// `amplitude` into `buf`, starting at byte offset 44 (just after the header).
+// Returns 44 + samples*2, the total byte length of the finished WAV. The caller
+// must have allocated at least that many bytes.
+// ponytail: `samples` is clamped to AUDIO_MAX_SAMPLES so a runaway count cannot
+// loop forever; a larger file needs a bigger caller buffer and this ceiling
+// lifted.
+fn audio_render_tone(buf: *mut u8, freq: i64, samples: i64, amplitude: i64) -> i64 {
+    let mut n = samples
+    if n < 0 { n = 0 }
+    if n > AUDIO_MAX_SAMPLES { n = AUDIO_MAX_SAMPLES }
+    let mut i: i64 = 0
+    let mut off: i64 = 44
+    while i < n {
+        wav_write_i16_le(buf, off, tone_sine(i, freq, amplitude))
+        off = off + 2
+        i = i + 1
+    }
+    return 44 + n * 2
+}
+
+// Writes the 44-byte RIFF/WAVE PCM header at offset 0 of `buf`:
+// "RIFF" + (36+data_bytes) + "WAVE" + "fmt " + 16 + PCM=1 + channels=1 +
+// rate + byte_rate=rate*2 + block_align=2 + bits=16 + "data" + data_bytes.
+fn wav_header(buf: *mut u8, data_bytes: i64) {
+    // "RIFF" + size (file length minus 8).
+    wav_write_tag(buf, 0, 0x52, 0x49, 0x46, 0x46)
+    wav_write_i32_le(buf, 4, 36 + data_bytes)
+    // "WAVE" + "fmt " + subchunk size 16.
+    wav_write_tag(buf, 8, 0x57, 0x41, 0x56, 0x45)
+    wav_write_tag(buf, 12, 0x66, 0x6d, 0x74, 0x20)
+    wav_write_i32_le(buf, 16, 16)
+    // PCM format, one channel.
+    wav_write_i16_le(buf, 20, 1)
+    wav_write_i16_le(buf, 22, 1)
+    wav_write_i32_le(buf, 24, SAMPLE_RATE)
+    wav_write_i32_le(buf, 28, SAMPLE_RATE * 2)
+    // Block align 2, 16 bits per sample.
+    wav_write_i16_le(buf, 32, 2)
+    wav_write_i16_le(buf, 34, 16)
+    // "data" + payload size.
+    wav_write_tag(buf, 36, 0x64, 0x61, 0x74, 0x61)
+    wav_write_i32_le(buf, 40, data_bytes)
+}

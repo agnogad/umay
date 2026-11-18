@@ -149,6 +149,12 @@ impl ValueScopes {
     pub fn declared_in_current_frame(&self, name: &str) -> bool {
         self.frames.last().map(|f| f.iter().any(|(n, _)| n == name)).unwrap_or(false)
     }
+
+    /// Every value currently in scope, outermost frame first, so later entries
+    /// shadow earlier ones when a caller declares them in that order.
+    pub fn all_entries(&self) -> Vec<(String, LocalEntry)> {
+        self.frames.iter().flatten().cloned().collect()
+    }
 }
 
 /// Closest-match suggestion for an unknown name, using edit distance.

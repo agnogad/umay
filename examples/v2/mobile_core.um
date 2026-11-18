@@ -1,0 +1,128 @@
+// Platform-independent mobile note core for Phase 6 (ADR 0021, webview-decision.md).
+//
+// This file is SPLICED at crate root above `stdlib/ipc.um` and the app body, so
+// it must stay pure UMAY: no `extern`, no `#![feature]`, no `mod`. The splice
+// (rather than a module) is needed because a declaration inside a module is
+// private to that module and codegen spells module items with `::`, which the
+// assembler rejects -- the same gap documented in examples/v2/sqlite_spike/main.um.
+//
+// The todo MODEL is the one from examples/v2/gui_core.um: a packed `Note` held
+// in a `Vec<Note>`, addressed through `sizeof(Note)` and computed byte offsets.
+// Only the model is reused. The SDL framebuffer drawing (`gui_fill_rect`,
+// `todo_draw`) is deliberately NOT copied: on webview/mobile the UI is HTML/CSS/JS
+// rendered by WKWebView/WebView/WebKitGTK, and the IPC bridge carries JSON-like
+// envelopes, so no pixel buffer exists in this layer.
+//
+// Why packed layout and computed offsets: UMAY lays structs out packed, so
+// `Note` is 9 bytes (`id` at 0, `done` at 8) and the Vec stride is `sizeof(Note)`.
+// UMAY also cannot write through a computed pointer offset (`*(p + n)` or
+// `*(p.offset(n))` is rejected), so byte writes go through `write_byte` from the
+// prelude -- that is the gap's home until the syntax covers it, and the reason
+// gui_core's `gui_fill_rect` uses `write_byte`. The model below stores a whole
+// `Note` through a computed `*mut Note` slot (cast from pointer-as-usize plus an
+// index * stride), which is the same trick stdlib/vec.um and stdlib/hashmap.um
+// use and which the checker accepts. No strings, no FFI, no allocation beyond
+// what Vec already does.
+//
+// This is deliberately the CORE only. No webview shim, JNI bridge, Gradle/AAR
+// packaging or Xcode/SPM project is written here: that native shell cannot be
+// built or signed in this repository's hosted CI (ADR 0021 sections 2-8).
+// Upgrade path: when a macOS runner with Xcode and an Android NDK/Gradle toolchain
+// exist, wrap this core in the generated JNI/C ABI bridge (ADR 0018 bindgen) and
+// the WKWebView/WebView adapters described in docs/v2/webview-decision.md; the
+// IPC decode/encode entry points come from stdlib/ipc.um and this dispatch stays
+// unchanged.
+
+// One note row. Packed: `id` is 8 bytes at offset 0 and `done` 1 byte at 8.
+struct Note { id: i64, done: bool }
+
+// IPC method ids (the `method` field of an IpcRequest):
+//   1 = add    -- append an undone note with `arg` as its id
+//   2 = toggle -- flip `done` on the first note with `arg`
+//   3 = delete -- remove the first note with `arg`
+//   4 = count  -- no mutation, report the live note count
+// Any other id is an error reply (`ok:false`, `result:-1`) and changes nothing.
+
+// Appends a new undone note. Plain append, no de-duplication, so duplicate ids
+// are allowed; toggle/delete act on the first match.
+fn note_add(notes: &mut Vec<Note>, id: i64) {
+    if notes.len >= notes.cap {
+        let grown = notes.grow()
+        notes.ptr = grown.ptr
+        notes.cap = grown.cap
+        // `grow` keeps `len`, so there is nothing to restore here.
+    }
+    let n = notes.len
+    let slot = unsafe { (notes.ptr as usize + n * sizeof(Note)) as *mut Note }
+    unsafe { *slot = Note { id: id, done: false } }
+    notes.len = n + 1
+}
+
+// Flips `done` on the first note with `id`. A missing id is a no-op.
+fn note_toggle(notes: &mut Vec<Note>, id: i64) {
+    let n = notes.len
+    let mut i: usize = 0
+    while i < n {
+        let slot = unsafe { (notes.ptr as usize + i * sizeof(Note)) as *mut Note }
+        if unsafe { (*slot).id } == id {
+            let was = unsafe { (*slot).done }
+            unsafe { (*slot).done = if was { false } else { true } }
+            return
+        }
+        i = i + 1
+    }
+}
+
+// Removes the first note with `id` by shifting the tail left one slot. A
+// missing id is a no-op. The stale last slot is harmless: `len` is what counts.
+fn note_delete(notes: &mut Vec<Note>, id: i64) {
+    let n = notes.len
+    let stride = sizeof(Note)
+    let mut i: usize = 0
+    while i < n {
+        let slot = unsafe { (notes.ptr as usize + i * stride) as *const Note }
+        if unsafe { (*slot).id } == id {
+            let mut j = i
+            while j + 1 < n {
+                let dst = unsafe { (notes.ptr as usize + j * stride) as *mut Note }
+                let src = unsafe { (notes.ptr as usize + (j + 1) * stride) as *const Note }
+                unsafe { *dst = *src }
+                j = j + 1
+            }
+            notes.len = n - 1
+            return
+        }
+        i = i + 1
+    }
+}
+
+// The number of live notes, as a plain i64.
+fn note_count(notes: &Vec<Note>) -> i64 {
+    return notes.len as i64
+}
+
+// Routes one decoded IPC request to the model and builds the reply envelope.
+// The reply echoes `req.id`; its `result` is always the live note count, so a
+// caller can observe the post-call state. Unknown methods leave state untouched
+// and return `ok:false` with `result:-1`.
+fn note_dispatch(notes: &mut Vec<Note>, req: IpcRequest) -> IpcReply {
+    match req.method {
+        1i64 => note_add(notes, req.arg),
+        2i64 => note_toggle(notes, req.arg),
+        3i64 => note_delete(notes, req.arg),
+        4i64 => {},
+        _ => return IpcReply { id: req.id, ok: false, result: -1i64 },
+    }
+    return IpcReply { id: req.id, ok: true, result: note_count(notes) }
+}
+
+// Deterministic core check used by the Phase 6 tests: add 1 and 2, toggle 1,
+// delete 2 -> exactly one note remains. The `--selftest` app entry point can
+// call this and print the result; it needs no webview, IPC transport or FFI.
+fn mobile_selftest(notes: &mut Vec<Note>) -> i64 {
+    note_add(notes, 1i64)
+    note_add(notes, 2i64)
+    note_toggle(notes, 1i64)
+    note_delete(notes, 2i64)
+    return note_count(notes)
+}

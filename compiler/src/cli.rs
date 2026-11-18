@@ -39,8 +39,10 @@ pub fn run(args: Vec<String>) -> ExitCode {
     let rest: Vec<String> = args.collect();
     let code = match cmd.as_str() {
         "check" => cmd_check(&rest),
+        "bindgen" => cmd_bindgen(&rest),
         "explain" => cmd_explain(&rest),
         "ast" => cmd_ast(&rest),
+        "expand" => cmd_expand(&rest),
         "metadata" => cmd_metadata(&rest),
         "mir" => cmd_mir(&rest),
         "doctor" => cmd_doctor(&rest),
@@ -80,10 +82,14 @@ USAGE:
 
 COMMANDS:
     check <files...>   Parse and validate UMAY source
+    bindgen --header <path> --out <path>
+                       Generate v2 extern declarations from a C header
+                       (--emit-stdout writes the module to stdout instead)
     build <file>       Compile to an executable in dist/
     run <file>         Compile and run it, reporting its exit status
     asm <file>         Print the generated assembly
     ast <file>         Print the parsed syntax tree
+    expand <file>      Print macro-expanded source (--format json for spans)
     mir <file>         Print the lowered MIR (basic blocks)
     fmt <files...>     Rewrite whitespace to the standard style (--check: report only)
     lint <files...>    Report style findings (--rules: list them)
@@ -101,7 +107,9 @@ OPTIONS:
     --target <triple>      Build for another system (x86_64-unknown-linux-gnu,
                            x86_64-apple-darwin, x86_64-pc-windows-gnu,
                            aarch64-unknown-linux-gnu, aarch64-apple-darwin,
-                           aarch64-w64-mingw32)
+                           aarch64-w64-mingw32, aarch64-apple-ios,
+                           aarch64-apple-ios-sim, aarch64-linux-android,
+                           x86_64-linux-android)
     --emit-object-only     Also leave the object in dist/ (build, asm)
 
 EXIT CODES:
@@ -360,6 +368,89 @@ fn cmd_lint(args: &[String]) -> u8 {
     exit::OK
 }
 
+/// `umay bindgen --header <path> --out <path>` — the first, deliberately narrow
+/// C-header slice (see `compiler/src/bindgen.rs`). It needs no dependencies and
+/// never touches the project tree beyond the output path the caller names.
+fn cmd_bindgen(args: &[String]) -> u8 {
+    let mut header: Option<&str> = None;
+    let mut out: Option<&str> = None;
+    let mut emit_stdout = false;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--header" => {
+                i += 1;
+                match args.get(i) {
+                    Some(path) => header = Some(path),
+                    None => {
+                        eprintln!("umay: `--header` requires a path");
+                        return exit::USAGE;
+                    }
+                }
+            }
+            "--out" => {
+                i += 1;
+                match args.get(i) {
+                    Some(path) => out = Some(path),
+                    None => {
+                        eprintln!("umay: `--out` requires a path");
+                        return exit::USAGE;
+                    }
+                }
+            }
+            "--emit-stdout" => emit_stdout = true,
+            "-h" | "--help" => {
+                println!("umay bindgen — generate a UMAY module of v2 extern declarations");
+                println!();
+                println!("USAGE:");
+                println!("    umay bindgen --header <path> --out <path>");
+                println!("    umay bindgen --header <path> --emit-stdout");
+                return exit::OK;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("umay: unknown option `{other}` for `bindgen`");
+                return exit::USAGE;
+            }
+            other => {
+                eprintln!("umay: unexpected argument `{other}` for `bindgen`");
+                return exit::USAGE;
+            }
+        }
+        i += 1;
+    }
+
+    let Some(header) = header else {
+        eprintln!("umay: `bindgen` requires --header <path>");
+        return exit::USAGE;
+    };
+    if out.is_some() && emit_stdout {
+        eprintln!("umay: `--out` and `--emit-stdout` are mutually exclusive");
+        return exit::USAGE;
+    }
+    if out.is_none() && !emit_stdout {
+        eprintln!("umay: `bindgen` requires --out <path> or --emit-stdout");
+        return exit::USAGE;
+    }
+
+    let text = match std::fs::read_to_string(header) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("umay: cannot read `{header}`: {e}");
+            return exit::IO_ERROR;
+        }
+    };
+    let module = crate::bindgen::generate(&text, header);
+    if emit_stdout {
+        print!("{module}");
+    } else if let Some(path) = out {
+        if let Err(e) = std::fs::write(path, &module) {
+            eprintln!("umay: cannot write `{path}`: {e}");
+            return exit::IO_ERROR;
+        }
+    }
+    exit::OK
+}
+
 fn cmd_check(args: &[String]) -> u8 {
     let opts = match parse_options(args) {
         Ok(o) => o,
@@ -525,6 +616,59 @@ fn cmd_ast(args: &[String]) -> u8 {
         return exit::COMPILE_ERROR;
     }
     exit::OK
+}
+
+/// `umay expand <file>` prints the source with every macro invocation expanded.
+///
+/// A developer tool akin to `ast` and `mir`: it exists so the expansion can be
+/// inspected and so tests can assert on its exact bytes. Output is deterministic
+/// (no paths or timestamps), so two runs on the same file are byte-identical.
+fn cmd_expand(args: &[String]) -> u8 {
+    let opts = match parse_options(args) {
+        Ok(o) => o,
+        Err((code, msg)) => {
+            eprintln!("umay: {msg}");
+            return code;
+        }
+    };
+    let Some(file) = opts.files.first() else {
+        eprintln!("umay: `expand` requires a source file");
+        return exit::USAGE;
+    };
+    let text = match std::fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("umay: cannot read `{file}`: {e}");
+            return exit::IO_ERROR;
+        }
+    };
+    match umayc::expand_source(file.clone(), text) {
+        Ok(out) => {
+            if opts.format_json {
+                // Kept deliberately simple: both fields are JSON strings, so no
+                // knowledge of Span's shape is needed here.
+                let esc = umayc::diagnostics::json_escape;
+                println!(
+                    "{{\"expanded\":\"{}\",\"span_map\":\"{}\"}}",
+                    esc(&out.expanded_text),
+                    esc(&format!("{:?}", out.span_map))
+                );
+            } else {
+                print!("{}", out.expanded_text);
+            }
+            exit::OK
+        }
+        Err((diags, map)) => {
+            if opts.format_json {
+                println!("{}", render_json(&diags, &map));
+            } else {
+                let rendered =
+                    umayc::render_all_full(&diags, &map, use_color(opts.color), opts.explain);
+                eprint!("{rendered}");
+            }
+            exit::COMPILE_ERROR
+        }
+    }
 }
 
 fn cmd_explain(args: &[String]) -> u8 {
@@ -1168,6 +1312,20 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         return exit::OK;
     }
 
+    // Mobile targets assemble here but cannot be linked into an app: that needs
+    // an SDK, load commands and a signing step this compiler does not do yet.
+    // This check is deliberately after the `--emit-object-only` early return so
+    // producing the objects still succeeds; it stops before any linker is run.
+    if let Some(sdk) = target.mobile_sdk_hint() {
+        eprintln!(
+            "umay: `{}` cannot be linked on this host: producing an app needs {sdk}.\n  \
+             use `--emit-object-only` to get the objects; real sysroot, load-command and \
+             linker support is not implemented yet.",
+            target.triple
+        );
+        return exit::CODEGEN_ERROR;
+    }
+
     // The linked executable is cached too, so an unchanged rebuild starts neither
     // `as` nor `cc`. The key is the program assembly plus the runtime assembly:
     // those two texts are everything that decides the objects, and the compiler
@@ -1206,7 +1364,10 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
         let mut link = std::process::Command::new(target.linker);
         // Driver-wide flags must precede the inputs: `-arch` selects the
         // slice of the implicit C library as well as the output architecture.
-        if target.triple.contains("darwin") {
+        // `apple-ios` is included for the eventual macOS host, where a real iOS
+        // link can run; local behaviour is unchanged because mobile targets are
+        // refused above before this point.
+        if target.triple.contains("darwin") || target.triple.contains("apple-ios") {
             let arch = if target.arch == "aarch64" { "arm64" } else { "x86_64" };
             link.arg("-arch").arg(arch);
         }
@@ -1229,7 +1390,7 @@ fn cmd_build(args: &[String], run: bool) -> u8 {
                 return exit::CODEGEN_ERROR;
             }
             Err(e) => {
-                eprintln!("umay: cannot run `cc`: {e}");
+                eprintln!("umay: cannot run `{}`: {e}", target.linker);
                 return exit::IO_ERROR;
             }
         }

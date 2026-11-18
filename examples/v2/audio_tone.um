@@ -1,0 +1,24 @@
+// Phase 7 audio slice: splice-only app body for `stdlib/audio_wav.um`.
+//
+// The compiler prepends the prelude (which already includes `stdlib/fs.um`),
+// and the harness splices `stdlib/audio_wav.um` above this file, so this body
+// only calls `audio_render_tone`, `wav_header` and `write_file_bytes`.
+//
+// ponytail: integer LUT sine (no float module), mono only (no stereo), the
+// whole clip is rendered in memory (no streaming), and there is no device
+// playback (no SDL3 audio binding yet). Upgrade once bindgen can express a
+// struct-by-value `SDL_AudioSpec` and C function-pointer callbacks, then feed
+// these PCM bytes to an SDL audio device instead of a file.
+
+fn main() -> i32 {
+    let samples: i64 = 800
+    let len: i64 = 44 + samples * 2
+    let bytes = alloc(len as usize)
+    let written = audio_render_tone(bytes, 440, samples, 8000)
+    wav_header(bytes, written - 44)
+    let saved = write_file_bytes("tone.wav", bytes, len as usize)
+    print("WAV_OK ")
+    println_i64(len)
+    dealloc(bytes)
+    return 0
+}

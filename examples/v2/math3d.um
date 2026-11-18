@@ -1,0 +1,218 @@
+// Pure-UMAY 3D slice: integer math + software wireframe renderer.
+//
+// Like `gui_core.um` and `game_core.um`, this file is SPLICED at crate root
+// above a generated SDL binding and an app body. It must stay pure UMAY: no
+// FFI declarations, no feature attributes, no modules, nothing outside the
+// prelude.
+//
+// Ponytail model, in one place:
+//  - ponytail: no floats (no stdlib math module). Mat4 entries are Q16.16:
+//    stored = real * 65536. Vertex coordinates are PLAIN integers, so one
+//    multiply by a Q16.16 entry and one integer divide by 65536 is enough.
+//    UMAY's `/` is x86 `idiv`, i.e. rounds toward zero; deterministic.
+//  - ponytail: rotation is quantised to 1/16 turns; cos/sin come from a
+//    hardcoded 16-entry table. No trig implementation, no degree/radian API.
+//  - ponytail: wireframe edges only. No triangle fill, no backface culling, no
+//    z-buffer, no depth sort, no lighting, no texturing, no normals. Later
+//    edges simply overwrite earlier pixels; the cube is convex so the result
+//    is still legible.
+//  - ponytail: perspective divide with a fixed focal length, no near-plane
+//    clipping beyond a `z <= 0` sentinel, no camera matrix (the cube is
+//    translated down +Z inline), no aspect-ratio correction.
+//  - ponytail: Bresenham with a per-pixel framebuffer bounds test rather than
+//    Cohen-Sutherland; line length here is at most 64px, so a few rejected
+//    iterations are cheaper than a clipper.
+//  - ponytail: framebuffer writes go through `write_u32(ptr_usize + offset)`
+//    because computed pointer derefs (`*(p + n)`) are not UMAY syntax; see
+//    gui_core.um and game_core.um for the same gap and escape hatch.
+//
+// Projected coordinates are screen pixels: +x right, +y DOWN (hence the
+// minus sign on the y projection), z kept only as a validity tag.
+
+const Q: i64 = 65536
+const FOCAL: i64 = 32
+const DEPTH: i64 = 32
+const CUBE_R: i64 = 8
+
+struct Vec3 { x: i64, y: i64, z: i64 }
+
+struct Mat4 { m: [i64; 16] } // row-major, Q16.16, last column = translation
+
+fn v3(x: i64, y: i64, z: i64) -> Vec3 {
+    return Vec3 { x: x, y: y, z: z }
+}
+
+fn v3_add(a: Vec3, b: Vec3) -> Vec3 {
+    return Vec3 { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }
+}
+
+fn v3_sub(a: Vec3, b: Vec3) -> Vec3 {
+    return Vec3 { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }
+}
+
+// ponytail: table lookup instead of a series expansion or a libm call.
+// Values are round-to-nearest Q16.16 approximations of cos(k * 2*pi/16).
+fn rot_cos(k: i64) -> i64 {
+    if k == 0 { return 65536 }
+    if k == 1 { return 60529 }
+    if k == 2 { return 46341 }
+    if k == 3 { return 25079 }
+    if k == 4 { return 0 }
+    if k == 5 { return -25079 }
+    if k == 6 { return -46341 }
+    if k == 7 { return -60529 }
+    if k == 8 { return -65536 }
+    if k == 9 { return -60529 }
+    if k == 10 { return -46341 }
+    if k == 11 { return -25079 }
+    if k == 12 { return 0 }
+    if k == 13 { return 25079 }
+    if k == 14 { return 46341 }
+    if k == 15 { return 60529 }
+    return 65536
+}
+
+// ponytail: same table for sin, shifted by a quarter turn.
+fn rot_sin(k: i64) -> i64 {
+    if k == 0 { return 0 }
+    if k == 1 { return 25079 }
+    if k == 2 { return 46341 }
+    if k == 3 { return 60529 }
+    if k == 4 { return 65536 }
+    if k == 5 { return 60529 }
+    if k == 6 { return 46341 }
+    if k == 7 { return 25079 }
+    if k == 8 { return 0 }
+    if k == 9 { return -25079 }
+    if k == 10 { return -46341 }
+    if k == 11 { return -60529 }
+    if k == 12 { return -65536 }
+    if k == 13 { return -60529 }
+    if k == 14 { return -46341 }
+    if k == 15 { return -25079 }
+    return 0
+}
+
+fn mat4_identity() -> Mat4 {
+    let mut m = [0i64; 16]
+    m[0] = Q
+    m[5] = Q
+    m[10] = Q
+    m[15] = Q
+    return Mat4 { m: m }
+}
+
+// `angle_steps` counts 1/16 turns; normalised to 0..15 so negative angles work.
+// Rotation about +Y, column-vector convention:
+//   x' = cos*x + sin*z ; y' = y ; z' = -sin*x + cos*z
+// ponytail: no rotation about X or Z, no arbitrary axis, no scaling matrix.
+fn mat4_rot_y(angle_steps: i64) -> Mat4 {
+    let k = angle_steps % 16
+    let step = if k < 0 { k + 16 } else { k }
+    let c = rot_cos(step)
+    let s = rot_sin(step)
+    let mut m = [0i64; 16]
+    m[0] = c
+    m[2] = s
+    m[5] = Q
+    m[8] = -s
+    m[10] = c
+    m[15] = Q
+    return Mat4 { m: m }
+}
+
+// Uniform Q16.16 matrix times plain-integer vector, divided back once.
+// ponytail: the w row (m[12..15]) is ignored -- all transforms here are affine.
+fn mat4_apply(m: &Mat4, v: &Vec3) -> Vec3 {
+    let x = (m.m[0] * v.x + m.m[1] * v.y + m.m[2] * v.z + m.m[3]) / Q
+    let y = (m.m[4] * v.x + m.m[5] * v.y + m.m[6] * v.z + m.m[7]) / Q
+    let z = (m.m[8] * v.x + m.m[9] * v.y + m.m[10] * v.z + m.m[11]) / Q
+    return Vec3 { x: x, y: y, z: z }
+}
+
+// Perspective divide: `screen = centre + FOCAL * view.xy / view.z`.
+// ponytail: sentinel (-1,-1,-1) for z<=0 (behind camera or divide-by-zero);
+// callers skip such points instead of clipping an edge against the near plane.
+// ponytail: fixed focal length, no FOV parameter, no aspect correction, and y
+// is negated because screen rows grow downward while view y grows upward.
+fn project(v: &Vec3, width: i64, height: i64) -> Vec3 {
+    if v.z <= 0 { return Vec3 { x: -1, y: -1, z: -1 } }
+    let sx = width / 2 + (v.x * FOCAL) / v.z
+    let sy = height / 2 - (v.y * FOCAL) / v.z
+    return Vec3 { x: sx, y: sy, z: v.z }
+}
+
+// Bresenham in full i64 space; each candidate pixel is bounds-checked before
+// the write, so endpoints outside the framebuffer are simply skipped.
+// ponytail: no clipping algorithm, no per-pixel alpha -- colour is opaque ARGB.
+fn draw_line(buf: *mut u8, width: i64, height: i64, x0: i64, y0: i64, x1: i64, y1: i64, color: u32) {
+    if unsafe { buf as usize } == 0 { return }
+    if width <= 0 || height <= 0 { return }
+    let mut x = x0
+    let mut y = y0
+    let dx = if x1 >= x0 { x1 - x0 } else { x0 - x1 }
+    let dy = if y1 >= y0 { y1 - y0 } else { y0 - y1 }
+    // ponytail: explicit i64 -- an untyped `if ... { 1 } else { -1 }` infers a
+    // u32 here, so -1 becomes 0xFFFFFFFF and the line walks off to +2^32.
+    let ix: i64 = if x0 < x1 { 1 } else { -1 }
+    let iy: i64 = if y0 < y1 { 1 } else { -1 }
+    let mut err = dx - dy
+    loop {
+        if x >= 0 && x < width && y >= 0 && y < height {
+            let off = ((y * width + x) * 4) as usize
+            unsafe { write_u32((buf as usize + off) as *mut u8, color) }
+        }
+        if x == x1 && y == y1 { return }
+        let e2 = err * 2
+        if e2 > -dy { err = err - dy; x = x + ix }
+        if e2 < dx { err = err + dx; y = y + iy }
+    }
+}
+
+// Wireframe cube: 8 corners at (+/-8, +/-8, +/-8), rotated about Y, pushed
+// DEPTH down +Z so every corner is in front of the camera, then projected.
+// The 12 edges are (front face, back face, four connectors), drawn as lines.
+// ponytail: no face fill, no hidden-line removal, no depth buffer -- edges are
+// drawn in a fixed order and later ones overwrite earlier pixels.
+fn draw_cube(buf: *mut u8, width: i64, height: i64, rot: i64) {
+    if unsafe { buf as usize } == 0 { return }
+    if width <= 0 || height <= 0 { return }
+    let m = mat4_rot_y(rot)
+    let mut sx = [0i64; 8]
+    let mut sy = [0i64; 8]
+    let mut ok = [0i64; 8]
+    let mut i: usize = 0
+    while i < 8 {
+        let px = if (i & 1) == 0 { -CUBE_R } else { CUBE_R }
+        let py = if (i & 2) == 0 { -CUBE_R } else { CUBE_R }
+        let pz = if (i & 4) == 0 { -CUBE_R } else { CUBE_R }
+        let p = v3(px, py, pz)
+        let turned = mat4_apply(&m, &p)
+        let moved = v3_add(turned, v3(0, 0, DEPTH))
+        let q = project(&moved, width, height)
+        if q.z > 0 {
+            sx[i] = q.x
+            sy[i] = q.y
+            ok[i] = 1
+        }
+        i = i + 1
+    }
+    // 12 edges, two endpoint indices each.
+    let edges = [
+        0i64, 1, 1, 5, 5, 4, 4, 0, // y = -8 face
+        2, 3, 3, 7, 7, 6, 6, 2, // y = +8 face
+        0, 2, 1, 3, 4, 6, 5, 7, // vertical connectors
+    ]
+    let front: u32 = 0xff50c850u32
+    let back: u32 = 0xff2850c8u32
+    let mut e: usize = 0
+    while e < 24 {
+        let a = edges[e] as usize
+        let b = edges[e + 1] as usize
+        if ok[a] != 0 && ok[b] != 0 {
+            let color: u32 = if e < 8 { front } else { back }
+            draw_line(buf, width, height, sx[a], sy[a], sx[b], sy[b], color)
+        }
+        e = e + 2
+    }
+}

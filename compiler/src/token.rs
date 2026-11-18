@@ -88,6 +88,7 @@ pub enum TokenKind {
     ShrEq,        // >>=
     At,           // @
     Hash,         // #
+    Dollar,       // $  (metavariable sigil in declarative macros)
     Underscore,   // _  (also produced as Ident("_"); see lexer)
 
     // ---- trivia / special ----
@@ -385,6 +386,7 @@ impl TokenKind {
             TokenKind::ShrEq => ">>=",
             TokenKind::At => "@",
             TokenKind::Hash => "#",
+            TokenKind::Dollar => "$",
             TokenKind::Underscore => "_",
             _ => "",
         }

@@ -355,8 +355,12 @@ fn path_text(path: &crate::ast::Path) -> String {
             out.push_str("::");
         }
         out.push_str(&segment.name);
-        if !segment.args.is_empty() {
-            let listed: Vec<String> = segment.args.iter().map(|a| render(a, &SourceMap::new())).collect();
+        if !segment.args.is_empty() || !segment.bindings.is_empty() {
+            let mut listed: Vec<String> =
+                segment.args.iter().map(|a| render(a, &SourceMap::new())).collect();
+            listed.extend(segment.bindings.iter().map(|b| {
+                format!("{} = {}", b.name, render(&b.ty, &SourceMap::new()))
+            }));
             out.push('<');
             out.push_str(&listed.join(", "));
             out.push('>');

@@ -166,18 +166,42 @@ pub fn generate(
         return Err(errors);
     }
 
-    // Read-only data: string literals.
+    // Read-only data: string literals, then static vtable tables.
     //
     // The section directive is the one piece of the file that is not an
     // instruction, and it is spelled differently by the three object formats:
     // ELF and COFF both accept `.section .rodata`, Mach-O wants a segment name
-    // as well. A string literal placed in the wrong section is either a link
-    // failure or, worse, a writable string.
-    if !program.strings.is_empty() {
+    // as well. A string literal or vtable placed in the wrong section is either
+    // a link failure or, worse, writable data.
+    if !program.strings.is_empty() || !program.vtables.is_empty() {
         out.push_str(target.rodata_directive());
         for (index, text) in program.strings.iter().enumerate() {
             out.push_str(&format!(".Lstr_{index}:\n"));
             out.push_str(&format!("    .asciz {}\n", quote(text)));
+        }
+        for (index, vtable) in program.vtables.iter().enumerate() {
+            out.push_str(".p2align 3\n");
+            out.push_str(&format!(".Lvtable_{index}:\n"));
+            // ADR 0018 prefix: size, alignment, then the optional drop shim.
+            // The drop word is a plain zero when no owned object uses this table.
+            out.push_str(&format!("    .quad {}\n", vtable.size));
+            out.push_str(&format!("    .quad {}\n", vtable.align));
+            let drop = match vtable.drop {
+                Some(id) => {
+                    let name = isel::term::term_symbol_for(id, &symbols);
+                    crate::asm::mangle_symbol(&name, target, &foreign)
+                }
+                None => "0".to_string(),
+            };
+            out.push_str(&format!("    .quad {drop}\n"));
+            for &entry in &vtable.entries {
+                // Print the entry exactly as a direct call to this FnId is
+                // printed: the HIR symbol map names it, and asm.rs's rule adds
+                // the target's prefix (or leaves a foreign symbol alone).
+                let name = isel::term::term_symbol_for(entry, &symbols);
+                let name = crate::asm::mangle_symbol(&name, target, &foreign);
+                out.push_str(&format!("    .quad {name}\n"));
+            }
         }
     }
     // Object-file metadata. ELF wants the stack marked non-executable and does
@@ -260,6 +284,14 @@ pub(crate) fn reachable_functions(program: &MirProgram) -> std::collections::Has
                 stack.push(id);
             }
         }
+    }
+
+    // Every function named by a static vtable is a root too: its address is
+    // emitted into rodata, so pruning its body would leave a `.quad` pointing
+    // at a symbol that is never defined.
+    for vtable in &program.vtables {
+        stack.extend(vtable.drop);
+        stack.extend(vtable.entries.iter().copied());
     }
 
     // A function whose address is taken anywhere can be called through that

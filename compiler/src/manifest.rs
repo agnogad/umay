@@ -24,6 +24,32 @@ pub struct Manifest {
     pub build: Build,
     /// Dependency name to constraint, in the order written.
     pub dependencies: Vec<Dependency>,
+    /// Native (system) libraries, in the order written. Empty for a v1 manifest.
+    pub native: Vec<NativeDependency>,
+    /// Mobile app metadata from `[mobile]`. Empty for a v1 manifest.
+    pub mobile: Mobile,
+}
+
+/// The `[mobile]` section: app metadata for an iOS/Android build (ADR 0021).
+///
+/// Every field is optional so a v1 manifest stays valid and round-trips. This is
+/// configuration only -- signing, Gradle/Xcode projects and packaging are not in
+/// this slice: the reader records the declared data, it does not produce an IPA
+/// or AAB.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Mobile {
+    /// Reverse-DNS bundle id, e.g. `com.example.app`.
+    pub app_id: String,
+    /// Human-readable app name.
+    pub display_name: String,
+    /// Target triple, e.g. `aarch64-apple-ios`.
+    pub target: Option<String>,
+    /// Permission names the app declares.
+    pub permissions: Vec<String>,
+    /// Bundle asset paths, relative to the project.
+    pub assets: Vec<String>,
+    /// `portrait`, `landscape` or `any`.
+    pub orientation: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -44,6 +70,8 @@ pub struct Build {
     /// `dynamic` or `static`.
     pub link: String,
     pub target: String,
+    /// Root project's build script, as declared data. This reader never runs it.
+    pub build_script: Option<String>,
 }
 
 impl Default for Build {
@@ -55,6 +83,7 @@ impl Default for Build {
             debug: true,
             link: "dynamic".to_string(),
             target: "x86_64-linux".to_string(),
+            build_script: None,
         }
     }
 }
@@ -67,6 +96,36 @@ pub struct Dependency {
     pub version: String,
     /// A local path, for a dependency that is not fetched.
     pub path: Option<String>,
+}
+
+/// One `[native.<name>]` table: a system library, not a UPM package.
+///
+/// All fields default to "not specified" so a v1 manifest stays unchanged.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NativeDependency {
+    /// The name from the table header, e.g. `sdl3`.
+    pub name: String,
+    /// pkg-config package name. `None` (an empty TOML value) means no lookup.
+    pub pkg_config: Option<String>,
+    /// Extra `-I` paths from the manifest, merged with any pkg-config output.
+    pub include_paths: Vec<String>,
+    /// Extra linker flags from the manifest, merged with any pkg-config output.
+    pub link_flags: Vec<String>,
+    /// Whether to ask pkg-config for `--static` and link statically.
+    pub r#static: bool,
+    /// Overrides keyed by exact target triple. A matching one replaces the base.
+    pub target_overrides: BTreeMap<String, NativeOverride>,
+}
+
+/// A `[native.<name>.target.<triple>]` table.
+///
+/// A matching override replaces the base entry wholesale; overrides never chain.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NativeOverride {
+    pub pkg_config: Option<String>,
+    pub include_paths: Vec<String>,
+    pub link_flags: Vec<String>,
+    pub r#static: bool,
 }
 
 /// A manifest problem: what is wrong and where in the file.
@@ -95,6 +154,34 @@ impl ManifestError {
 /// editions, so compiling it under the wrong one would be pretending.
 pub const EDITIONS: [&str; 1] = ["2026"];
 
+/// Which native table a section header names.
+enum NativeContext {
+    /// `[native.<name>]`
+    Entry(String),
+    /// `[native.<name>.target.<triple>]`
+    Override(String, String),
+}
+
+/// Recognises `[native.<name>]` and `[native.<name>.target.<triple>]`.
+///
+/// Anything else -- a bare `[native]`, a dotted name, a malformed override --
+/// is left for the caller to report as an unknown section. Refusing to guess is
+/// the point: a typo must not silently drop a library.
+fn native_context(section: &str) -> Option<NativeContext> {
+    let rest = section.strip_prefix("native.")?;
+    if let Some((name, triple)) = rest.split_once(".target.") {
+        if !name.is_empty() && !triple.is_empty() && !triple.contains('.') {
+            return Some(NativeContext::Override(name.to_string(), triple.to_string()));
+        }
+        return None;
+    }
+    if !rest.is_empty() && !rest.contains('.') {
+        Some(NativeContext::Entry(rest.to_string()))
+    } else {
+        None
+    }
+}
+
 /// Parses and validates a manifest.
 pub fn parse(text: &str) -> Result<Manifest, Vec<ManifestError>> {
     let mut errors = Vec::new();
@@ -112,10 +199,13 @@ pub fn parse(text: &str) -> Result<Manifest, Vec<ManifestError>> {
         if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             section = name.trim().to_string();
             match section.as_str() {
-                "package" | "build" | "dependencies" => {}
+                "package" | "build" | "dependencies" | "native" | "mobile" => {}
+                other if native_context(other).is_some() => {}
                 other => errors.push(
                     ManifestError::at(line_number, format!("unknown section `[{other}]`"))
-                        .with_help("known sections are [package], [build] and [dependencies]"),
+                        .with_help(
+                            "known sections are [package], [build], [dependencies], [native.<name>] and [mobile]",
+                        ),
                 ),
             }
             continue;
@@ -135,6 +225,26 @@ pub fn parse(text: &str) -> Result<Manifest, Vec<ManifestError>> {
             "package" => read_package(&mut manifest.package, key, value, line_number, &mut errors),
             "build" => read_build(&mut manifest.build, key, value, line_number, &mut errors),
             "dependencies" => read_dependency(&mut manifest.dependencies, key, value, line_number, &mut errors),
+            "mobile" => read_mobile(&mut manifest.mobile, key, value, line_number, &mut errors),
+            // `[native]` on its own declares nothing; a misplaced key is an error
+            // rather than a default silently applied to every library.
+            "native" => errors.push(
+                ManifestError::at(line_number, format!("unknown key `{key}` in [native]"))
+                    .with_help("declare a library as [native.<name>]"),
+            ),
+            _ if section.starts_with("native.") => {
+                if let Some(ctx) = native_context(&section) {
+                    match ctx {
+                        NativeContext::Entry(name) => read_native_entry(
+                            &mut manifest.native, &name, key, value, line_number, &mut errors,
+                        ),
+                        NativeContext::Override(name, triple) => read_native_override(
+                            &mut manifest.native, &name, &triple, key, value, line_number, &mut errors,
+                        ),
+                    }
+                }
+                // A malformed native header was already reported above.
+            }
             "" => errors.push(
                 ManifestError::at(line_number, "this line is outside any section")
                     .with_help("start a section first, e.g. `[package]`"),
@@ -246,9 +356,23 @@ fn read_build(
             Some(text) => build.target = text,
             None => errors.push(bad_value(line, "target", value)),
         },
+        // Data only. The reader records the path; nothing here executes it.
+        // Both spellings are accepted: the v2 design writes `build-script`,
+        // while callers of the Rust API name the field `build_script`.
+        "build-script" | "build_script" => match string_value(value) {
+            Some(text) if !text.trim().is_empty() => build.build_script = Some(text),
+            Some(_) => {
+                errors.push(ManifestError::at(line, "`build-script` is empty").with_help(
+                    "give a path such as `scripts/build.sh`, or omit the key",
+                ))
+            }
+            None => errors.push(bad_value(line, "build-script", value)),
+        },
         other => errors.push(
             ManifestError::at(line, format!("unknown key `{other}` in [build]"))
-                .with_help("known keys are entry, output-dir, opt-level, debug, link, target"),
+                .with_help(
+                    "known keys are entry, output-dir, opt-level, debug, link, target, build-script",
+                ),
         ),
     }
 }
@@ -289,6 +413,135 @@ fn read_dependency(
         return;
     }
     errors.push(bad_value(line, key, value));
+}
+
+/// Reads one key from `[mobile]`. Every value is optional; validation checks the
+/// shapes once the whole section is read.
+fn read_mobile(
+    mobile: &mut Mobile,
+    key: &str,
+    value: &str,
+    line: usize,
+    errors: &mut Vec<ManifestError>,
+) {
+    match key {
+        "app-id" => match string_value(value) {
+            Some(text) => mobile.app_id = text,
+            None => errors.push(bad_value(line, key, value)),
+        },
+        "display-name" => match string_value(value) {
+            Some(text) => mobile.display_name = text,
+            None => errors.push(bad_value(line, key, value)),
+        },
+        "target" => match string_value(value) {
+            Some(text) => mobile.target = Some(text),
+            None => errors.push(bad_value(line, key, value)),
+        },
+        "permissions" => match string_array(value) {
+            Some(items) => mobile.permissions = items,
+            None => errors.push(bad_value(line, key, value)),
+        },
+        "assets" => match string_array(value) {
+            Some(items) => mobile.assets = items,
+            None => errors.push(bad_value(line, key, value)),
+        },
+        "orientation" => match string_value(value) {
+            Some(text) => mobile.orientation = Some(text),
+            None => errors.push(bad_value(line, key, value)),
+        },
+        other => errors.push(
+            ManifestError::at(line, format!("unknown key `{other}` in [mobile]"))
+                .with_help(
+                    "known keys are app-id, display-name, target, permissions, assets, orientation",
+                ),
+        ),
+    }
+}
+
+/// Finds a native entry by name, creating it on first use.
+///
+/// Creating on demand makes tables order-independent: a target override may
+/// precede its base table without losing either one.
+fn ensure_native<'a>(natives: &'a mut Vec<NativeDependency>, name: &str) -> &'a mut NativeDependency {
+    if let Some(index) = natives.iter().position(|d| d.name == name) {
+        return &mut natives[index];
+    }
+    let index = natives.len();
+    natives.push(NativeDependency { name: name.to_string(), ..Default::default() });
+    &mut natives[index]
+}
+
+fn read_native_entry(
+    natives: &mut Vec<NativeDependency>,
+    name: &str,
+    key: &str,
+    value: &str,
+    line: usize,
+    errors: &mut Vec<ManifestError>,
+) {
+    let dep = ensure_native(natives, name);
+    match key {
+        // An empty value means "do not query pkg-config"; it is how a platform
+        // with no pkg-config data turns the lookup off (see the design draft).
+        "pkg-config" => match string_value(value) {
+            Some(text) => dep.pkg_config = (!text.trim().is_empty()).then_some(text),
+            None => errors.push(bad_value(line, key, value)),
+        },
+        "include-paths" => match string_array(value) {
+            Some(items) => dep.include_paths = items,
+            None => errors.push(bad_value(line, key, value)),
+        },
+        "link-flags" => match string_array(value) {
+            Some(items) => dep.link_flags = items,
+            None => errors.push(bad_value(line, key, value)),
+        },
+        "static" => match bool_value(value) {
+            Some(b) => dep.r#static = b,
+            None => errors.push(bad_value(line, key, value)),
+        },
+        other => errors.push(
+            ManifestError::at(line, format!("unknown key `{other}` in [native.{name}]"))
+                .with_help("known keys are pkg-config, include-paths, link-flags, static"),
+        ),
+    }
+}
+
+fn read_native_override(
+    natives: &mut Vec<NativeDependency>,
+    name: &str,
+    triple: &str,
+    key: &str,
+    value: &str,
+    line: usize,
+    errors: &mut Vec<ManifestError>,
+) {
+    let dep = ensure_native(natives, name);
+    let ov = dep.target_overrides.entry(triple.to_string()).or_default();
+    match key {
+        "pkg-config" => match string_value(value) {
+            Some(text) => ov.pkg_config = (!text.trim().is_empty()).then_some(text),
+            None => errors.push(bad_value(line, key, value)),
+        },
+        "include-paths" => match string_array(value) {
+            Some(items) => ov.include_paths = items,
+            None => errors.push(bad_value(line, key, value)),
+        },
+        "link-flags" => match string_array(value) {
+            Some(items) => ov.link_flags = items,
+            None => errors.push(bad_value(line, key, value)),
+        },
+        "static" => match bool_value(value) {
+            Some(b) => ov.r#static = b,
+            None => errors.push(bad_value(line, key, value)),
+        },
+        other => errors.push(
+            ManifestError::at(
+                line,
+                format!("unknown key `{other}` in [native.{name}.target.{triple}]"),
+            )
+            .with_help("known keys are pkg-config, include-paths, link-flags, static"),
+        ),
+    }
 }
 
 fn validate(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
@@ -356,6 +609,84 @@ fn validate(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
         // an empty version is a request, not a mistake, now that a registry
         // exists to answer it.
     }
+    for native in &manifest.native {
+        if !is_valid_name(&native.name) {
+            errors.push(ManifestError::at(
+                0,
+                format!("`{}` is not a valid native dependency name", native.name),
+            ));
+        }
+    }
+    validate_mobile(&manifest.mobile, errors);
+}
+
+/// The `[mobile]` fields are all optional, so only values that are present and
+/// non-empty are checked. A v1 manifest has an empty `Mobile` and passes cleanly.
+fn validate_mobile(mobile: &Mobile, errors: &mut Vec<ManifestError>) {
+    if !mobile.app_id.is_empty() && !is_valid_app_id(&mobile.app_id) {
+        errors.push(
+            ManifestError::at(
+                0,
+                format!("`{}` is not a valid mobile app id", mobile.app_id),
+            )
+            .with_help(
+                "an app id is reverse-DNS like `com.example.app`: lowercase, at least one dot, no spaces",
+            ),
+        );
+    }
+    if let Some(orientation) = &mobile.orientation {
+        if orientation != "portrait" && orientation != "landscape" && orientation != "any" {
+            errors.push(
+                ManifestError::at(
+                    0,
+                    format!("`{orientation}` is not a valid mobile orientation"),
+                )
+                .with_help("orientation must be `portrait`, `landscape` or `any`"),
+            );
+        }
+    }
+    for permission in &mobile.permissions {
+        if permission.chars().any(|c| c.is_whitespace() || c == '/' || c == '\\') {
+            errors.push(
+                ManifestError::at(
+                    0,
+                    format!("`{permission}` is not a valid mobile permission"),
+                )
+                .with_help("a permission name has no path separators or whitespace"),
+            );
+        }
+    }
+    for asset in &mobile.assets {
+        if let Some(reason) = asset_path_problem(asset) {
+            errors.push(ManifestError::at(0, reason).with_help(
+                "use a path relative to the project, e.g. `assets/icon.png`",
+            ));
+        }
+    }
+}
+
+/// A reverse-DNS-ish app id: at least one dot, lowercase, no whitespace and no
+/// empty components. Uppercase and spaces are the mistakes this catches.
+fn is_valid_app_id(id: &str) -> bool {
+    id.contains('.')
+        && !id.chars().any(|c| c.is_whitespace() || c.is_uppercase())
+        && id.split('.').all(|part| !part.is_empty())
+}
+
+/// Why an asset path is not allowed, if it is not. Assets ship in the bundle and
+/// are resolved relative to the project, so absolute paths and `..` escapes are
+/// refused -- the same spirit as `output_dir_problem`.
+fn asset_path_problem(path: &str) -> Option<String> {
+    if path.is_empty() {
+        return Some("a mobile asset path is empty".to_string());
+    }
+    if Path::new(path).is_absolute() {
+        return Some(format!("the mobile asset `{path}` is an absolute path"));
+    }
+    if path.replace('\\', "/").split('/').any(|c| c == "..") {
+        return Some(format!("the mobile asset `{path}` leaves the project"));
+    }
+    None
 }
 
 /// Why an output directory is not allowed, if it is not.
@@ -510,6 +841,9 @@ pub fn to_toml(manifest: &Manifest) -> String {
     out.push_str(&format!("debug = {}\n", manifest.build.debug));
     out.push_str(&format!("link = \"{}\"\n", manifest.build.link));
     out.push_str(&format!("target = \"{}\"\n", manifest.build.target));
+    if let Some(script) = &manifest.build.build_script {
+        out.push_str(&format!("build-script = \"{script}\"\n"));
+    }
     if !manifest.dependencies.is_empty() {
         out.push_str("\n[dependencies]\n");
         for dependency in &manifest.dependencies {
@@ -525,7 +859,75 @@ pub fn to_toml(manifest: &Manifest) -> String {
             }
         }
     }
+    for native in &manifest.native {
+        out.push_str(&format!("\n[native.{}]\n", native.name));
+        write_native_fields(
+            &mut out,
+            native.pkg_config.as_deref(),
+            &native.include_paths,
+            &native.link_flags,
+            native.r#static,
+        );
+        for (triple, ov) in &native.target_overrides {
+            out.push_str(&format!("\n[native.{}.target.{}]\n", native.name, triple));
+            write_native_fields(
+                &mut out,
+                ov.pkg_config.as_deref(),
+                &ov.include_paths,
+                &ov.link_flags,
+                ov.r#static,
+            );
+        }
+    }
+    // An empty `[mobile]` writes no section, so a v1 manifest round-trips to the
+    // exact same bytes. Fields are emitted in a fixed order, not map order.
+    if manifest.mobile != Mobile::default() {
+        out.push_str("\n[mobile]\n");
+        if !manifest.mobile.app_id.is_empty() {
+            out.push_str(&format!("app-id = \"{}\"\n", manifest.mobile.app_id));
+        }
+        if !manifest.mobile.display_name.is_empty() {
+            out.push_str(&format!("display-name = \"{}\"\n", manifest.mobile.display_name));
+        }
+        if let Some(target) = &manifest.mobile.target {
+            out.push_str(&format!("target = \"{target}\"\n"));
+        }
+        if !manifest.mobile.permissions.is_empty() {
+            let listed: Vec<String> =
+                manifest.mobile.permissions.iter().map(|p| format!("\"{p}\"")).collect();
+            out.push_str(&format!("permissions = [{}]\n", listed.join(", ")));
+        }
+        if !manifest.mobile.assets.is_empty() {
+            let listed: Vec<String> =
+                manifest.mobile.assets.iter().map(|a| format!("\"{a}\"")).collect();
+            out.push_str(&format!("assets = [{}]\n", listed.join(", ")));
+        }
+        if let Some(orientation) = &manifest.mobile.orientation {
+            out.push_str(&format!("orientation = \"{orientation}\"\n"));
+        }
+    }
     out
+}
+
+fn write_native_fields(
+    out: &mut String,
+    pkg_config: Option<&str>,
+    include_paths: &[String],
+    link_flags: &[String],
+    is_static: bool,
+) {
+    if let Some(pkg) = pkg_config {
+        out.push_str(&format!("pkg-config = \"{pkg}\"\n"));
+    }
+    if !include_paths.is_empty() {
+        let listed: Vec<String> = include_paths.iter().map(|p| format!("\"{p}\"")).collect();
+        out.push_str(&format!("include-paths = [{}]\n", listed.join(", ")));
+    }
+    if !link_flags.is_empty() {
+        let listed: Vec<String> = link_flags.iter().map(|f| format!("\"{f}\"")).collect();
+        out.push_str(&format!("link-flags = [{}]\n", listed.join(", ")));
+    }
+    out.push_str(&format!("static = {is_static}\n"));
 }
 
 /// The project's dependency map, for a resolver.

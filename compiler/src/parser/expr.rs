@@ -29,9 +29,64 @@ impl Parser {
             self.recover_stmt();
             return Expr { kind: ExprKind::Infer, span: self.prev_span() };
         }
-        let e = self.parse_assign();
+        // A closure body is a full expression and binds looser than any binary
+        // operator, so closures are recognised here -- before `parse_assign` /
+        // `parse_binary` -- and the body is parsed with `parse_expr`. `|x| x + 1`
+        // is therefore `|x| (x + 1)`, not `(|x| x) + 1`.
+        let e = if self.at(&TokenKind::Pipe) || self.at(&TokenKind::PipePipe) {
+            self.parse_closure()
+        } else if self.at_keyword(Keyword::Move)
+            && matches!(self.nth_kind(1), TokenKind::Pipe | TokenKind::PipePipe)
+        {
+            // `move` normally parses its operand through `parse_prefix_operand`,
+            // which cannot see a looser closure. Handle `move |..|` here so the
+            // Move node wraps the whole Closure node.
+            let start = self.advance().span;
+            let inner = self.parse_closure();
+            let span = start.to(inner.span);
+            Expr { kind: ExprKind::Move(Box::new(inner)), span }
+        } else {
+            self.parse_assign()
+        };
         self.leave();
         e
+    }
+
+    /// Parses a closure: `|params| body` or `|| body`.
+    ///
+    /// Called only from `parse_expr` in prefix position. A leading `|` there can
+    /// only begin a closure (bitwise-or needs a left operand), and the lexer
+    /// emits a single `PipePipe` for `||`, which means zero parameters.
+    fn parse_closure(&mut self) -> Expr {
+        let pipe = self.advance();
+        let pipe_span = pipe.span;
+        let mut params = Vec::new();
+        if pipe.kind != TokenKind::PipePipe {
+            while !self.at(&TokenKind::Pipe)
+                && !self.at(&TokenKind::PipePipe)
+                && !self.at_eof()
+            {
+                let (name, name_span) = match self.expect_ident("E0360", "for the closure parameter") {
+                    Some(v) => v,
+                    None => break,
+                };
+                let ty = if self.eat(&TokenKind::Colon) {
+                    Some(self.parse_type())
+                } else {
+                    None
+                };
+                params.push(ClosureParam { name, name_span, ty });
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            // A single `|` closes the parameter list. `expect` reports a missing
+            // one with an existing diagnostic code and never panics on EOF.
+            self.expect(TokenKind::Pipe, "E0322", "closure parameters");
+        }
+        let body = self.parse_expr();
+        let span = pipe_span.to(body.span);
+        Expr { kind: ExprKind::Closure { params, body: Box::new(body), pipe_span }, span }
     }
 
     /// Returns the 1-based line where the current expression starts, for
@@ -255,7 +310,16 @@ impl Parser {
                     match self.kind().clone() {
                         TokenKind::Ident(name) => {
                             let name_span = self.advance().span;
-                            if self.at(&TokenKind::LParen) {
+                            if name == "await" && !self.at(&TokenKind::LParen) {
+                                // v2 contextual postfix `await`. It is only special
+                                // directly after a dot and without a following `(`,
+                                // so `obj.await()` remains a method call and `await`
+                                // is still usable as a plain name elsewhere.
+                                expr = Expr {
+                                    kind: ExprKind::Await { base: Box::new(expr), span: start.to(name_span) },
+                                    span: start.to(name_span),
+                                };
+                            } else if self.at(&TokenKind::LParen) {
                                 let (args, end) = self.parse_call_args("E0312", "method arguments");
                                 expr = Expr {
                                     kind: ExprKind::MethodCall {
@@ -497,7 +561,7 @@ impl Parser {
                 }
                 self.expect(TokenKind::Gt, "E0330", "generic arguments");
             }
-            segments.push(PathSegment { name, span: sp, args });
+            segments.push(PathSegment { name, span: sp, args, bindings: Vec::new() });
             // A turbofish used up the `::` that would otherwise join the next
             // segment, so the path ends here unless the next token is another.
             if turbofish || !self.eat(&TokenKind::ColonColon) {

@@ -696,6 +696,7 @@ impl<'m, 't, 'h> Rewriter<'m, 't, 'h> {
             HirExprKind::Deref(inner) | HirExprKind::Move(inner) | HirExprKind::Try(inner) => {
                 self.rewrite_expr(inner)
             }
+            HirExprKind::Await { base } => self.rewrite_expr(base),
             HirExprKind::Cast { expr, .. } => self.rewrite_expr(expr),
             HirExprKind::PtrOffset { ptr, count } => {
                 self.rewrite_expr(ptr);
@@ -837,6 +838,7 @@ fn substitute_expr_types(types: &mut TyCtxt, e: &mut HirExpr, subst: &HashMap<St
         HirExprKind::Deref(inner) | HirExprKind::Move(inner) | HirExprKind::Try(inner) => {
             substitute_expr_types(types, inner, subst)
         }
+        HirExprKind::Await { base } => substitute_expr_types(types, base, subst),
         HirExprKind::Cast { expr, to } => {
             substitute_expr_types(types, expr, subst);
             *to = types.substitute(*to, subst);

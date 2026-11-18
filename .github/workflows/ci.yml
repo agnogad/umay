@@ -19,6 +19,29 @@ jobs:
       - name: Release build
         run: cargo build --release --locked --manifest-path compiler/Cargo.toml
 
+  # v2 gate enforcement. Gates default off, so the default-corpus step must stay
+  # green on its own; the gated step proves the v2-gates feature and its suite.
+  # Both are merge-blocking (no continue-on-error, no needs cycle).
+  v2-features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test v2 gates
+        run: cargo test --locked --features v2-gates --manifest-path compiler/Cargo.toml
+      - name: Test default corpus (locked)
+        run: cargo test --locked --manifest-path compiler/Cargo.toml
+
+  # UI snapshot harness. BLESS is intentionally unset: a stale snapshot fails
+  # the run and blocks the PR. Updates require a reviewed `BLESS=1` run.
+  v2-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: UI snapshots (locked)
+        run: cargo test --locked --test ui --manifest-path compiler/Cargo.toml
+
   macos:
     # A Linux host can only assert that the Mach-O object is well formed. This
     # job links and runs a real program on an Intel Mac: the backend emits
@@ -141,6 +164,35 @@ jobs:
           aarch64-linux-gnu-gcc -static -o hfa dist/main.o dist/umay_runtime.o helper.o
           output="$(qemu-aarch64 -L /usr/aarch64-linux-gnu ./hfa)"
           test "$output" = 42
+      # Vtable ABI conformance (AAPCS64 under qemu). Two concrete impls of one
+      # trait are held as trait objects and called indirectly, so each call must
+      # go through its own vtable. Exact stdout diff, no skip: the qemu and
+      # cross toolchain are installed by this job above, so failure is a failure.
+      - name: Check vtable dispatch (AArch64, qemu)
+        run: |
+          dir="$RUNNER_TEMP/umay-arm64-vtable"
+          mkdir -p "$dir"
+          cd "$dir"
+          cat > main.um <<'EOF'
+          trait Shape { fn area(&self) -> i64 }
+          struct Square { side: i64 }
+          struct Rect { w: i64, h: i64 }
+          impl Shape for Square { fn area(&self) -> i64 { return self.side * self.side } }
+          impl Shape for Rect { fn area(&self) -> i64 { return self.w * self.h } }
+          fn main() -> i32 {
+              let s = Square { side: 5 }
+              let r = Rect { w: 3i64, h: 4i64 }
+              let a: dyn Shape = &s
+              let b: dyn Shape = &r
+              println_i64(a.area())
+              println_i64(b.area())
+              return 0
+          }
+          EOF
+          "$GITHUB_WORKSPACE/target/release/umay" build --target aarch64-unknown-linux-gnu main.um
+          qemu-aarch64 -L /usr/aarch64-linux-gnu ./dist/main > output.txt
+          printf '25\n12\n' > expected.txt
+          diff -u expected.txt output.txt
 
       - name: Build and run the AArch64 compiler
         env:
@@ -294,6 +346,64 @@ jobs:
           $out = (& ".\dist\main.exe") -join "`n"
           if ($out -ne "win-arm`n42") {
             Write-Error "unexpected output: $out"
+            exit 1
+          }
+      # Microsoft ARM64 passes aggregates of 1/2/4/8 bytes in x0 and everything
+      # else by reference (hidden pointer for returns). The sizes below are ones
+      # where UMAY and the C compiler agree; a 16-byte aggregate is deliberately
+      # not used because AAPCS64 (UMAY) splits it across x0/x1 while Microsoft's
+      # variant passes it by reference. This step is the exit-criterion-3 gate.
+      - name: Check Microsoft ARM64 aggregates against C
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "umay-win-arm-agg"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Set-Location $dir
+          @(
+            'struct B1 { a: i8 }'
+            'struct B2 { a: i16 }'
+            'struct B4 { a: i32 }'
+            'struct B8 { a: i64 }'
+            'struct B24 { a: i64, b: i64, c: i64 }'
+            'extern fn "ms_echo_b1" ms_echo_b1(s: B1) -> B1'
+            'extern fn "ms_echo_b2" ms_echo_b2(s: B2) -> B2'
+            'extern fn "ms_echo_b4" ms_echo_b4(s: B4) -> B4'
+            'extern fn "ms_echo_b8" ms_echo_b8(s: B8) -> B8'
+            'extern fn "ms_sum_b24" ms_sum_b24(b: B24) -> i64'
+            'extern fn "ms_make_b24" ms_make_b24(v: i64) -> B24'
+            'fn main() -> i32 {'
+            '    println_i64((ms_echo_b1(B1 { a: 1i8 })).a as i64)'
+            '    println_i64((ms_echo_b2(B2 { a: 2i16 })).a as i64)'
+            '    println_i64((ms_echo_b4(B4 { a: 3i32 })).a as i64)'
+            '    println_i64((ms_echo_b8(B8 { a: 4i64 })).a as i64)'
+            '    let b = ms_make_b24(10i64)'
+            '    println_i64(b.a + b.b + b.c)'
+            '    println_i64(ms_sum_b24(B24 { a: 5i64, b: 6i64, c: 7i64 }))'
+            '    return 0'
+            '}'
+          ) | Set-Content -Encoding utf8 main.um
+          @(
+            'struct B1 { signed char a; };'
+            'struct B2 { short a; };'
+            'struct B4 { int a; };'
+            'struct B8 { long long a; };'
+            'struct B24 { long long a, b, c; };'
+            'struct B1 ms_echo_b1(struct B1 s) { return s; }'
+            'struct B2 ms_echo_b2(struct B2 s) { return s; }'
+            'struct B4 ms_echo_b4(struct B4 s) { return s; }'
+            'struct B8 ms_echo_b8(struct B8 s) { return s; }'
+            'struct B24 ms_make_b24(long long v) { struct B24 b = { v, v+1, v+2 }; return b; }'
+            'long long ms_sum_b24(struct B24 b) { return b.a + b.b + b.c; }'
+          ) | Set-Content -Encoding utf8 helper.c
+          & "$env:GITHUB_WORKSPACE\target\release\umay.exe" build --target aarch64-w64-mingw32 --emit-object-only main.um
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          aarch64-w64-mingw32-gcc -c -O2 helper.c -o helper.o
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          aarch64-w64-mingw32-gcc -o dist\agg.exe dist\main.o dist\umay_runtime.o helper.o -mconsole -lws2_32
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $out = (& ".\dist\agg.exe") -join "`n"
+          if ($out -ne "1`n2`n3`n4`n33`n18") {
+            Write-Error "unexpected Microsoft ARM64 aggregate output: $out"
             exit 1
           }
       - name: Package the ARM64 Windows artifact

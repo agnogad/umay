@@ -25,11 +25,17 @@ pub mod codegen;
 pub mod borrowck;
 pub mod diagnostics;
 pub mod drop_elab;
+pub mod dyn_drop;
 pub mod explain;
+pub mod features;
 pub mod fmt;
 pub mod lint;
 pub mod hir;
 pub mod lexer;
+// `macro` is a reserved keyword in Rust 2018+, so the file is `macro.rs` but
+// the module is named `macros` locally. Only `expand_source` is public.
+#[path = "macro.rs"]
+pub(crate) mod macros;
 pub mod frame;
 pub mod layout;
 pub mod lower;
@@ -39,6 +45,7 @@ pub mod lsp;
 pub mod lock;
 pub mod modules;
 pub mod manifest;
+pub mod native_dep;
 pub mod lower_expr;
 pub mod lower_flow;
 pub mod lower_match;
@@ -61,7 +68,7 @@ pub mod types;
 pub mod upm;
 
 use diagnostics::{Diagnostic, Diagnostics};
-use source::{FileId, SourceMap};
+use source::{FileId, SourceMap, Span};
 
 /// Everything produced by frontend analysis of a single file (Phases 0-1).
 pub struct FrontendOutput {
@@ -149,14 +156,77 @@ pub fn parse_source(name: impl Into<String>, text: impl Into<String>) -> (Fronte
 }
 
 /// Runs the lexer and parser over a file already registered in `map`.
+///
+/// If the token stream contains a `macro_rules!` definition, the declarative
+/// expansion pass runs between lexing and parsing: the expanded text is
+/// re-lexed and *that* is parsed. Files without macros take the untouched path,
+/// so their AST and diagnostics are byte-identical to before macros existed.
 pub fn parse_file(map: &SourceMap, id: FileId) -> FrontendOutput {
     let file = map.file(id);
     let (tokens, lex_errors) = lexer::tokenize(file.src(), id);
-    let parsed = parser::parse(tokens, lex_errors, id);
+    let prep = preprocess(tokens, lex_errors, map, id);
+    let parsed = parser::parse(prep.tokens, prep.lex_errors, prep.file);
+    let diagnostics = finalize_diagnostics(prep.expansion_diags, parsed.diagnostics);
+    FrontendOutput { program: parsed.program, diagnostics }
+}
+
+/// Everything `expand_source` returns, notably for `umay expand`: the parsed
+/// program, the expanded source text, and the map from each generated span to
+/// the invocation span that produced it.
+pub struct ExpansionOutput {
+    pub program: ast::Program,
+    pub diagnostics: Diagnostics,
+    pub map: SourceMap,
+    pub expanded_text: String,
+    pub span_map: Vec<(Span, Span)>,
+}
+
+/// The optional expansion step between lexing and parsing.
+struct Preprocessed {
+    tokens: Vec<token::Token>,
+    lex_errors: Vec<lexer::LexError>,
+    file: FileId,
+    expansion_diags: Vec<Diagnostic>,
+    expanded_text: Option<String>,
+    span_map: Vec<(Span, Span)>,
+}
+
+fn preprocess(
+    tokens: Vec<token::Token>,
+    lex_errors: Vec<lexer::LexError>,
+    map: &SourceMap,
+    id: FileId,
+) -> Preprocessed {
+    if !macros::contains_macros(&tokens) {
+        return Preprocessed {
+            tokens,
+            lex_errors,
+            file: id,
+            expansion_diags: Vec::new(),
+            expanded_text: None,
+            span_map: Vec::new(),
+        };
+    }
+    let mut diags = Diagnostics::new();
+    let expansion = macros::expand(&tokens, map, &mut diags);
+    // The generated spans use the id the next file added to `map` will get.
+    let generated_file = FileId(map.len() as u32);
+    let (generated_tokens, generated_errors) = lexer::tokenize(&expansion.tokens_or_text, generated_file);
+    Preprocessed {
+        tokens: generated_tokens,
+        lex_errors: generated_errors,
+        file: generated_file,
+        expansion_diags: diags.into_items(),
+        expanded_text: Some(expansion.tokens_or_text),
+        span_map: expansion.span_map,
+    }
+}
+
+/// Attaches the canonical cause/explanation for every code that has an entry,
+/// unless the emitting phase already supplied a more specific one, then sorts.
+fn finalize_diagnostics(extra: Vec<Diagnostic>, parsed: Vec<Diagnostic>) -> Diagnostics {
     let mut diagnostics = Diagnostics::new();
-    // Attach the canonical cause/explanation for every code that has an entry,
-    // unless the emitting phase already provided a more specific cause.
-    for mut d in parsed.diagnostics {
+    for mut d in extra.into_iter().chain(parsed) {
         if let Some(entry) = explain::lookup(d.code) {
             if d.cause.is_none() {
                 d.cause = Some(entry.summary.to_string());
@@ -168,7 +238,45 @@ pub fn parse_file(map: &SourceMap, id: FileId) -> FrontendOutput {
         diagnostics.push(d);
     }
     diagnostics.sort();
-    FrontendOutput { program: parsed.program, diagnostics }
+    diagnostics
+}
+
+/// Runs the lexer, the declarative macro expansion pass and the parser over a
+/// fresh in-memory source, returning the expanded text and its span map too.
+///
+/// Unlike [`parse_source`] this registers the generated text in `map` under
+/// `<expanded:<name>>`, so the `span_map` pairs a real generated span with the
+/// invocation span it should be reported at. Macro diagnostics make this return
+/// `Err((diagnostics, map))`; a file with no macros round-trips its text exactly.
+pub fn expand_source(
+    name: impl Into<String>,
+    text: impl Into<String>,
+) -> Result<ExpansionOutput, (Diagnostics, SourceMap)> {
+    let name = name.into();
+    let text = text.into();
+    let mut map = SourceMap::new();
+    let id = map.add(name.clone(), text.clone());
+    let (tokens, lex_errors) = lexer::tokenize(map.file(id).src(), id);
+    let mut prep = preprocess(tokens, lex_errors, &map, id);
+
+    let expanded_text = prep.expanded_text.take().unwrap_or_else(|| text.clone());
+    if prep.file != id {
+        let registered = map.add(format!("<expanded:{name}>"), expanded_text.clone());
+        debug_assert_eq!(registered, prep.file, "generated spans must point at the registered file");
+    }
+
+    let parsed = parser::parse(prep.tokens, prep.lex_errors, prep.file);
+    let diagnostics = finalize_diagnostics(prep.expansion_diags, parsed.diagnostics);
+    if diagnostics.has_errors() {
+        return Err((diagnostics, map));
+    }
+    Ok(ExpansionOutput {
+        program: parsed.program,
+        diagnostics,
+        map,
+        expanded_text,
+        span_map: prep.span_map,
+    })
 }
 
 /// Convenience for tests: runs the frontend only and returns the diagnostics.
@@ -193,6 +301,15 @@ pub fn analyze_source(name: &str, text: &str) -> (Diagnostics, SourceMap) {
     let mut diagnostics = out.diagnostics;
     if diagnostics.has_errors() {
         return (diagnostics, map);
+    }
+    // Gate enforcement is opt-in at the Cargo level and per source file at the
+    // UMAY level: without `--features v2-gates`, no v1 program is affected.
+    #[cfg(feature = "v2-gates")]
+    {
+        append_all(&mut diagnostics, &features::check(&out.program));
+        if diagnostics.has_errors() {
+            return (diagnostics, map);
+        }
     }
     // Modules are read from disk before the prelude is prepended, so everything
     // downstream sees one flat list of items and needs no idea of files.
@@ -534,6 +651,15 @@ fn codegen_source_impl(
     if diagnostics.has_errors() {
         return Err((diagnostics, map));
     }
+    // Same gate pass as `analyze_source`: builds must reject gated syntax with
+    // no matching crate-root gate before codegen can emit it.
+    #[cfg(feature = "v2-gates")]
+    {
+        append_all(&mut diagnostics, &features::check(&out.program));
+        if diagnostics.has_errors() {
+            return Err((diagnostics, map));
+        }
+    }
     // Modules load before the prelude, so the prelude's items sit in front of a
     // program that is already complete. The runtime compiles without the prelude
     // and has no modules of its own, so it takes the plain path.
@@ -575,6 +701,10 @@ fn codegen_source_impl(
     if diagnostics.has_errors() {
         return Err((diagnostics, map));
     }
+
+    // Owning `dyn` values are dropped through their vtable's deallocation
+    // slot (ADR 0018). Rewrite those drops before optimisation sees them.
+    dyn_drop::rewrite_owned_dyn_drops(&mut lowered.program, &mut sema.types, &sema.hir);
 
     opt::optimize(&mut lowered.program, &sema.types, level);
 

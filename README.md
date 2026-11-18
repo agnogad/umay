@@ -1,15 +1,13 @@
 # UMAY
 
-UMAY is a modern, native, statically typed systems programming language.
+[![CI](https://github.com/agnogad/umay/actions/workflows/ci.yml/badge.svg)](https://github.com/agnogad/umay/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Rust 1.75+](https://img.shields.io/badge/rustc-1.75%2B-orange.svg)](#installing-from-source)
 
-It combines Rust-inspired memory safety with simpler syntax, exceptionally clear
-compiler diagnostics, and workflows designed for AI-assisted development.
+**A native systems language with Rust-style ownership, a compiler you can read,
+and diagnostics built for humans and agents.**
 
-> **Safety without unnecessary complexity.
-> Performance without unnecessary overhead.
-> Diagnostics that explain, not merely complain.**
-
-```um
+```umay
 fn main() {
     let name = "Umay"
     let mut version = 1
@@ -17,156 +15,57 @@ fn main() {
     print("Hello, {name}")
 
     version += 1
-
     print("Version: {version}")
 }
 ```
 
+> Safety without unnecessary complexity. Performance without unnecessary
+> overhead. Diagnostics that explain, not merely complain.
+
+- [Why UMAY](#why-umay)
+- [Status](#status)
+- [Installing](#installing)
+- [Quick start](#quick-start)
+- [Targets](#targets)
+- [Tooling](#tooling)
+- [Examples](#examples)
+- [Documentation](#documentation)
+- [Building and testing](#building-and-testing)
+- [Not yet](#not-yet)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Why UMAY
+
+- **Ownership without a second language.** Move and borrow checks run on MIR,
+  the same intermediate representation the backends see. A borrow conflict names
+  both origins; a limitation is reported under its own code rather than hidden.
+- **A compiler without a large dependency tree.** The frontend, MIR, ownership
+  checker, both native backends and the CLI are written in Rust with no
+  crates.io dependencies. There is no LLVM or Cranelift in the production path.
+- **Diagnostics as data.** Every code has a stable meaning, a human renderer, a
+  versioned JSON renderer and an `umay explain` entry. Editors and agents can
+  consume the same diagnostics a person reads.
+- **The runtime is UMAY.** Allocation, strings, integer formatting and file
+  access are UMAY source compiled into every program, so the language can be
+  studied end to end in one repository.
+
 ## Status
 
-UMAY is under active development. Phases 0 through 9 are complete: a complete
-lexer, parser and semantic analyser with AI-first diagnostics, HIR/MIR lowering
-with explicit control flow and drop elaboration, an ownership and borrow
-checker running on that MIR, a custom x86_64 backend, the runtime and standard
-library, the build system and stabilisation.
-`umay build` produces a working executable, `umay run` builds and runs it,
-and `umay asm` prints the generated assembly. The MIR can be inspected with
-`umay mir <file>`.
+| Area | State |
+| --- | --- |
+| v1 language and compiler | Stable. Lexer, parser, sema, HIR/MIR, ownership/borrowck, two backends, runtime, build system and LSP. |
+| v2 specification | Separate, frozen-v1-compatible track. Feature-gated additions are opt-in with `#![feature(...)]`; enforcement is enabled with `--features v2-gates`. |
+| v2 first slices | Closures, traits/`dyn Trait` with vtable dispatch, C FFI + `umay bindgen`, `async fn`/`.await`, SDL3 GUI and 2D game, compile-only mobile targets, token macros and `#[derive(Copy)]`. |
+| Verification | `cargo test`: 996 passed, 1 ignored. `cargo clippy --all-targets -- -D warnings`: clean. UI snapshots and gated tests run in CI. |
+| Active caveats | v2 additions are deliberately narrow; see [Not yet](#not-yet) and [ROADMAP.md](ROADMAP.md). |
 
-## Targets
-
-One frontend, three systems. `--target` selects one; without it, the compiler
-builds for the machine it is running on.
-
-| Triple | Object format | ABI | Runtime layer |
-| --- | --- | --- | --- |
-| `x86_64-unknown-linux-gnu` | ELF | System V | `runtime/platform/linux.um` |
-| `x86_64-apple-darwin` | Mach-O | System V | `runtime/platform/macos.um` |
-| `x86_64-pc-windows-gnu` | COFF | Win64 | `runtime/platform/windows.um` |
-
-```sh
-umay build main.um                                   # the host's own system
-umay build --target x86_64-apple-darwin main.um
-umay build --target x86_64-pc-windows-gnu main.um
-umay asm --target x86_64-apple-darwin main.um        # print, don't link
-```
-
-What differs between them is confined to a few places, so a fourth system means
-adding one file rather than finding every assumption:
-
-- **Symbol spelling.** Mach-O and COFF prefix external names with `_`, which
-  `compiler/src/target.rs` (`ObjectFormat::symbol_prefix`) applies once.
-- **Object-file directives.** Mach-O wants `.section __TEXT,__const` and rejects
-  the ELF `.type`/`.size`/`.note.GNU-stack` metadata; COFF rejects the stack
-  note. `Target::rodata_directive` and `Target::object_trailer` decide.
-- **Calling convention.** Win64 passes arguments in `%rcx, %rdx, %r8, %r9`
-  (four, not six), reserves 32 bytes of shadow space, returns *every* aggregate
-  through a hidden pointer, and preserves `%rsi`/`%rdi`. `Abi` carries this, and
-  `isel`, `regalloc` and `asm` ask it.
-- **The runtime's system layer.** The C symbols, their numeric constants
-  (`O_CREAT` is `0x40` on Linux, `0x200` on macOS, `0x0100` on Windows), the
-  `errno` accessor (`__errno_location`, `__error`, `_errno`), and whether `fork`
-  exists at all.
-
-`runtime/runtime.um` is the portable body: allocation, byte strings, integer
-formatting, output. `runtime/platform/*.um` is what a new system has to supply.
-On Windows there is no `fork`, so the checked fan-out uses `CreateThread`
-instead; the language's `Send` guarantee is unchanged, because it was settled by
-the front end before either call.
-
-Cross builds need an assembler that can emit the target's object format. Both
-non-Linux targets use `clang`'s integrated assembler, which is why a `--target`
-build assembles on a Linux host. **Linking** a non-host target additionally
-needs that system's SDK and CRT: a Linux machine produces a correct Mach-O or
-COFF object but cannot link it without an Apple SDK or a MinGW-w64 runtime.
-Both x86_64 and AArch64 have backends. An unknown architecture or system is
-refused with an explanation rather than emitting a binary nothing can load.
-
-**Host support.** Prebuilt binaries are static Linux on x86_64 and AArch64,
-static Windows on x86_64 and ARM64, and macOS on Intel and Apple Silicon. The
-AArch64 compiler targets `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`
-and `aarch64-w64-mingw32`; the Apple Silicon binary is native and emits Mach-O
-ARM64, and the Windows ARM64 binary links PE/COFF with llvm-mingw.
-
-Every program is linked against a runtime written in UMAY itself, and the prelude
-and the first library types are UMAY source too, so a program can print, allocate
-build strings and read and write files without importing anything:
-
-```umay
-fn main() -> i32 {
-    println("merhaba")
-    println_i64(42)
-
-    let mut s = String::new()
-    let mut i = 0
-    while i < 5 {
-        s = s.push(65 + i as u8)
-        i = i + 1
-    }
-    println(s.as_ptr())
-
-    let text = "merhaba, dosya\n"
-    if write_file_bytes("not.txt" as *const u8, text as *const u8, byte_len(text)) {
-        println_i64(file_size("not.txt" as *const u8))
-    }
-    return 0
-}
-```
-
-A command-line tool is an ordinary program: arguments arrive through `main`'s
-`argc`/`argv` and `Args` wraps them, so a flag has no global state behind it.
-
-```umay
-fn main(argc: i32, argv: *mut *mut u8) -> i32 {
-    let args = Args::new(argc, argv)
-    let path = args.value_after("--file" as *const u8)
-    if read_byte(path) == 0u8 {
-        eprintln("no --file given")
-        return 2
-    }
-    let bytes = read_file_bytes(path)
-    println_i64(bytes.len() as i64)
-    bytes.free()
-    return 0
-}
-```
-
-The runtime is UMAY source compiled with each program, not a binary blob, and
-assumes only the POSIX calls it declares itself — `malloc`, `free`, `write`,
-`exit`, `open`, `read`, `close`, `lseek`, `unlink`, `rename`, `mkdir` and
-`getenv`. See
-[ADR 0010](docs/adr/0010-runtime-in-umay.md). `String` lives in
-`stdlib/string.um` and is compiled into every program by the same path, which is
-why it is checked, borrowed and code-generated exactly like user code.
-
-The backend is UMAY's own — no LLVM, no Cranelift. It covers integer
-arithmetic, control flow, structs, function calls and recursion, and is
-optimised at four levels. Constructs it cannot yet generate code for are
-reported as `E3001` rather than miscompiled; see
-[ADR 0009](docs/adr/0009-x86_64-backend.md).
-
-| Phase | Area | Status |
-|-------|------|--------|
-| 0 | Architecture and specification | **complete** |
-| 1 | Lexer and parser | **complete** |
-| 2 | Semantic analysis and type checking | **complete** |
-| 3 | HIR and MIR | **complete** |
-| 4 | Ownership and borrow checking | **complete** |
-| 5 | Custom x86_64 backend | **complete** |
-| 6 | Runtime and standard library | **complete** |
-| 7 | AI developer experience | **complete** |
-| 8 | Build system and packages | **complete** |
-| 9 | Stabilization | **complete** (Linux verified; see below) |
-
-Linux is verified end to end. Windows objects link with MinGW-w64 and run under
-Wine, including the larger `http-router` example. macOS objects are assembled
-and their symbols checked on any host, and a `macos-15-intel` CI job links and
-runs a small binary. See `ROADMAP.md` Phase 10 for the exact status.
-
-See [ROADMAP.md](ROADMAP.md) for the detailed milestone plan and
-[docs/](docs/) for the specifications this implementation is held to.
+v1 programs compile unchanged. Nothing in v2 changes an existing program's
+source or observable behaviour unless it opts into a feature gate.
 
 ## Installing
+
+### Prebuilt binaries
 
 Linux x86_64, Linux ARM64, Intel macOS and Apple Silicon:
 
@@ -174,36 +73,35 @@ Linux x86_64, Linux ARM64, Intel macOS and Apple Silicon:
 curl -fsSL https://raw.githubusercontent.com/agnogad/umay/main/install.sh | sh
 ```
 
-The installer reads the latest release, verifies the archive's SHA-256, and
-installs `umay` into `~/.local/bin`. Set `UMAY_VERSION` to pin a release or
-`UMAY_INSTALL_DIR` to choose another destination. On Windows, download the
-`x86_64-windows` or `aarch64-windows` zip from the
-[releases page](https://github.com/agnogad/umay/releases) and put `umay.exe` on
-`PATH`. Each archive has a sibling `.sha256` file.
+The installer reads the latest release, verifies its SHA-256, and puts `umay`
+in `~/.local/bin`. Pin a version with `UMAY_VERSION`, or change the destination
+with `UMAY_INSTALL_DIR`. On Windows, download the `x86_64-windows` or
+`aarch64-windows` zip from the [releases page](https://github.com/agnogad/umay/releases)
+and add `umay.exe` to `PATH`. Every archive has a `.sha256` sibling.
 
-## What works today
+### From source
 
-```bash
-cargo build --release          # build the compiler (produces target/release/umay)
+Requires Rust 1.75 or newer and a C compiler/linker for generated programs.
 
-umay new my-project            # scaffold a project (umay.toml, src/main.um, dist/)
-umay check src/main.um         # lex, parse, type-check, report diagnostics
-umay check src/*.um --format json
-umay check src/main.um --explain   # include full explanations
-umay ast src/main.um           # dump the syntax tree as JSON
-umay explain E0101             # explain any diagnostic code
-umay doctor                    # toolchain and cache information
-umay clean                     # remove dist/ and the external cache
+```sh
+git clone https://github.com/agnogad/umay.git
+cd umay
+cargo build --release
+./target/release/umay version
 ```
 
-Exit codes are stable: `0` success, `1` compile error, `2` usage error,
-`3` I/O error, `4` retired (no command uses it), `5` code generation failed.
+## Quick start
 
-## Project layout
+```sh
+umay new hello
+cd hello
+umay build src/main.um
+./dist/main
+```
 
-UMAY projects never contain a `target/` directory. Compiler temporaries and
-caches live in the operating system's user cache directory; only final artifacts
-appear in `dist/`.
+`umay new` writes a `umay.toml` and `src/main.um`. UMAY projects never contain
+a `target/` directory: compiler caches live in the OS user cache, and only final
+artifacts appear in `dist/`.
 
 ```text
 project/
@@ -214,68 +112,156 @@ project/
     └── application
 ```
 
-## Repository layout
+## Targets
 
-```text
-.
-├── compiler/            # the `umay` compiler (written in Rust)
-│   └── src/
-│       ├── source.rs       # source text, spans, line/column mapping
-│       ├── token.rs        # token definitions
-│       ├── lexer.rs        # source -> tokens
-│       ├── ast.rs          # abstract syntax tree
-│       ├── parser/         # tokens -> AST
-│       ├── diagnostics.rs  # human and JSON diagnostic rendering
-│       ├── explain.rs      # the `umay explain` database
-│       ├── cache.rs        # external cache location, AST JSON dump
-│       └── cli.rs          # the `umay` command line surface
-├── docs/                 # language and compiler specifications
-├── dist/                 # build output directory (empty by default)
-└── ROADMAP.md
+`--target` selects the system; without it the compiler builds for the host. All
+ten triples below are recognised. Desktop objects can be linked on a host with
+the matching SDK/CRT; mobile triples are **compile-only** here and require Xcode
+or the Android NDK to produce an app.
+
+| Triple | Arch | ABI | Object | Linking today |
+| --- | --- | --- | --- | --- |
+| `x86_64-unknown-linux-gnu` | x86_64 | SysV | ELF | Native |
+| `x86_64-apple-darwin` | x86_64 | SysV | Mach-O | macOS runner |
+| `x86_64-pc-windows-gnu` | x86_64 | Win64 | COFF | MinGW-w64 |
+| `aarch64-unknown-linux-gnu` | AArch64 | AAPCS64 | ELF | Native / qemu |
+| `aarch64-apple-darwin` | AArch64 | AAPCS64 | Mach-O | Cross-built on Intel macOS |
+| `aarch64-w64-mingw32` | AArch64 | Win64 | COFF | llvm-mingw |
+| `aarch64-apple-ios` | AArch64 | AAPCS64 | Mach-O | Objects only (Xcode required) |
+| `aarch64-apple-ios-sim` | AArch64 | AAPCS64 | Mach-O | Objects only (Xcode required) |
+| `aarch64-linux-android` | AArch64 | AAPCS64 | ELF | Objects only (NDK required) |
+| `x86_64-linux-android` | x86_64 | SysV | ELF | Objects only (NDK required) |
+
+```sh
+umay build --target aarch64-unknown-linux-gnu main.um
+umay asm --target aarch64-apple-darwin main.um      # print, don't link
+umay asm --emit-object-only --target aarch64-apple-ios main.um
 ```
 
-Rust is only the implementation language of the *compiler*. The production code
-generation backend is written by this project; UMAY does not use LLVM or
-Cranelift.
+Backend differences are confined to `compiler/src/target.rs`, `codegen.rs`,
+`isel/` and `aarch64.rs`: symbol prefixing, object directives, calling
+convention and the runtime's system layer. `runtime/runtime.um` is the portable
+body; `runtime/platform/*.um` supplies per-system C symbols and constants.
+
+## Tooling
+
+```text
+check <files...>        Parse and validate source (--format json, --explain)
+build <file>            Compile to an executable in dist/
+run <file>              Compile and run
+asm <file>              Print generated assembly
+ast <file>              Print the syntax tree as JSON
+expand <file>           Print macro-expanded source (--format json for spans)
+mir <file>              Print lowered MIR
+fmt <files...>          Format source (--check to report only)
+lint <files...>         Style findings (--rules lists them)
+explain <CODE>          Explain a diagnostic code
+doctor                  Toolchain and cache information
+bindgen --header H --out O    C header -> UMAY extern declarations
+new <name>              Scaffold a project
+clean                   Remove build artifacts
+version                 Print the compiler version
+```
+
+Common options: `-O0`..`-O3`, `--target <triple>`, `--emit-object-only`.
+Exit codes: `0` success, `1` compile error, `2` usage error, `3` I/O error,
+`4` retired, `5` code generation failed.
+
+## Examples
+
+| Example | What it shows |
+| --- | --- |
+| [`examples/http-router.um`](examples/http-router.um) | Routed HTTP server with process-per-connection concurrency |
+| [`examples/web-app/`](examples/web-app/) | Full web backend: routes, JSON, SQLite, sessions, templates |
+| [`examples/v2/sqlite_spike/`](examples/v2/sqlite_spike/) | Real SQLite bound from `umay bindgen` output, no hand wrapper |
+| [`examples/v2/gui_app/`](examples/v2/gui_app/) | Real WebKitGTK window with an HTML todo app |
+| [`examples/v2/p5_todo_sdl.um`](examples/v2/p5_todo_sdl.um) | SDL3 headless GUI smoke test (`GUI_OK 2`) |
+| [`examples/v2/p7_sprite.um`](examples/v2/p7_sprite.um) | 2D sprite demo with input and a fixed-timestep loop |
+| [`examples/v2/p7_3d.um`](examples/v2/p7_3d.um) | Integer 3D software renderer |
+| [`examples/v2/audio_tone.um`](examples/v2/audio_tone.um) | Deterministic PCM WAV generation |
+| [`examples/v2/mobile_core.um`](examples/v2/mobile_core.um) | Shared note core and JSON IPC envelope |
+| [`examples/v2/p8_derive.um`](examples/v2/p8_derive.um) | `#[derive(Copy)]` plus a declarative macro |
+
+Run an example from a scratch directory so `dist/` lands there:
+
+```sh
+cd /tmp && mkdir umay-example && cd umay-example
+umay build /path/to/umay/examples/v2/p5_todo_sdl.um
+SDL_VIDEODRIVER=dummy ./dist/main
+```
 
 ## Documentation
 
 | Document | Contents |
-|----------|----------|
-| [docs/language-specification.md](docs/language-specification.md) | Normative syntax and semantics, v1.0 |
+| --- | --- |
+| [docs/language-specification.md](docs/language-specification.md) | Normative v1 syntax and semantics |
+| [docs/v2/README.md](docs/v2/README.md) | v2 track index and dependency order |
+| [docs/v2/specification.md](docs/v2/specification.md) | Versioned v2 grammar |
+| [docs/v2/feature-flags.md](docs/v2/feature-flags.md) | Feature names, lifecycle and diagnostics |
+| [docs/v2/backward-compatibility.md](docs/v2/backward-compatibility.md) | The v1-freeze contract |
 | [docs/type-system.md](docs/type-system.md) | Types, inference, generics, traits |
-| [docs/memory-model.md](docs/memory-model.md) | Ownership, borrowing, lifetimes, destruction |
+| [docs/memory-model.md](docs/memory-model.md) | Ownership, borrowing, destruction |
 | [docs/compiler-architecture.md](docs/compiler-architecture.md) | Pipeline, modules, interfaces |
 | [docs/diagnostics.md](docs/diagnostics.md) | Codes, schema, JSON contract |
-| [docs/build-system.md](docs/build-system.md) | Manifest, caching, incremental builds |
-| [docs/measurements.md](docs/measurements.md) | Recorded timings, sizes, and what they say |
-| [CHANGELOG.md](CHANGELOG.md) | What changed in each release |
-| [RELEASING.md](RELEASING.md) | How a release is cut and verified |
-| [docs/adr/](docs/adr/) | Architecture Decision Records |
+| [docs/build-system.md](docs/build-system.md) | Manifest, caching, native dependencies |
+| [docs/measurements.md](docs/measurements.md) | Recorded timings, sizes and baselines |
+| [ROADMAP.md](ROADMAP.md) | Milestones and explicit exit criteria |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
+| [docs/adr/](docs/adr/) | Architecture Decision Records (0001–0022) |
+
+Repository overview:
+
+```text
+compiler/   Rust implementation: frontend, MIR, ownership, backends, CLI, LSP
+runtime/    UMAY runtime and per-system platform layers
+stdlib/     UMAY standard library (fn, future, ipc, audio_wav, ...)
+examples/   v1 applications and v2 feature spikes
+docs/       specifications, v2 design, ADRs
+scripts/    benchmark, packaging and release tooling
+tests/      integration and cross-target tests (under compiler/tests/)
+out/        release archives
+```
 
 ## Building and testing
 
-```bash
-cargo build            # build the compiler
-cargo test             # run the full test suite
-cargo clippy --all-targets
+```sh
+cargo build --release
+cargo test --locked --manifest-path compiler/Cargo.toml
+cargo clippy --all-targets --locked --manifest-path compiler/Cargo.toml -- -D warnings
+cargo test --locked --test ui                    # compile-fail snapshots; BLESS=1 to update
+cargo test --locked --features v2-gates          # opt-in feature-gate checks
+cargo build --release --features v2-gates        # enforce gates in builds
 ```
 
-The test suite covers the lexer, the parser, diagnostic rendering, the JSON
-schema, error recovery, and two robustness invariants: the parser never panics
-on truncated input, and never panics on mutated input.
+The suite covers parser recovery, diagnostics and JSON, MIR lowering, ownership,
+both backends, FFI ABI conformance, snapshots, reproducibility, and the v2
+first slices. Two invariants are tested directly: the parser never panics on
+truncated or mutated input, and generated archives are byte-reproducible.
+
+## Not yet
+
+These are real limits, not hidden bugs. Each is tracked in `ROADMAP.md`.
+
+- **Async:** no reactor or waker wake; `Pending` is handled by a bounded
+  busy-poll loop for concrete futures. No `Pin`, `spawn`, `select`, `timeout`,
+  cancellation, `Send` bounds or async I/O wrappers.
+- **GUI:** no `umay-gui` `dyn Backend` facade, fonts, menus, dialogs, asset
+  packaging, accessibility or webview JS↔UMAY callbacks.
+- **Mobile:** compile-only objects; no iOS codesign/SPM/WKWebView shell, no
+  Android NDK/JNI/Gradle AAR/APK/AAB. Store packages need macOS and accounts.
+- **Game:** no GPU/Vulkan/Metal renderer, 3D z-buffer, textures, image decoder,
+  gamepad or device audio playback (WAV generation works).
+- **Macros:** no proc-macro/plugin ABI; library rules (`no dependencies`,
+  `unsafe_code = "deny"`) are unchanged. See ADR 0022.
+- **Traits:** no associated-type declarations, blanket-impl coherence,
+  supertrait slot ordering, `Vec<Box<dyn T>>` or `impl Trait` returns.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: no phase may claim a
-feature is implemented unless tests verify it, and memory safety is never
-weakened to simplify an implementation.
-
-## Releasing
-
-See [RELEASING.md](RELEASING.md). `scripts/release.sh` refuses to build an
-artifact from a dirty tree, a failing test suite or a draft specification, and
-produces a stripped, checksummed tarball under `out/`.
+See [CONTRIBUTING.md](CONTRIBUTING.md). A phase may not claim a feature without
+tests, and memory safety is never weakened to simplify an implementation.
+Diagnostic codes must have `umay explain` entries; UI snapshots are regenerated
+with `BLESS=1` and reviewed in the same diff.
 
 ## License
 

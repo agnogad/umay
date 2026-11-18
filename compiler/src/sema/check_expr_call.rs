@@ -45,8 +45,43 @@ impl FnChecker<'_, '_> {
             }
         }
 
-        let callee_hir = self.check_expr(callee);
-        let arg_hirs: Vec<HirExpr> = args.iter().map(|a| self.check_expr(a)).collect();
+        let mut callee_hir = self.check_expr(callee);
+        let mut arg_hirs: Vec<HirExpr> = args.iter().map(|a| self.check_expr(a)).collect();
+
+        // A closure value is an environment struct. Calling it means calling
+        // the generated trampoline with the environment as its first argument.
+        // Capture-less closures are plain `fn` pointers and need no rewrite.
+        if let TyKind::Adt { def, .. } = self.cx.cx.kind(callee_hir.ty).clone() {
+            if let Some(trampoline) = self.cx.closure_fn_by_def.get(&def).copied() {
+                let (params, ret) = match self.cx.hir.fns.iter().find(|f| f.id == trampoline) {
+                    Some(f) => (f.params.clone(), f.ret),
+                    None => (Vec::new(), self.cx.cx.error()),
+                };
+                let fn_ty = self.cx.cx.fn_ptr(params, ret);
+                let env = callee_hir;
+                // The trampoline takes each captured value as a parameter, so
+                // unpack the environment into its fields at the call site.
+                // `struct_info` indexes by raw id, which is wrong once enums
+                // share the DefId space; find by identity instead.
+                let fields = self.cx.hir.structs.iter().find(|s| s.def_id == def)
+                    .map(|s| s.fields.clone()).unwrap_or_default();
+                let env_args: Vec<HirExpr> = fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| HirExpr {
+                        kind: HirExprKind::Field {
+                            base: Box::new(env.clone()),
+                            index: i as u32,
+                            name: f.name.clone(),
+                        },
+                        ty: f.ty,
+                        span: callee.span,
+                    })
+                    .collect();
+                arg_hirs.splice(0..0, env_args);
+                callee_hir = HirExpr { kind: HirExprKind::FnRef(trampoline), ty: fn_ty, span: callee.span };
+            }
+        }
 
         let TyKind::FnPtr { params, ret } = self.cx.cx.kind(callee_hir.ty).clone() else {
             if !self.cx.cx.is_error(callee_hir.ty) {
@@ -65,7 +100,17 @@ impl FnChecker<'_, '_> {
             return self.error_hir(span);
         };
 
-        self.check_call_args(&params, &arg_hirs, span, "function");
+        // A variadic declaration records only its fixed parameters in HIR, so the
+        // trailing arguments have no declared type to match against. Check the
+        // fixed prefix as usual and reject the trailing floats below: the backend
+        // emits `%al = 0` unconditionally and would miscompile them.
+        if let Some(fixed) = self.variadic_fixed_arity(&callee_hir) {
+            let fixed = fixed.min(params.len()).min(arg_hirs.len());
+            self.check_call_args(&params[..fixed], &arg_hirs[..fixed], span, "function");
+            self.check_variadic_float_args(fixed, &arg_hirs);
+        } else {
+            self.check_call_args(&params, &arg_hirs, span, "function");
+        }
         // The callee's bounds are promises its body is checked against, so the
         // caller is where they have to be kept. Without this a `T: Send` bound
         // would say nothing to a caller who never asked whether a type could
@@ -77,6 +122,52 @@ impl FnChecker<'_, '_> {
             kind: HirExprKind::Call { callee: Box::new(callee_hir), args: arg_hirs },
             ty: ret,
             span,
+        }
+    }
+
+    /// Number of fixed parameters when `callee` names a variadic function.
+    ///
+    /// Ordinary calls carry `FnRef(id)`; `NamedFn` is the spelling used for
+    /// compiler-generated calls to library symbols, matched by name here so the
+    /// same rule applies if one of them is ever declared variadic.
+    fn variadic_fixed_arity(&self, callee: &HirExpr) -> Option<usize> {
+        let decl = match &callee.kind {
+            HirExprKind::FnRef(id) => self.cx.hir.fns.iter().find(|f| f.id == *id),
+            HirExprKind::NamedFn(name) => self.cx.hir.fns.iter().find(|f| {
+                f.name == name.as_str() || f.link_name.as_deref() == Some(name.as_str())
+            }),
+            _ => None,
+        };
+        decl.filter(|f| f.variadic).map(|f| f.params.len())
+    }
+
+    /// Rejects every floating-point argument in the variadic part of a call.
+    /// Each one is reported so a call with several bad arguments lists them all.
+    fn check_variadic_float_args(&mut self, fixed: usize, args: &[HirExpr]) {
+        for arg in args.iter().skip(fixed) {
+            if self.cx.cx.is_error(arg.ty)
+                || !(self.cx.cx.is_float(arg.ty) || self.cx.cx.is_float_var(arg.ty))
+            {
+                continue;
+            }
+            let name = self.cx.ty_name(arg.ty);
+            self.push(
+                Diagnostic::error(
+                    "E0157",
+                    format!("floating-point argument of type `{name}` passed to a variadic function"),
+                )
+                .at(arg.span)
+                .with_cause(
+                    "variadic float arguments unsupported until `%al` can be computed from \
+                     the vector-register count",
+                )
+                .with_explanation(
+                    "A variadic C call reports how many vector registers it uses in `%al`. UMAY \
+                     emits `%al = 0` for every external call, which is only correct when no \
+                     floating-point argument is passed. Declare the value as a named parameter \
+                     of a non-variadic function, or pass an integer or pointer instead.",
+                ),
+            );
         }
     }
 
@@ -486,6 +577,14 @@ impl FnChecker<'_, '_> {
     ) -> HirExpr {
         let recv = self.check_expr(receiver);
         let arg_hirs: Vec<HirExpr> = args.iter().map(|a| self.check_expr(a)).collect();
+
+        // A trait object has no nominal `impl` to resolve: dispatch goes through
+        // its vtable slot as an ordinary indirect call.
+        if matches!(self.cx.cx.kind(recv.ty), TyKind::DynTrait { .. }) {
+            if let Some(e) = self.check_dyn_method_call(&recv, method, arg_hirs.clone(), span) {
+                return e;
+            }
+        }
 
         // Raw pointer intrinsics. A raw pointer has no nominal type to hang
         // methods on, so `offset` is recognised by the receiver's type.

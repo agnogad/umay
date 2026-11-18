@@ -327,14 +327,23 @@ fn disjoint_scalar_locals_share_a_register() {
     }
     source.push_str("    return sum as i32\n}\n");
     let asm = asm_for(&dir, &source).expect("register reuse assembly");
-    assert!(asm.contains("stp x19"), "the allocator must use x19:\n{asm}");
+    // Scope the assertions to `main`: the prelude's async helpers are emitted
+    // in the same file and have their own unrelated frame layouts.
+    let main_asm = asm
+        .split("\nmain:")
+        .nth(1)
+        .expect("main function in assembly")
+        .split(".size main")
+        .next()
+        .unwrap_or("");
+    assert!(main_asm.contains("stp x19"), "the allocator must use x19:\n{main_asm}");
     assert!(
-        !asm.contains("stp x20"),
-        "disjoint locals must share x19 instead of consuming more registers:\n{asm}"
+        !main_asm.contains("stp x20"),
+        "disjoint locals must share x19 instead of consuming more registers:\n{main_asm}"
     );
     assert!(
-        !asm.contains("sub x11, x29"),
-        "no local in this body needs a stack slot:\n{asm}"
+        !main_asm.contains("sub x11, x29"),
+        "no local in this body needs a stack slot:\n{main_asm}"
     );
     assemble(&dir, &asm);
 }

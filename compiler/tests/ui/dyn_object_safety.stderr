@@ -1,0 +1,10 @@
+error[E1023]: method `duplicate` is not object-safe: it returns `Self`
+   --> dyn_object_safety.um:4:10
+   |
+ 3 | }
+ 4 | fn f(s: &dyn Cloner) { }
+   |          ^^^^^^^^^^
+ 5 |
+  = cause: a `dyn` vtable can only hold methods with a fixed signature
+
+dyn_object_safety.um: 1 error(s), 0 warning(s)

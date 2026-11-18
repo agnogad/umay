@@ -116,6 +116,9 @@ impl Lowering<'_> {
     /// so later phases never see nested structure.
     pub(crate) fn lower_expr(&mut self, e: &HirExpr) -> Operand {
         match &e.kind {
+            // Await is desugared in sema into a call to the generated
+            // block-on helper; nothing Await-shaped survives to MIR.
+            HirExprKind::Await { base } => self.lower_expr(base),
             HirExprKind::Error => Operand::Constant(Constant::Unit),
             HirExprKind::IntLit { value, .. } => self.int_constant(*value, e.ty),
             HirExprKind::FloatLit { value, .. } => Operand::Constant(Constant::Float { value: *value, ty: e.ty }),
@@ -241,6 +244,23 @@ impl Lowering<'_> {
                 Operand::Copy(tmp)
             }
             HirExprKind::Call { callee, args } => self.lower_call(callee, args, e),
+            HirExprKind::VTable { size, align, drop, entries } => Operand::Constant(Constant::VTable(
+                self.program.intern_vtable(*size, *align, *drop, entries.clone()),
+            )),
+            HirExprKind::DynCast { value, vtable } => {
+                let data = self.lower_expr(value);
+                let vt = self.lower_expr(vtable);
+                let tmp = self.temp_place(e.ty);
+                self.assign(
+                    tmp.clone(),
+                    Rvalue::Aggregate {
+                        kind: AggregateKind::Tuple,
+                        operands: vec![data, vt],
+                    },
+                    e.span,
+                );
+                Operand::Copy(tmp)
+            }
             HirExprKind::StructLit { def, fields, base } => self.lower_struct_lit(*def, fields, base.as_deref(), e),
             HirExprKind::TupleVariant { def, index, args } => {
                 let ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();

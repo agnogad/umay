@@ -67,11 +67,35 @@ pub fn generate(
         return Err(errors);
     }
 
-    if !program.strings.is_empty() {
+    if !program.strings.is_empty() || !program.vtables.is_empty() {
         out.push_str(target.rodata_directive());
         for (index, text) in program.strings.iter().enumerate() {
             let _ = writeln!(out, ".Lstr_{index}:");
             let _ = writeln!(out, "    .asciz \"{}\"", quote(text));
+        }
+        for (index, vtable) in program.vtables.iter().enumerate() {
+            let _ = writeln!(out, ".p2align 3");
+            let _ = writeln!(out, ".Lvtable_{index}:");
+            // ADR 0018 prefix: size, alignment, then the optional drop shim.
+            let _ = writeln!(out, "    .quad {}", vtable.size);
+            let _ = writeln!(out, "    .quad {}", vtable.align);
+            let drop = match vtable.drop {
+                Some(id) => symbols
+                    .get(&id)
+                    .map(|name| mangle(name, &foreign, target))
+                    .unwrap_or_else(|| format!("fn{}", id.0)),
+                None => "0".to_string(),
+            };
+            let _ = writeln!(out, "    .quad {drop}");
+            for &entry in &vtable.entries {
+                // Spell the entry exactly as `callee()` spells a direct call:
+                // the HIR symbol map, then the same mangle/foreign rules.
+                let name = symbols
+                    .get(&entry)
+                    .map(|name| mangle(name, &foreign, target))
+                    .unwrap_or_else(|| format!("fn{}", entry.0));
+                let _ = writeln!(out, "    .quad {name}");
+            }
         }
     }
     // The COFF entry point belongs to the program object, not the runtime:
@@ -2036,6 +2060,10 @@ impl Emitter<'_> {
                 let symbol = format!(".Lstr_{}", id.0);
                 self.emit_symbol_address(reg, &symbol);
             }
+            Constant::VTable(id) => {
+                let symbol = format!(".Lvtable_{}", id.0);
+                self.emit_symbol_address(reg, &symbol);
+            }
             Constant::Fn(id) => {
                 let name = self
                     .symbols
@@ -2394,6 +2422,12 @@ impl Emitter<'_> {
     }
 
     fn tuple_fields(&mut self, ty: TyId) -> Result<(Vec<u64>, Vec<TyId>), String> {
+        // `dyn Trait` is materialised as a two-word tuple aggregate by the
+        // lowerer, even though its declared type is the fat pointer itself.
+        if matches!(self.types.kind(ty), TyKind::DynTrait { .. }) {
+            let ptr = self.types.raw_ptr(self.types.cached_u8());
+            return Ok((vec![0, 8], vec![ptr, ptr]));
+        }
         let elems = match self.types.kind(ty) {
             TyKind::Tuple(elems) => elems.clone(),
             _ => return Err("a tuple field was requested from a non-tuple".into()),
@@ -2433,6 +2467,15 @@ impl Emitter<'_> {
                     .ok_or_else(|| "a tuple index is out of range".to_string())?;
                 Ok((offset, field_ty))
             }
+            // The two-word fat pointer from ADR 0018: word 0 is the data
+            // pointer, word 1 the vtable pointer. Both are `*const u8` words.
+            TyKind::DynTrait { .. } => match index {
+                0 | 1 => {
+                    let byte = self.types.cached_u8();
+                    Ok((u64::from(index) * 8, self.types.raw_ptr(byte)))
+                }
+                _ => Err("a trait object field index is out of range".to_string()),
+            },
             _ => Err(format!(
                 "the AArch64 backend cannot take field {index} of `{}`",
                 self.types.display(ty)
@@ -2989,17 +3032,18 @@ fn require_value(types: &TyCtxt, ty: TyId, what: &str) -> Result<(), String> {
 }
 
 fn is_value(kind: &TyKind) -> bool {
-    is_scalar(kind)
-        || matches!(
-            kind,
-            TyKind::Array { .. } | TyKind::Adt { .. } | TyKind::Tuple(_)
-        )
+    is_scalar(kind) || is_aggregate(kind)
 }
 
 fn is_aggregate(kind: &TyKind) -> bool {
     matches!(
         kind,
-        TyKind::Array { .. } | TyKind::Adt { .. } | TyKind::Tuple(_)
+        TyKind::Array { .. }
+            | TyKind::Adt { .. }
+            | TyKind::Tuple(_)
+            // A `dyn Trait` value is a two-word fat pointer, stored exactly
+            // like a tuple of two pointer words.
+            | TyKind::DynTrait { .. }
     )
 }
 
@@ -3093,6 +3137,7 @@ fn constant_name(constant: &Constant) -> &'static str {
         Constant::Bool(_) => "bool",
         Constant::Char(_) => "char",
         Constant::Str(_) => "string",
+        Constant::VTable(_) => "vtable",
         Constant::Unit => "unit",
         Constant::Fn(_) => "function pointer",
         Constant::NamedFn(_) => "named function",

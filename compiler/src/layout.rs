@@ -189,6 +189,11 @@ impl<'a> Layouts<'a> {
             }
 
             TyKind::Error => return Err(LayoutError::Unresolved(ty)),
+            // `dyn Trait` is a two-word fat pointer (ADR 0018 §3). Vtable
+            // emission and dispatch are later slices; this only gives the
+            // first-class type an honest size.
+            // ponytail: layout only; upgrade when dyn codegen lands.
+            TyKind::DynTrait { .. } => Layout::new(16, 8),
         })
     }
 

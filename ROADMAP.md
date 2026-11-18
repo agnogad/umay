@@ -939,6 +939,374 @@ is breadth, packaging, and the two known quality gaps.
 
 ---
 
+## UMAY v2 (new specification track)
+
+v2 is a separate specification line built on the frozen v1 language. It adds
+closures, traits and dynamic dispatch, C FFI and bindgen, async/await, desktop
+GUI, mobile, a game layer and proc-macros. Nothing here changes how a v1.0
+program compiles; the feature-gate and migration policy is in
+[`docs/v2/README.md`](docs/v2/README.md).
+
+Work starts on branch `v2-foundation`. The baseline before any v2 change is
+`cargo test --locked --manifest-path compiler/Cargo.toml`: 784 passed, 1 ignored.
+
+**Phase 0 — framework and decisions · done**
+
+Deliverables: the v2 spec line and feature flags, ADRs for the four core
+architecture decisions, the CI matrix, the performance budget, the backward
+compatibility policy, and a per-phase benchmark set.
+
+- [x] Branch `v2-foundation` opened from `main`.
+- [x] Closure semantics ADR (0017)
+- [x] Trait object ABI ADR (0018)
+- [x] Async model ADR (0019)
+- [x] GUI backend strategy ADR (0020)
+- [x] Mobile strategy ADR (0021)
+- [x] v2 specification, feature-flag and compatibility policy
+- [x] CI matrix, performance budget, benchmarks
+- [x] FFI/bindgen, webview and native-dependency spike designs
+
+Exit criterion: the architecture decisions are accepted as ADRs and the
+engineering baseline for the later phases is written down.
+
+**Phase 1 — closures · first slice landed**
+
+What compiles and runs today (x86_64 host; AArch64 assembly verified, execution
+needs the CI cross job):
+
+- [x] Syntax `|x| expr`, `|x, y| expr`, `|| expr`, `|x| { ... }`, `move |x| expr`.
+- [x] Capture analysis over resolved HIR locals; only referenced outer locals
+      become fields of a compiler-generated environment struct.
+- [x] Capture-less closures lower to plain `fn` pointers; captured closures call
+      through a generated trampoline with the environment fields as arguments.
+      Both reuse existing MIR, ownership checking and both backends.
+- [x] Parameter types from `|x: i64|` annotations or a typed binding; `E1019`
+      otherwise, with `E1020`/`E1021` reserved.
+- [x] `Fn` / `FnMut` / `FnOnce` in `stdlib/fn.um`, wired into the prelude, with
+      synthesized impls registered from each capturing closure through
+      `Checker::register_synthetic_impl` (one-argument call form only).
+- [x] Least-privilege capture modes: Copy captures become `&T` (read-only) or
+      `&mut T` (mutated) references; non-Copy captures stay by value, and
+      mutating one reports `E1020`. Mutating a Copy capture now changes the
+      original binding.
+- [x] Tests: 7 parser tests, `compiler/tests/phase10_closures.rs` (16),
+      `phase11_fn_traits.rs` (5), `phase12_borrow_captures.rs` (4).
+      Full suite: **831 passed, 1 ignored**; clippy `-D warnings` clean.
+
+Still open before ADR 0017 is fully delivered:
+- [ ] Borrow-capturing closures that escape the defining scope (`E0203`/`E0207`
+      diagnostics from ADR 0017 §5 are not emitted yet).
+- [ ] `move |x| ...` forcing by-value capture (the prefix is parsed and accepted
+      but still has no extra effect).
+- [ ] Capturing closures as C callbacks through a generated `dyn Fn` trampoline.
+- [ ] `Fn(A, B) -> R` sugar and zero/multi-parameter call traits.
+- [ ] LSP hover for inferred captures and the `Fn`* set.
+
+**Phase 2 — traits / dyn Trait · dispatch working**
+
+Scope of the first slice (three parallel agents, then integration):
+
+- [x] Least-privilege closure captures: shared/mutable borrows for Copy values,
+      with `E1020` for the unsupported non-Copy mutation case.
+- [x] `Fn` / `FnMut` / `FnOnce` declarations in `stdlib/fn.um`, wired into the
+      prelude, plus a reusable API for compiler-synthesized trait impls.
+- [x] `dyn Trait` as a first-class type: `TyKind::DynTrait`, two-word layout,
+      object-safety diagnostics `E1022`–`E1024`.
+- [x] Integration: `E1003` now rejects only `impl Trait`; `DynTrait` resolves via
+      `Checker::resolve_dyn_trait`, and capturing closures register their
+      synthesized call-trait impls.
+
+- [x] Static vtable emission: `MirProgram::vtables`, `Constant::VTable`, a
+      `.Lvtable_N:` block of `.quad` entries in both backends, and vtable entries
+      as reachability roots.
+- [x] `dyn Trait` coercion from `&Concrete`: generated shim functions with the
+      uniform `(data: *mut u8, args...) -> ret` ABI, one slot per object-safe
+      method in trait declaration order.
+- [x] `d.method(args)` dispatch through the vtable slot as an indirect call;
+      no new MIR terminator. Fat-pointer field access works in both backends.
+- [x] Tests: `compiler/tests/phase13_vtable_emit.rs` (3) and
+      `phase14_dyn_dispatch.rs` (5). Full suite **841 passed, 1 ignored**;
+      clippy `-D warnings` clean. x86_64 program prints 25 for a dyn `area()`
+      call; AArch64 assembly generation verified (execution needs the CI cross
+      job).
+
+- [x] Vtable prefix from ADR 0018 §4: `size`, `align` and `drop` slots. Both
+      backends emit `.p2align 3` plus three prefix `.quad`s before methods;
+      method slots start at byte 24 and a drop shim calls `umay_dealloc`.
+- [x] Owned `dyn Trait` values: a generated non-Copy owning struct plus a MIR
+      pass (`dyn_drop::rewrite_owned_dyn_drops`) turns its `Drop` into an
+      indirect call through the vtable drop slot. No `Box<T>` in stdlib, but
+      the ownership and destruction path is real.
+- [x] Associated-type bindings: `dyn Iterator<Item = u8>` and generic args now
+      survive parsing, interning and display (`TraitBound`), instead of being
+      dropped by `Path::as_string()`.
+- [x] Return-position `impl Trait`: body-inferred hidden type, no new TyKind or
+      backend work; arg-position still E1003. The hidden type is intentionally
+      erased (callers can see it).
+- [x] x86 indirect calls now share direct-call ABI planning: sret, 16-byte
+      aggregate returns in `rax`/`rdx`, and Win64 shadow space. An indirect
+      callee is restored into a non-argument register (`r10`) after the argument
+      shuffle, fixing a `%rdx` collision.
+
+Still open in Phase 2:
+
+- [ ] `dyn` in collections and behind generics (`Vec<dyn T>`, `?Sized`) — the
+      two-word fat pointer has no unsized-pointee support yet.
+- [ ] Default methods, blanket impls and overlap/orphan diagnostics, and
+      supertrait slot ordering. GATs stay out of ADR 0018 scope.
+- [ ] Vtable ABI conformance tests on all four targets (SysV x86_64, Win64,
+      AAPCS64, Windows ARM64). Win64 shadow space is correct by construction but
+      not runnable on this Linux host.
+
+**Phase 3 — C ABI / FFI / bindgen · started**
+
+- [x] `umay bindgen --header H --out O` (or `--emit-stdout`): a deliberately
+      narrow C-header reader emits one `extern "C" { ... }` block, opaque
+      `type` declarations for unknown pointers, variadic functions, and
+      `// umay-bindgen: skipped` comments for unmappable declarations.
+- [x] Parser accepts `#![feature(name)]` crate attributes and grouped
+      `extern "C" { ... }` blocks, so generated modules pass `umay check`.
+- [x] FFI ABI conformance on x86_64 SysV: struct-by-value in registers and via
+      hidden pointer, C callbacks through function pointers, capture-less UMAY
+      closures as C callbacks (`compiler/tests/phase18_ffi_abi.rs`, 3 tests).
+- [x] Windows ARM64 Microsoft aggregate CI step added to the `windows-11-arm`
+      job (1/2/4/8-byte aggregates in `x0`, larger by reference). The 16-byte
+      case is still a known divergence between AAPCS64 and Microsoft ABI.
+- [x] Variadic float diagnostic `E0157`: the variadic flag now reaches `HirFn`,
+      and each trailing float argument is reported. Integer/pointer variadic
+      calls remain valid.
+- [x] Native dependency manifest: `[native.<name>]`, pkg-config resolution,
+      include/link flags, static selection, per-target overrides, cache keys
+      (`compiler/src/native_dep.rs`, 10 tests). Build scripts are parsed as DATA
+      only — execution and the security boundary are still open.
+- [x] Real C library spike: `examples/v2/sqlite_spike/` binds SQLite from
+      bindgen-generated `extern "C"` declarations with no hand wrapper, opens
+      `:memory:`, execs SQL, prints `SQLITE_OK` (`0`) and closes. Generated file
+      is byte-for-byte reproducible.
+- [ ] Remaining bindgen gaps: C struct/union layout and `#[repr(C)]`, typedef
+      chains, function-pointer typedefs and typed C callbacks, constants,
+      `-I`/`#include` resolution, target-dependent widths, module-level
+      extern visibility/symbol naming, and `-l` flags through `umay build`.
+- [ ] Build-script execution with a real security boundary, UPM transitive
+      native deps, `umay doctor` reporting.
+
+Full suite: **893 passed, 1 ignored**; `cargo clippy --all-targets -D warnings`
+clean. AArch64 vtable emission and Windows ARM64 aggregate CI are verified by
+assembly/CI, not by a local cross-linker.
+
+**Phase 4 — async / concurrency · first slice landed**
+
+- [x] Contextual `async fn` modifier and postfix `.await` (no new keywords, so
+      v1 identifiers named `async`/`await` still work). New AST/HIR nodes and
+      their walkers.
+- [x] `stdlib/future.um`: `Poll<T>`, `Waker`, `Context`, `Future<T>` (a generic
+      parameter, because UMAY traits cannot declare associated types), no-op
+      wake and `make_context`.
+- [x] Each `async fn` synthesizes a state struct, a thunk holding the original
+      body, a `poll` function returning `Poll::Ready`, and a concrete
+      `block_on` helper. Parameters pass through the state struct; side effects
+      happen on first poll, not at call time.
+- [x] `.await` and `block_on(future)` desugar to the generated helper; a
+      synthetic `impl Future<T>` is registered for the state type. Four async
+      tests plus five stdlib tests pass.
+
+Deliberately NOT real yet (all documented with `ponytail:` upgrade notes):
+
+- [ ] No suspension: `Pending` aborts, no executor/reactor, no waker wake.
+- [ ] Only parameters live in the state struct; locals across an await are not
+      captured. Awaited futures must be declared before their callers.
+- [ ] No `Pin`, no boxed state machine, no cancellation, `spawn`/`select`/
+      `timeout`/`spawn_blocking`, no `Send` bounds, no async I/O wrappers.
+- [ ] Async methods and generic async functions are not supported.
+
+Full suite: **909 passed, 1 ignored**; `cargo clippy --all-targets -D warnings`
+clean.
+
+**Phase 5 — desktop GUI · SDL3 first slice landed**
+
+- [x] Real SDL3 3.4.14 binding generated by `umay bindgen` from
+      `examples/v2/sdl_min.h` (10 declarations, byte-exact reproducibility
+      asserted). SDL structs/handles are `void*`; bool returns and `u64` flags
+      match the real ABI. No C shim, no hand-written extern wrapper.
+- [x] `umay build` links `-lSDL3` automatically when the program references an
+      `SDL_` symbol; the SQLite rule is unchanged. Per-target flag is the same
+      on all six triples; Windows/macOS/AArch64 linking is CI-only.
+- [x] Pure-UMAY immediate-mode core in `examples/v2/gui_core.um`: a todo model
+      (`add`/`toggle`/`delete`/`count`) plus clipped `fill_rect`/`draw` writing
+      through `write_byte`. No FFI, so it stays crate-root-spliceable.
+- [x] `examples/v2/p5_todo_sdl.um`: headless SDL window + event loop + surface
+      fill + todo self-test. `SDL_VIDEODRIVER=dummy` run prints `GUI_OK 2`.
+- [x] Tests: `phase20_gui_core` (5), `phase20_sdl_link` (3),
+      `phase20_sdl_smoke` (2). Full suite **919 passed, 1 ignored**;
+      clippy `-D warnings` clean.
+
+Deferred per ADR 0020:
+
+- [ ] `umay-gui` facade with `trait Backend`/`dyn Backend` — needs `Box`,
+      owned-`dyn` collections and the 16-byte indirect-call ABI.
+- [ ] Capturing closures as C event handlers; `SDL_MapRGB` (needs struct access
+      and `#[repr(C)]`, which bindgen and the parser do not support yet).
+- [ ] Fonts/text rendering, menus, dialogs, tray, clipboard, drag-and-drop,
+      HiDPI, themes, accessibility, crash reporting, asset packaging.
+- [ ] Webview backend, IPC/JS bridge, and the same todo app as an HTML UI.
+
+**Phase 7 — 2D game layer · first slice landed**
+
+- [x] SDL3 binding extended with `SDL_GetKeyboardState`, `SDL_GetTicks`,
+      `SDL_CreateSurfaceFrom`, `SDL_DestroySurface` and `SDL_BlitSurface`
+      (15 declarations total, byte-exact `umay bindgen` output; no C shim).
+- [x] Pure-UMAY `examples/v2/game_core.um`: integer `Vec2`/`Sprite`, a hard-coded
+      8×8 ARGB sprite, keyboard scancode input, clipped ARGB framebuffer blit,
+      and a `fixed_step` accumulator. No FFI, no floats, no image decoder.
+- [x] `examples/v2/p7_sprite.um`: 64×64 window, fixed-timestep loop, input →
+      step → draw → `SDL_CreateSurfaceFrom`/`SDL_BlitSurface` present path.
+      `SDL_VIDEODRIVER=dummy` selftest prints `SPRITE_OK 3 5`; default run
+      prints `SPRITE_OK 0 8`. Both bounded and deterministic.
+- [x] Tests: `phase21_game_core` (6) and `phase21_sprite_smoke` (3). Full suite
+      **928 passed, 1 ignored**; clippy `-D warnings` clean.
+
+Deferred (per the plan and ADR 0018/0020 limits):
+
+- [ ] Audio: SDL3 audio needs struct-by-value and C function-pointer callbacks,
+      which bindgen cannot express; miniaudio is not installed.
+- [ ] Image/asset pipeline: no PNG decoder or zlib; sprites are hard-coded ARGB.
+- [ ] SDL_GPU / Vulkan / Metal renderer, 3D demo, ECS, hot reload, frame-time
+      profiler target (needs a GPU runner), packaging.
+- [ ] Float/vector math module, mouse float coordinates, text/fonts, gamepad.
+
+**Phase 6 — mobile · compile-only foundation landed**
+
+- [x] Four mobile triples accepted as compile-only targets: `aarch64-apple-ios`,
+      `aarch64-apple-ios-sim`, `aarch64-linux-android`, `x86_64-linux-android`.
+      `Target::parse` no longer misclassifies them as desktop macOS/Linux.
+- [x] `asm --emit-object-only --target <triple>` produces real objects (Mach-O
+      `cffaedfe` / ELF `7f454c46`) with the system clang. Plain `build` on a
+      mobile triple fails before invoking a linker with an explicit SDK message
+      (Xcode/iOS SDK+codesign or Android NDK+Bionic) pointing at
+      `--emit-object-only`.
+- [x] `[mobile]` manifest section: app-id, display-name, target, permissions,
+      assets, orientation, with validation; emitted only when non-default so v1
+      manifests round-trip byte-identically.
+- [x] `stdlib/ipc.um`: pure-UMAY JSON envelope codec for the webview bridge —
+      decode request, encode reply/event, monotonic id, 1 MiB cap. Integer method
+      ids and single integer args are a deliberate narrow version of the
+      `webview-decision.md` envelope.
+- [x] `examples/v2/mobile_core.um`: platform-independent note model plus IPC
+      dispatch (method ids 1=add, 2=toggle, 3=delete, 4=count); selftest returns
+      1. No SDL drawing, no webview/JNI code.
+- [x] Tests: `phase22_mobile_target` (5), `phase22_mobile_manifest` (4),
+      `mobile_ipc` (8), `phase22_mobile_core` (5). Full suite **950 passed,
+      1 ignored**; clippy `-D warnings` clean.
+
+Not possible on this Linux host (CI/macOS/NDK/accounts required):
+
+- [ ] iOS: Xcode/iOS SDK sysroot, `LC_BUILD_VERSION`/load commands, codesign,
+      provisioning, SPM/Xcode project, WKWebView scheme handler, simulator run.
+- [ ] Android: NDK sysroot + Bionic startup, PIE, JNI bridge, Gradle AAR/APK/AAB,
+      emulator run.
+- [ ] Real webview shell, string-named IPC methods, native path/fd validation,
+      app lifecycle, store assets, `.ipa`/`.apk` artifacts.
+
+**Phase 8 — macros / plugin infrastructure · first slice landed**
+
+- [x] ADR 0022 records the split: declarative token macros now; proc-macro
+      dylib ABI design-only while `unsafe_code = "deny"` and zero dependencies
+      remain hard rules. A separate macro-host process with a versioned wire
+      protocol is the documented upgrade path.
+- [x] Token-level `macro_rules!`-style expansion before parsing: one rule per
+      macro, literal/`$x:ident`/`$x:tt` matchers, `name!(...)` invocation,
+      deterministic textual output, no AST `Item` variant. Ceilings (no
+      repetition, no recursion, call-site hygiene, literal spelling changes)
+      are documented in `compiler/src/macro.rs`.
+- [x] `umay expand <file>` (plus `--format json`) and `Artifact::MacroExpansion`
+      / `"expand.um"` cache artifact keyed on source bytes; existing artifact
+      keys and `umay doctor` derivation unchanged.
+- [x] Span remap scaffolding: expanded source registered in `SourceMap`,
+      generated-span -> invocation-span map exposed via `expand_source`.
+      Sema/lowering errors are not yet remapped (deferred with the ADR).
+- [x] `#[derive(Copy)]` now has real semantics: `TyCtxt::mark_copy` bridges the
+      HIR flag into `is_copy`; unknown attributes still emit W0010.
+- [x] Diagnostics E0125-E0129 documented and emitted. Tests:
+      `phase23_macros` (12), `phase23_expand_cli` (4), `phase23_derive` (5).
+      Full suite **975 passed, 1 ignored**; clippy `-D warnings` clean.
+
+Deferred: proc-macro/plugin ABI and signed macro packages, user-defined
+attribute macros, repetition/nested rules, full hygiene, derive(Clone/Debug),
+and LSP expansion mapping.
+
+**Hardening — compile-fail / UI snapshots (implemented).** The dependency-free
+`compiler/tests/ui.rs` harness is in place: for every `compiler/tests/ui/*.um`
+it runs `umay check --color never <case>.um` with the `ui/` directory as the
+working directory (stable relative spans) and diffs the captured report against
+`<case>.stderr`. Note that `umay check` prints rendered diagnostics to stdout
+and only the summary to stderr, so the snapshots — named `.stderr` for
+compatibility — capture stdout followed by stderr, with trailing whitespace
+stripped per line and nothing else normalised. Regenerate with `BLESS=1` and
+review the diff; a bare red snapshot blocks merge. Seeded, pinned cases cover
+illegal closure captures / use-after-move into a closure (`E0201`), unannotated
+closure parameters (`E1019`), object-safety violations (`E1023`), unknown `dyn`
+traits (`E1022`), malformed macro definitions (`E0125`) and invocations
+(`E0126`), and a v1 program that must stay diagnostic-free. CI home and the
+exact command are in [`docs/v2/ci-matrix.md`](docs/v2/ci-matrix.md) §3.
+
+**Hardening — v2 matrix (implemented 2026-11-18).**
+
+- [x] Opt-in feature gates: `compiler/src/features.rs` checks closure, dyn/impl
+      Trait, async/await, extern-ABI and default-method syntax against
+      `#![feature(...)]` (E0154/E0155/E0156). Enabled only with
+      `--features v2-gates`, so the v1 corpus stays green; 12 gate tests pass.
+- [x] CI: `v2-features` and `v2-ui` jobs plus an AArch64 vtable-dispatch step
+      added to `ci.yml`; `.github/workflows/mobile.yml` is a dispatch/nightly
+      skeleton with compile-only object checks, never a PR gate.
+- [x] Performance: first informational baseline recorded in
+      `docs/measurements.baseline.json`; `scripts/bench.py --baseline` prints a
+      ratio table with WARN/HARD-FAIL lines; no perf assertion blocks this host.
+- [x] Reproducibility: `scripts/package.py` now emits byte-identical tar.gz/zip
+      archives (verified by SHA-256); tag-only `release.sh` compares two package
+      runs. A full compiler rebuild byte-compare remains a tag-only idea.
+- [x] `docs/v2/benchmarks.md` status corrected: p1/p2/p4 are covered by Rust
+      tests (no checked-in example), p8 now has `examples/v2/p8_derive.um`
+      (expand + build + run print `42`).
+
+Full suite after hardening: **977 passed, 1 ignored**; clippy `-D warnings`
+clean; UI harness and gated tests pass in their respective modes.
+
+**Open-items follow-up (implemented 2026-11-18).**
+
+- [x] Async `Pending` + looping executor: `PendingOnce` (stdlib) returns Pending
+      once then Ready(7); `block_on` on a concrete user `Future` now calls its
+      concrete `poll` in a bounded busy-poll loop (1,000,000 iterations) and
+      unwraps Ready. Generated async fns keep the one-poll path. No reactor,
+      waker wake, spawn/select/timeout, cancellation or Send bounds yet.
+- [x] Real Linux webview shell: `examples/v2/webview_gtk/` bindgen output
+      (GTK3 + WebKit2GTK 4.1, 9 declarations), 18 link flags added to
+      `Target::system_libraries`, Xvfb smoke run prints
+      `{"id":7,"ok":true,"result":42}`. JS bridge callbacks, `file://`/asset
+      scheme and macOS/Windows backends are deferred.
+- [x] 3D software renderer: `examples/v2/math3d.um` (Q16.16 Mat4, integer
+      projection, Bresenham lines) + `p7_3d.um`, Xvfb/dummy selftest prints
+      `3D_OK 3 0`. No GPU, z-buffer, triangle fill, textures or fonts.
+- [x] Audio slice (generation, not playback): `stdlib/audio_wav.um` writes
+      deterministic mono 16-bit 8 kHz WAV (800 frames at 440 Hz), verified by
+      Python's `wave` module and SHA-256. SDL3 device playback still needs
+      struct-by-value + C callbacks in bindgen.
+- [ ] Still open: proc-macro/plugin ABI (design-only per ADR 0022), real
+      iOS/Android signing and app packaging (hardware/accounts), async reactor
+      and waker wake, GPU rendering, audio playback and streaming.
+
+Full suite: **996 passed, 1 ignored**; clippy `-D warnings` clean.
+
+**Critical path**
+
+`Phase 0 → 1 closures → 2 traits/dyn → 4 async`
+
+Closures must be frozen before async (capture-by-reference plus async is a
+lifetime trap). Traits and FFI precede dynamic dispatch. The independent lines
+are `3 FFI → 5 GUI / 7 game`, `5 webview → 6 mobile`, and `8 proc-macro` after
+Phase 2. See `docs/v2/benchmarks.md` for each phase's exit criteria.
+
+---
+
 ## Rules that do not relax
 
 - No LLVM or Cranelift in the production backend.

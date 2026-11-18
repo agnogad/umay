@@ -53,6 +53,10 @@ pub struct Parser {
     /// Set once the nesting limit has been reported, so the cascade of recovery
     /// errors that follows is not printed on top of it.
     too_deep: bool,
+    /// An `extern "C" { ... }` block declares several items at once, while
+    /// `parse_item` returns one. The remainder waits here for the enclosing
+    /// item loop to collect it.
+    pending_items: Vec<Item>,
 }
 
 const MAX_DEPTH: usize = 256;
@@ -72,6 +76,7 @@ impl Parser {
             depth: 0,
             no_struct_literal: false,
             too_deep: false,
+            pending_items: Vec::new(),
         }
     }
 

@@ -496,7 +496,7 @@ pub fn op_str(
 /// and the link then failed with a page of `undefined reference` errors.
 ///
 /// Local labels (`.L...`) belong to the assembler and are never mangled.
-fn mangle_symbol(
+pub(crate) fn mangle_symbol(
     name: &str,
     target: crate::target::Target,
     foreign: &std::collections::HashSet<String>,

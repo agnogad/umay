@@ -9,6 +9,17 @@ use super::*;
 use crate::hir::LocalId;
 use crate::machine::{MoveKind, RegWidth};
 
+/// Where a call transfers control.
+///
+/// Direct calls name a symbol; indirect calls (a `fn` pointer, a capture-less
+/// closure, or a `dyn Trait` vtable slot) jump through a register holding the
+/// code address. Both forms go through the same ABI planner so aggregate
+/// arguments, sret returns and Win64 shadow space behave identically.
+enum CallTarget {
+    Symbol(String),
+    Register(Reg),
+}
+
 impl<'a, 't> Isel<'a, 't> {
     /// Selects a terminator, appending instructions to `out`.
     ///
@@ -153,115 +164,44 @@ impl<'a, 't> Isel<'a, 't> {
             return self.call_symbol(name, args, destination, target, out);
         }
 
-        // Evaluate every argument into a register first. Doing this before
-        // writing the argument registers is what makes the sequence correct when
-        // an argument is itself a local that lives in one of them.
-        let mut arg_regs = Vec::with_capacity(args.len());
-        for arg in args {
-            arg_regs.push(self.operand_to_reg(arg)?);
-        }
-
-        // Arguments beyond the register file go on the stack, pushed in reverse.
-        let arg_regs_of_abi = self.arg_regs();
-        let stack_args = args.len().saturating_sub(arg_regs_of_abi.len());
-        let stack_bytes = stack_args as u64 * 8;
-        if stack_args > 0 {
-            // Keep the stack 16-byte aligned at the call. The frame size is a
-            // multiple of 16, so only the pushed arguments need rounding.
-            let padding = if stack_bytes % 16 == 8 { 8 } else { 0 };
-            if padding > 0 {
-                out.push(Inst::Alu {
-                    op: AluOp::Sub,
-                    width: RegWidth::W64,
-                    src: MOperand::Imm(8),
-                    dst: MOperand::Reg(Reg::Phys(4)),
-                });
-            }
-            for (i, reg) in arg_regs.iter().enumerate().skip(arg_regs_of_abi.len()).rev() {
-                let _ = i;
-                out.push(Inst::Push(MOperand::Reg(*reg)));
-            }
-        }
-
-        // Move arguments into their ABI registers.
-        //
-        // The values are read from registers that are themselves ABI registers,
-        // so a naive sequence overwrites an argument that has not been moved yet
-        // (`%rcx` holding argument 2 is clobbered by argument 4's move). Parking
-        // every value on the stack first makes the shuffle order irrelevant, and
-        // costs one store and load per argument, which the two-address x86 move
-        // makes unavoidable anyway.
-        let count = arg_regs_of_abi.len().min(arg_regs.len());
-        if count > 0 {
-            let bytes = ((count as u64) * 8).div_ceil(16) * 16;
-            out.push(Inst::Alu {
-                op: AluOp::Sub,
-                width: RegWidth::W64,
-                src: MOperand::Imm(bytes as i64),
-                dst: MOperand::Reg(Reg::Phys(4)),
-            });
-            // Park at `rsp`-relative slots, which cannot overlap the frame.
-            for (i, reg) in arg_regs.iter().take(count).enumerate() {
-                out.push(Inst::Store {
-                    kind: MoveKind::Move(RegWidth::W64),
-                    src: MOperand::Reg(*reg),
-                    dst: Mem { base: Some(Reg::Phys(4)), offset: (i as i64) * 8, index: None, symbol: None },
-                });
-            }
-            for (i, arg_reg) in arg_regs_of_abi.iter().take(count).enumerate() {
-                out.push(Inst::Load {
-                    kind: MoveKind::Move(RegWidth::W64),
-                    src: Mem { base: Some(Reg::Phys(4)), offset: (i as i64) * 8, index: None, symbol: None },
-                    dst: MOperand::Reg(Reg::Phys(*arg_reg)),
-                });
-            }
-            out.push(Inst::Alu {
-                op: AluOp::Add,
-                width: RegWidth::W64,
-                src: MOperand::Imm(bytes as i64),
-                dst: MOperand::Reg(Reg::Phys(4)),
-            });
-        }
-
-        // Anything else is an indirect call through a value.
+        // Anything else is an indirect call through a value -- a `fn` pointer
+        // parameter, a capture-less closure, or a `dyn Trait` vtable slot. Load
+        // the code address into a register, then run exactly the same ABI
+        // planning a direct call uses. `operand_to_reg` folds away the extra
+        // dereference on a `*const fn` callee via `fn_ptr_place`, so the value
+        // loaded is the code address itself, not the first instruction byte.
         let reg = self.operand_to_reg(callee)?;
-        out.push(Inst::Call { target: MOperand::Reg(reg), variadic: false });
-
-        // Restore the stack after a call with stack arguments.
-        if stack_bytes > 0 {
-            let total = stack_bytes + if stack_bytes % 16 == 8 { 8 } else { 0 };
-            out.push(Inst::Alu {
-                op: AluOp::Add,
-                width: RegWidth::W64,
-                src: MOperand::Imm(total as i64),
-                dst: MOperand::Reg(Reg::Phys(4)),
-            });
-        }
-
-        // The result arrives in `rax`.
-        if let Some(dst) = destination {
-            let ty = self.place_ty(dst);
-            if self.is_aggregate(ty) {
-                let size = self.layouts.layout(ty).map_err(|e| format!("{e:?}"))?.size;
-                if size > 16 {
-                    return Err(format!("returning a {size}-byte aggregate by value is not supported yet"));
-                }
-            }
-            self.store_place_into(dst, MOperand::Reg(Reg::Phys(0)), out)?;
-        }
-
-        out.push(Inst::Jmp(self.block_labels[target.0 as usize]));
-        Ok(())
+        self.emit_call(CallTarget::Register(reg), args, destination, target, out)
     }
 
     /// Selects a direct call to the named function `symbol`.
     ///
-    /// This is the path used for every statically-known callee; separating it
-    /// from [`Self::call`] keeps the indirect case honest about what it does not
-    /// support.
+    /// This is the path used for every statically-known callee. All ABI planning
+    /// is shared with the indirect path in [`Self::emit_call`]; only the call
+    /// target differs.
     pub(crate) fn call_symbol(
         &mut self,
         symbol: &str,
+        args: &[Operand],
+        destination: Option<&Place>,
+        target: &BlockId,
+        out: &mut Vec<Inst>,
+    ) -> Result<(), String> {
+        self.emit_call(CallTarget::Symbol(symbol.to_string()), args, destination, target, out)
+    }
+
+    /// Emits a call with full ABI planning for either a direct symbol or an
+    /// indirect register target.
+    ///
+    /// The two forms differ only in the final `call` operand: a direct call names
+    /// a symbol, while an indirect call jumps through the register holding the
+    /// code address. Everything before and after -- sret classification, the
+    /// outgoing area, Win64 shadow space, the register shuffle, stack arguments
+    /// and result storage -- is identical and lives here once, so an indirect
+    /// `dyn Trait` dispatch is as correct as a direct call to a known function.
+    fn emit_call(
+        &mut self,
+        call_target: CallTarget,
         args: &[Operand],
         destination: Option<&Place>,
         target: &BlockId,
@@ -332,7 +272,16 @@ impl<'a, 't> Isel<'a, 't> {
         let stack_total = stack_base.div_ceil(16) * 16;
         let arg_regs_of_abi = self.arg_regs();
         let count = arg_regs_of_abi.len().min(arg_regs.len());
-        let park_bytes = if count > 0 { ((count as u64) * 8).div_ceil(16) * 16 } else { 0 };
+        // An indirect callee lives in a register, and that register may be one
+        // of the ABI argument registers. Park it alongside the arguments and
+        // restore it *after* the shuffle, otherwise argument three overwrites
+        // the code address in `%rdx` and the call jumps to garbage.
+        let callee_reg = match &call_target {
+            CallTarget::Register(reg) => Some(*reg),
+            CallTarget::Symbol(_) => None,
+        };
+        let park_slots = count + usize::from(callee_reg.is_some());
+        let park_bytes = if park_slots > 0 { ((park_slots as u64) * 8).div_ceil(16) * 16 } else { 0 };
         let area = park_bytes + stack_total;
         // Stack arguments occupy the bottom of the area, because the callee reads
         // them upward from `16(%rbp)`; the register parking area sits directly
@@ -353,6 +302,18 @@ impl<'a, 't> Isel<'a, 't> {
                 dst: Mem {
                     base: Some(Reg::Phys(4)),
                     offset: park_base as i64 + (i as i64) * 8,
+                    index: None,
+                    symbol: None,
+                },
+            });
+        }
+        if let Some(reg) = callee_reg {
+            out.push(Inst::Store {
+                kind: MoveKind::Move(RegWidth::W64),
+                src: MOperand::Reg(reg),
+                dst: Mem {
+                    base: Some(Reg::Phys(4)),
+                    offset: park_base as i64 + (count as i64) * 8,
                     index: None,
                     symbol: None,
                 },
@@ -426,15 +387,45 @@ impl<'a, 't> Isel<'a, 't> {
             });
         }
 
-        // A call target names a symbol, not a block label. Using a memory
-        // operand keeps the two namespaces separate in the instruction
-        // representation, so a symbol can never be confused with a label.
-        self.note_symbol(symbol);
-        // Every call out of the program may reach a C variadic function, and SysV
-        // requires `%al` to be zero for those. A non-variadic callee ignores the
-        // register, so setting it unconditionally costs one instruction and cannot
-        // be wrong. UMAY itself has no variadic functions.
-        out.push(Inst::Call { target: MOperand::Mem(Mem::symbol(symbol)), variadic: true });
+        // Restore the indirect callee into a register that is never an ABI
+        // argument register. Restoring it into its original register would
+        // clobber an argument on SysV (`%rdx` is both the callee slot and the
+        // third integer argument) and on Win64 (`%rcx`/`%rdx`/`%r8`/`%r9`).
+        let call_reg = callee_reg.map(|_| Reg::Phys(10));
+        if callee_reg.is_some() {
+            out.push(Inst::Load {
+                kind: MoveKind::Move(RegWidth::W64),
+                src: Mem {
+                    base: Some(Reg::Phys(4)),
+                    offset: park_base as i64 + (count as i64) * 8,
+                    index: None,
+                    symbol: None,
+                },
+                dst: MOperand::Reg(Reg::Phys(10)),
+            });
+        }
+
+        // A call target names a symbol for a direct call, or is the register
+        // holding the code address for an indirect one. A symbol uses a memory
+        // operand so it can never be confused with a block label.
+        match &call_target {
+            CallTarget::Symbol(symbol) => {
+                self.note_symbol(symbol);
+                // Every call out of the program may reach a C variadic function,
+                // and SysV requires `%al` to be zero for those. A non-variadic
+                // callee ignores the register, so setting it unconditionally
+                // costs one instruction and cannot be wrong. UMAY itself has no
+                // variadic functions.
+                out.push(Inst::Call {
+                    target: MOperand::Mem(Mem::symbol(symbol)),
+                    variadic: true,
+                });
+            }
+            CallTarget::Register(_) => {
+                let reg = call_reg.expect("an indirect call has a target register");
+                out.push(Inst::Call { target: MOperand::Reg(reg), variadic: false });
+            }
+        }
 
         if area > 0 {
             out.push(Inst::Alu {

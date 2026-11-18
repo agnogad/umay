@@ -344,12 +344,19 @@ impl<'a, 't> Isel<'a, 't> {
                     .map(|o| *o as i64)
                     .ok_or_else(|| format!("field {index} out of range"))
             }
+            // A `dyn Trait` value is the two-word fat pointer from ADR 0018:
+            // word 0 is the data pointer, word 1 the vtable pointer.
+            TyKind::DynTrait { .. } => match index {
+                0 => Ok(0),
+                1 => Ok(8),
+                _ => Err(format!("trait object field {index} out of range")),
+            },
             other => Err(format!("cannot take a field of {other:?}")),
         }
     }
 
     /// The type of a field within its parent type.
-    pub(crate) fn field_ty(&self, base_ty: TyId, index: u32) -> Result<TyId, String> {
+    pub(crate) fn field_ty(&mut self, base_ty: TyId, index: u32) -> Result<TyId, String> {
         match self.types().kind_owned(base_ty) {
             TyKind::Tuple(items) => items
                 .get(index as usize)
@@ -367,6 +374,10 @@ impl<'a, 't> Isel<'a, 't> {
                     .get(index as usize)
                     .map(|f| f.ty)
                     .ok_or_else(|| format!("field {index} out of range"))
+            }
+            TyKind::DynTrait { .. } if index <= 1 => {
+                let byte = self.types().cached_u8();
+                Ok(self.layouts.types_mut().raw_ptr(byte))
             }
             other => Err(format!("cannot take a field of {other:?}")),
         }
@@ -549,6 +560,18 @@ impl<'a, 't> Isel<'a, 't> {
                 });
                 Ok(dst)
             }
+            Operand::Constant(Constant::VTable(id)) => {
+                // A vtable used as a value is the address of its static table.
+                // Storing it in a fat pointer must not read the table's first
+                // word; `lea` computes the address directly.
+                let name = self.vtable_symbol(*id);
+                let dst = self.vreg();
+                self.emit(Inst::Lea {
+                    src: Mem::symbol(&name),
+                    dst: MOperand::Reg(dst),
+                });
+                Ok(dst)
+            }
             Operand::Constant(c) => {
                 let (value, ty) = constant_value(c)?;
                 let dst = self.vreg();
@@ -567,9 +590,15 @@ impl<'a, 't> Isel<'a, 't> {
     /// immediate, or directly a memory reference.
     pub(crate) fn operand(&mut self, op: &Operand) -> Result<MOperand, String> {
         match op {
-            Operand::Constant(Constant::Str(_)) => {
-                // A string is an address, so it needs a register even when an
-                // immediate would be accepted.
+            Operand::Constant(Constant::Str(_))
+            | Operand::Constant(Constant::Fn(_))
+            | Operand::Constant(Constant::VTable(_)) => {
+                // A string, a function or a vtable is an address, not an
+                // integer, so it needs a register even when an immediate would
+                // be accepted. A capture-less closure lowers to `place = const
+                // fnN`; without this arm that assignment tried to read a
+                // function as a number. A vtable pointer stored in a struct
+                // field is the same case.
                 Ok(MOperand::Reg(self.operand_to_reg(op)?))
             }
             Operand::Constant(c) => {
@@ -643,6 +672,15 @@ impl<'a, 't> Isel<'a, 't> {
     /// The assembly label of a string literal in the program's string table.
     pub(crate) fn str_symbol(&mut self, id: StringId) -> String {
         let name = format!(".Lstr_{}", id.0);
+        if !self.symbols.contains(&name) {
+            self.symbols.push(name.clone());
+        }
+        name
+    }
+
+    /// The assembly label of a static vtable in the program's vtable table.
+    pub(crate) fn vtable_symbol(&mut self, id: VTableId) -> String {
+        let name = format!(".Lvtable_{}", id.0);
         if !self.symbols.contains(&name) {
             self.symbols.push(name.clone());
         }

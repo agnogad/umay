@@ -73,6 +73,14 @@ const PORTABLE_PRELUDE: &str = concat!(
     "\n",
     include_str!("../../stdlib/server_config.um"),
     "\n",
+    // The call traits live before the thread layer: a program's bounds name
+    // them, and the compiler synthesizes `impl`s against them for closures.
+    include_str!("../../stdlib/fn.um"),
+    "\n",
+    // The async core types (ADR 0019) sit beside the call traits; they are plain
+    // declarations with no system dependency, same as everything above.
+    include_str!("../../stdlib/future.um"),
+    "\n",
     // The thread layer is last because it is the one that declares the markers
     // the others' `impl`s are written against.
     include_str!("../../stdlib/thread.um"),
@@ -127,7 +135,7 @@ pub fn with_prelude(
     let (items, diagnostics) = parse_prelude(map, target);
     let mut all = items;
     all.extend(program.items);
-    (ast::Program { items: all, span: program.span }, diagnostics)
+    (ast::Program { items: all, features: program.features, span: program.span }, diagnostics)
 }
 
 /// The file id the prelude occupies, for diagnostics that must not be reported

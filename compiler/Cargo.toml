@@ -10,6 +10,14 @@ description = "The UMAY compiler (umay) - reference frontend and custom backend"
 name = "umay"
 path = "src/main.rs"
 
+[features]
+# Reserved v2 gate. No code is gated by this in the foundation slice; the flag
+# exists so `cargo test --features proc_macro` is a valid command.
+proc_macro = []
+# Opt-in compiler enforcement of crate-level `#![feature(...)]` gates. Default
+# builds do no gate checking, so every v1 source stays valid by default.
+v2-gates = []
+
 [dependencies]
 
 [dev-dependencies]

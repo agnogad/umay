@@ -13,7 +13,7 @@
 //! * Generic parameters are interned as `TyKind::Param { name }` during
 //!   Phase 2 (no monomorphisation yet — that is a codegen concern).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::source::Span;
@@ -26,6 +26,16 @@ impl fmt::Debug for TyId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Ty#{}", self.0)
     }
+}
+
+/// One bound of a `dyn Trait<Args, Assoc = Ty> + …` object. Generic arguments
+/// and associated-type bindings are kept for dispatch and display instead of
+/// being collapsed to a bare trait name.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct TraitBound {
+    pub name: String,
+    pub args: Vec<TyId>,
+    pub assoc: Vec<(String, TyId)>,
 }
 
 /// The structure of an interned type.
@@ -76,6 +86,10 @@ pub enum TyKind {
     Adt { def: DefId, args: Vec<TyId> },
     /// Function pointer `fn(A, B) -> C`.
     FnPtr { params: Vec<TyId>, ret: TyId },
+    /// A trait object `dyn Trait<Args, Assoc = Ty> + ...` (ADR 0018). Represented
+    /// as a fat pointer (data pointer + vtable pointer), which makes it `Copy`
+    /// and two words wide.
+    DynTrait { bounds: Vec<TraitBound> },
 
     /// A generic parameter, named (`T`). Equal names in the same scope are the
     /// same parameter for Phase 2 purposes.
@@ -130,6 +144,13 @@ pub struct TyCtxt {
     /// Every `T: Trait` bound seen in a declaration. A bound is not a type, so
     /// it lives beside the type table rather than inside it; `.q`
     pub param_bounds: Vec<ParamBound>,
+    /// DefIds of ADTs marked `Copy` by a `#[derive(Copy)]`. Sema registers these
+    /// while collecting items; this set is the bridge from the HIR's
+    /// `StructInfo.is_copy` to `is_copy`, which has no access to the HIR.
+    /// ponytail: global set, no generic-field validation — a derived `Copy`
+    /// struct is copyable even if a field is not; add field checks if that ever
+    /// needs to be sound for generic instantiations.
+    copy_defs: HashSet<DefId>,
 }
 
 impl Default for TyCtxt {
@@ -141,7 +162,7 @@ impl Default for TyCtxt {
 impl TyCtxt {
     /// Creates an interner pre-populated with every primitive type.
     pub fn new() -> Self {
-        let cx = TyCtxt { kinds: Vec::new(), interned: HashMap::new(), next_var: 0, param_bounds: Vec::new() };
+        let cx = TyCtxt { kinds: Vec::new(), interned: HashMap::new(), next_var: 0, param_bounds: Vec::new(), copy_defs: HashSet::new() };
         // The primitives are still interned normally; this just makes the
         // common handles cheap to obtain via the `prim` helpers.
         cx
@@ -414,12 +435,32 @@ impl TyCtxt {
                 let ret = self.substitute(ret, subst);
                 self.fn_ptr(params, ret)
             }
+            TyKind::DynTrait { bounds } => {
+                let bounds: Vec<TraitBound> = bounds
+                    .into_iter()
+                    .map(|b| TraitBound {
+                        name: b.name,
+                        args: b.args.iter().map(|t| self.substitute(*t, subst)).collect(),
+                        assoc: b
+                            .assoc
+                            .into_iter()
+                            .map(|(n, t)| (n, self.substitute(t, subst)))
+                            .collect(),
+                    })
+                    .collect();
+                self.dyn_trait(bounds)
+            }
             _ => ty,
         }
     }
 
     pub fn fn_ptr(&mut self, params: Vec<TyId>, ret: TyId) -> TyId {
         self.intern(TyKind::FnPtr { params, ret })
+    }
+
+    /// Interns a `dyn Trait` type from its resolved bounds (ADR 0018).
+    pub fn dyn_trait(&mut self, bounds: Vec<TraitBound>) -> TyId {
+        self.intern(TyKind::DynTrait { bounds })
     }
 
     pub fn param(&mut self, name: impl Into<String>) -> TyId {
@@ -495,6 +536,16 @@ impl TyCtxt {
         matches!(self.kind(ty), TyKind::F32 | TyKind::F64)
     }
 
+    /// Registers an ADT as `Copy` (called by sema for `#[derive(Copy)]`).
+    pub fn mark_copy(&mut self, def: DefId) {
+        self.copy_defs.insert(def);
+    }
+
+    /// True when `def` was declared `Copy` by a derive.
+    pub fn is_copy_def(&self, def: DefId) -> bool {
+        self.copy_defs.contains(&def)
+    }
+
     /// True for types that are implicitly copied instead of moved.
     pub fn is_copy(&self, ty: TyId) -> bool {
         match self.kind(ty) {
@@ -520,14 +571,19 @@ impl TyCtxt {
             | TyKind::RawPtr(_)
             | TyKind::RawPtrMut(_)
             | TyKind::FnPtr { .. }
+            // A fat pointer (data + vtable) is two words and copies bitwise.
+            | TyKind::DynTrait { .. }
             | TyKind::Error
             | TyKind::IntVar(_)
             | TyKind::FloatVar(_) => true,
             TyKind::Tuple(elems) => elems.iter().all(|&e| self.is_copy(e)),
             // Arrays of Copy types are Copy; array lengths are small in practice.
             TyKind::Array { elem, .. } => self.is_copy(*elem),
-            // Structs and enums are Copy only when explicitly derived; Phase 2
-            // conservatively treats them as move-only until derives are checked.
+            // A user-defined type is Copy only when it derived `Copy`; sema
+            // records the derive as a DefId in `copy_defs`. Without a derive it
+            // stays move-only.
+            TyKind::Adt { def, .. } => self.copy_defs.contains(def),
+            // Enums, strings and everything else stay move-only.
             _ => false,
         }
     }
@@ -605,6 +661,28 @@ impl TyCtxt {
             TyKind::FnPtr { params, ret } => {
                 let ps: Vec<String> = params.iter().map(|&p| self.display(p)).collect();
                 format!("fn({}) -> {}", ps.join(", "), self.display(*ret))
+            }
+            TyKind::DynTrait { bounds } => {
+                let listed: Vec<String> = bounds
+                    .iter()
+                    .map(|b| {
+                        let mut out = b.name.clone();
+                        if !b.args.is_empty() || !b.assoc.is_empty() {
+                            let mut parts: Vec<String> =
+                                b.args.iter().map(|&t| self.display(t)).collect();
+                            parts.extend(
+                                b.assoc
+                                    .iter()
+                                    .map(|(n, t)| format!("{} = {}", n, self.display(*t))),
+                            );
+                            out.push('<');
+                            out.push_str(&parts.join(", "));
+                            out.push('>');
+                        }
+                        out
+                    })
+                    .collect();
+                format!("dyn {}", listed.join(" + "))
             }
             TyKind::Param { name } => name.clone(),
             TyKind::IntVar(_) => "{integer}".into(),
@@ -691,6 +769,54 @@ mod tests {
         assert_eq!(cx.int_bounds(u8t), Some((0, 255)));
         let i8t = cx.primitive("i8").unwrap();
         assert_eq!(cx.int_bounds(i8t), Some((-128, 127)));
+    }
+
+    fn bound(name: &str) -> TraitBound {
+        TraitBound { name: name.into(), args: vec![], assoc: vec![] }
+    }
+
+    #[test]
+    fn dyn_trait_is_a_copyable_fat_pointer() {
+        let mut cx = TyCtxt::new();
+        let a = cx.dyn_trait(vec![bound("Iterator")]);
+        let b = cx.dyn_trait(vec![bound("Iterator")]);
+        assert_eq!(a, b, "interning is structural");
+        assert!(cx.is_copy(a), "a fat pointer copies bitwise");
+        assert_eq!(cx.display(a), "dyn Iterator");
+        let multi = cx.dyn_trait(vec![bound("A"), bound("B")]);
+        assert_eq!(cx.display(multi), "dyn A + B");
+        let subst = HashMap::from([("T".to_string(), cx.i32_ty())]);
+        assert_eq!(cx.substitute(a, &subst), a, "trait names are not parameters");
+    }
+
+    #[test]
+    fn dyn_trait_keeps_args_and_assoc_bindings() {
+        let mut cx = TyCtxt::new();
+        let i64t = cx.primitive("i64").unwrap();
+        let u8t = cx.u8_ty();
+        let b = TraitBound {
+            name: "Iterator".into(),
+            args: vec![i64t],
+            assoc: vec![("Item".into(), u8t)],
+        };
+        let ty = cx.dyn_trait(vec![b.clone()]);
+        assert_eq!(cx.display(ty), "dyn Iterator<i64, Item = u8>");
+
+        let param = cx.param("T");
+        let b_param = TraitBound {
+            name: "Iterator".into(),
+            args: vec![param],
+            assoc: vec![("Item".into(), param)],
+        };
+        let generic = cx.dyn_trait(vec![b_param]);
+        let subst = HashMap::from([("T".to_string(), i64t)]);
+        let substituted = cx.substitute(generic, &subst);
+        let expected = cx.dyn_trait(vec![TraitBound {
+            name: "Iterator".into(),
+            args: vec![i64t],
+            assoc: vec![("Item".into(), i64t)],
+        }]);
+        assert_eq!(cx.display(substituted), cx.display(expected));
     }
 
     #[test]
